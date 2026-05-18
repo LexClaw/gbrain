@@ -29,7 +29,7 @@ import {
   loadCacheConfig,
 } from './query-cache.ts';
 
-const RRF_K = 60;
+export const RRF_K = 60;
 const COMPILED_TRUTH_BOOST = 2.0;
 /**
  * Backlink boost coefficient. Score is multiplied by (1 + BACKLINK_BOOST_COEF * log(1 + count)).
