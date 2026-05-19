@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns:media="http://search.yahoo.com/mrss/"
+      xmlns="http://www.w3.org/2005/Atom">
+  <yt:channelId>UC0000FIXTUREFINNaaaaaa</yt:channelId>
+  <title>Alex Finn</title>
+  <entry>
+    <yt:videoId>finn001xxxx</yt:videoId>
+    <yt:channelId>UC0000FIXTUREFINNaaaaaa</yt:channelId>
+    <title>I built an AI workflow in 1 hour</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=finn001xxxx"/>
+    <published>2026-05-13T15:00:00+00:00</published>
+    <media:group>
+      <media:description>Agentic loop with Claude + n8n.</media:description>
+    </media:group>
+  </entry>
+</feed>

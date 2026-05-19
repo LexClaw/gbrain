@@ -150,6 +150,9 @@ the citation is `[gstack:plans/foo]`. That's the whole rule.
 - Blocking the response to do enrichment
 - Overwriting user's direct statements with lower-authority sources
 - Creating brain pages for non-notable entities
+- **Recommending or running "filesystem-mode" maintenance skills (`citation-fixer`, `frontmatter-guard`, `gbrain lint <dir>`) without first checking the active brain engine.** These skills walk `.md` files on disk and only work when the engine is `pglite` against a brain dir. If the engine is `postgres` (check with `gbrain config show`), they will either silently scan the wrong tree (e.g., the gbrain repo test fixtures, which have ~488 dummy pages) or report nothing useful. Verify engine first: `gbrain config show | grep -E '^  engine:'`. If `postgres`, prefer DB-aware tools: `gbrain extract links/timeline --source db`, `gbrain check-backlinks check`, `gbrain orphans`, `gbrain doctor`. See `references/engine-mode-capability-check.md` for the full check.
+- **Quoting a count from `gbrain list` or `gbrain list | wc -l` without explicit `--limit 100000` or a Postgres cross-check.** The CLI defaults to 50 results with NO truncation indicator. The agent reads it, treats it as complete, and reports a wrong number. Lex-2026-05-14: reported "24 people" when actual was 71 because the default-50 cutoff hid 47 pages. TJ caught it from gut. For any "how many X" question: `gbrain list --type <type> --limit 100000 | wc -l` OR `psql postgres://localhost:5432/gbrain -c "SELECT count(*) FROM pages WHERE type='<type>';"`. See `references/cli-default-limits.md` for the failure transcript and the workflow rule.
+- **Writing a slug with uppercase letters into `gbrain put`.** `gbrain put` runs an internal `addTag` step on every write that re-reads the page by exact slug. If the slug contains ANY uppercase character, the re-read fails with: `addTag failed: page "<slug>" not found`. The put silently writes nothing useful. Symptom in cron output: every page in the batch fails with that exact string. This was the root cause of a 30-video YouTube ingest batch that produced 0 brain pages on 2026-05-15. Fix: lowercase every component of the slug at construction time, especially when interpolating user-supplied IDs (YouTube `video_id` is case-sensitive but not slug-safe). Repro: `gbrain put sources/test/2026-05-15-AbcDef-foo --content "..."` fails; `gbrain put sources/test/2026-05-15-abcdef-foo --content "..."` succeeds. The canonical case-preserving identifier still belongs in frontmatter (`video_id: AbcDef`) and the URL field, never in the slug. See `references/gbrain-put-slug-rules.md` for the repro transcript and the canonical slug-builder pattern.
 
 ## Tools Used
 
@@ -161,3 +164,10 @@ the citation is `[gstack:plans/foo]`. That's the whole rule.
 - `add_timeline_entry` — record events
 - `get_backlinks` — check who references an entity
 - `sync_brain` — sync changes to the index
+
+## See Also
+
+- `references/engine-mode-capability-check.md` — verify pglite-vs-postgres before running filesystem-mode maintenance tools.
+- `references/namespace-fallback-discipline.md` — don't stop at a 404; fall through `people/`, `people/wiki/`, `search`, `query` before declaring no-page.
+- `references/cli-default-limits.md` — `gbrain list` defaults to 50 with no truncation indicator; never quote a count without `--limit 100000` or a Postgres cross-check.
+- `references/synthesis-page-writes.md` — TJ-TRAINING / MEMORY-curated / decisions / learnings write semantics. Covers the migrated-stub trap, get-then-put append pattern, yaml-fence strip, post-write verification. Read whenever you need to update a `lex-workspace/*` synthesis page.

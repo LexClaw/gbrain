@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns:media="http://search.yahoo.com/mrss/"
+      xmlns="http://www.w3.org/2005/Atom">
+  <link rel="self" href="http://www.youtube.com/feeds/videos.xml?channel_id=UC0000FIXTUREHORMOZIaa"/>
+  <id>yt:channel:0000FIXTURE_HORMOZI</id>
+  <yt:channelId>UC0000FIXTUREHORMOZIaa</yt:channelId>
+  <title>Alex Hormozi</title>
+  <author>
+    <name>Alex Hormozi</name>
+    <uri>http://www.youtube.com/channel/UC0000FIXTUREHORMOZIaa</uri>
+  </author>
+  <published>2018-01-01T00:00:00+00:00</published>
+  <entry>
+    <id>yt:video:vid111aaaaaa</id>
+    <yt:videoId>vid111aaaaaa</yt:videoId>
+    <yt:channelId>UC0000FIXTUREHORMOZIaa</yt:channelId>
+    <title>How to value an acquisition target</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=vid111aaaaaa"/>
+    <author><name>Alex Hormozi</name></author>
+    <published>2026-05-14T17:00:00+00:00</published>
+    <updated>2026-05-14T17:00:00+00:00</updated>
+    <media:group>
+      <media:title>How to value an acquisition target</media:title>
+      <media:description>Talk through SDE, comps, deal structure.</media:description>
+    </media:group>
+  </entry>
+  <entry>
+    <id>yt:video:vid222bbbbbb</id>
+    <yt:videoId>vid222bbbbbb</yt:videoId>
+    <yt:channelId>UC0000FIXTUREHORMOZIaa</yt:channelId>
+    <title>Leverage in small businesses</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=vid222bbbbbb"/>
+    <author><name>Alex Hormozi</name></author>
+    <published>2026-05-12T12:00:00+00:00</published>
+    <updated>2026-05-12T12:00:00+00:00</updated>
+    <media:group>
+      <media:title>Leverage in small businesses</media:title>
+      <media:description>Operator leverage, capital leverage, code leverage.</media:description>
+    </media:group>
+  </entry>
+  <entry>
+    <id>yt:video:vid333ccccccc</id>
+    <yt:videoId>vid333cccccc</yt:videoId>
+    <yt:channelId>UC0000FIXTUREHORMOZIaa</yt:channelId>
+    <title>Upcoming AMA</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=vid333cccccc"/>
+    <author><name>Alex Hormozi</name></author>
+    <published>2026-05-20T18:00:00+00:00</published>
+    <updated>2026-05-20T18:00:00+00:00</updated>
+    <media:group>
+      <media:title>Upcoming AMA</media:title>
+      <media:description>Live AMA, scheduled.</media:description>
+      <media:status state="upcoming">Scheduled</media:status>
+    </media:group>
+  </entry>
+</feed>
