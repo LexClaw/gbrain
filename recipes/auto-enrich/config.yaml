@@ -1,0 +1,32 @@
+# Auto-Enrichment config (Phase 1 sensor only)
+sensor:
+  max_candidates_per_run: 5
+  candidate_pool_per_type: 50
+  page_types:
+    - concept
+    - entity
+    - person
+    - company
+  target_body_length: 1500
+  target_inbound_links: 3
+  max_enrichment_age_days: 90
+  ranking_weights:
+    body: 0.4
+    links: 0.3
+    age: 0.3
+
+# Phase 2 + 3 knobs (kept here so the file is the single tunables surface)
+research:
+  cal_subagent_timeout_seconds: 300
+  max_parallel_research: 2
+  cal_model: claude-haiku-4-5
+
+quality_gate:
+  require_citations: true
+  reject_on_destructive_merge: true
+  lint_synthesized_draft: true
+
+runtime:
+  heartbeat_path: ~/.gbrain/integrations/auto-enrich/heartbeat.jsonl
+  metrics_path: ~/.gbrain/integrations/auto-enrich/metrics.jsonl
+  escalations_path: ~/.gbrain/integrations/auto-enrich/escalations.jsonl
