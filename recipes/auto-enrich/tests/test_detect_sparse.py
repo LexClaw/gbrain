@@ -306,3 +306,109 @@ def test_main_writes_output_file(tmp_path, monkeypatch):
     entry = json.loads(line)
     assert entry["event"] == "sensor_run"
     assert entry["status"] == "ok"
+
+
+
+# ---- Slug denylist tests (added 2026-05-22, post live-smoke surfacing of
+# business/raw/archive-* candidates that the sensor was returning despite the
+# page_types filter being correctly set to [concept, entity, person, company]).
+# Root cause: real brain data has raw/archive pages tagged as type=concept.
+# Fix: second filter layer on slug prefix in addition to page_types.
+
+def test_slug_denylist_excludes_business_raw_archive():
+    """The exact slug that broke the live smoke must be filtered out."""
+    denylist = detect_sparse.DEFAULT_SLUG_DENYLIST_PREFIXES
+    assert detect_sparse._slug_is_denylisted(
+        "business/raw/archive-2026-04-03-06-34-09783c73", denylist
+    )
+
+
+def test_slug_denylist_excludes_sources_prefix():
+    denylist = detect_sparse.DEFAULT_SLUG_DENYLIST_PREFIXES
+    assert detect_sparse._slug_is_denylisted(
+        "sources/youtube/alexhormozi/2026-05-22-zspgi6cmbqc-foo", denylist
+    )
+
+
+def test_slug_denylist_excludes_mid_path_archive_marker():
+    denylist = detect_sparse.DEFAULT_SLUG_DENYLIST_PREFIXES
+    assert detect_sparse._slug_is_denylisted("domain/x/archive/foo", denylist)
+    assert detect_sparse._slug_is_denylisted("domain/y/raw/bar", denylist)
+
+
+def test_slug_denylist_excludes_people_zero_placeholder():
+    denylist = detect_sparse.DEFAULT_SLUG_DENYLIST_PREFIXES
+    assert detect_sparse._slug_is_denylisted("people/0", denylist)
+
+
+def test_slug_denylist_allows_real_entity_slugs():
+    """Legitimate person/company/concept slugs must NOT be filtered."""
+    denylist = detect_sparse.DEFAULT_SLUG_DENYLIST_PREFIXES
+    assert not detect_sparse._slug_is_denylisted("people/tom-blomfield", denylist)
+    assert not detect_sparse._slug_is_denylisted("companies/y-combinator", denylist)
+    assert not detect_sparse._slug_is_denylisted(
+        "domain/fintech/entities/ian-de-bode", denylist
+    )
+    assert not detect_sparse._slug_is_denylisted("ai/concepts/transformers", denylist)
+
+
+def test_detect_filters_denylisted_slugs_before_inspection():
+    """End-to-end: detect() should not even inspect a denylisted slug."""
+    # Two rows: one denylisted (business/raw/archive-x), one allowed (people/real)
+    fake_tsv = (
+        "business/raw/archive-2026-04-03-06-34-x\tconcept\t2026-04-03\tArchive\n"
+        "people/real-person\tperson\t2026-05-22\tReal Person\n"
+    )
+    inspect_calls: list[str] = []
+
+    def fake_run_gbrain(args):
+        # First call is `list --type ...`, return our fake TSV regardless of which type
+        if args and args[0] == "list":
+            return fake_tsv
+        # Subsequent get/backlinks calls: trivially small body, 0 links
+        if args and args[0] == "get":
+            return "---\ntype: person\n---\n\n# Title\n"
+        if args and args[0] == "backlinks":
+            return ""
+        return ""
+
+    def fake_inspect(slug, page_type, cfg):
+        inspect_calls.append(slug)
+        return {
+            "slug": slug,
+            "page_type": page_type,
+            "body_length": 200,
+            "inbound_link_count": 0,
+            "last_enriched": None,
+        }
+
+    cfg = detect_sparse.SensorConfig()
+    cfg.candidate_pool_per_type = 2
+    with patch.object(detect_sparse, "run_gbrain", side_effect=fake_run_gbrain), \
+         patch.object(detect_sparse, "_inspect_candidate", side_effect=fake_inspect):
+        results = detect_sparse.detect(cfg=cfg, limit=10)
+
+    # The denylisted slug must NOT have been inspected.
+    assert "business/raw/archive-2026-04-03-06-34-x" not in inspect_calls
+    # The legitimate slug should have been inspected.
+    assert "people/real-person" in inspect_calls
+    # And it should appear in the results.
+    result_slugs = [r["slug"] for r in results]
+    assert "business/raw/archive-2026-04-03-06-34-x" not in result_slugs
+    assert "people/real-person" in result_slugs
+
+
+def test_sensor_config_yaml_loads_custom_denylist(tmp_path):
+    """from_yaml respects an operator-provided slug_denylist_prefixes."""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "sensor:\n"
+        "  slug_denylist_prefixes:\n"
+        "    - test/raw/\n"
+        "    - my-archive/\n"
+    )
+    cfg = detect_sparse.SensorConfig.from_yaml(cfg_path)
+    assert "test/raw/" in cfg.slug_denylist_prefixes
+    assert "my-archive/" in cfg.slug_denylist_prefixes
+    # Standard defaults NOT auto-merged when operator provides explicit list
+    assert "business/raw/" not in cfg.slug_denylist_prefixes

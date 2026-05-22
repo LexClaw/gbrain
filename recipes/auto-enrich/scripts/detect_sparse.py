@@ -45,6 +45,37 @@ from auto_enrich_lib import (  # noqa: E402
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
 
+# Slug prefixes excluded from enrichment regardless of page_type. These are
+# raw imports, source materials, or placeholder pages that the brain stores
+# with concept/entity types but are NOT enrichable targets. The auto-enrich
+# pipeline is for synthesizing entity pages (person/company/concept) from
+# external research, not for refining session archives or YouTube transcripts.
+#
+# This denylist is the second filter layer on top of page_types. Two layers
+# are necessary because real brain data has type-mislabeling: e.g.
+# `business/raw/archive-*` slugs carry type=concept but are clearly raw
+# imports. The type filter alone cannot catch this; the slug prefix can.
+DEFAULT_SLUG_DENYLIST_PREFIXES: tuple[str, ...] = (
+    "business/raw/",
+    "sources/",
+    "archive/",
+    "raw/",
+    "_archive/",
+    "people/0",  # known placeholder/degenerate slug
+)
+
+
+def _slug_is_denylisted(slug: str, denylist: tuple[str, ...]) -> bool:
+    """Return True if slug starts with any denylist prefix or contains /archive/ or /raw/ mid-path."""
+    for prefix in denylist:
+        if slug.startswith(prefix):
+            return True
+    # Also catch mid-path archive/raw markers (e.g. 'domain/x/archive/foo')
+    if "/archive/" in slug or "/raw/" in slug:
+        return True
+    return False
+
+
 @dataclass
 class SensorConfig:
     page_types: list[str] = field(
@@ -58,6 +89,9 @@ class SensorConfig:
     w_links: float = 0.3
     w_age: float = 0.3
     max_candidates_per_run: int = 5
+    slug_denylist_prefixes: tuple[str, ...] = field(
+        default_factory=lambda: DEFAULT_SLUG_DENYLIST_PREFIXES
+    )
 
     @classmethod
     def from_yaml(cls, path: Path) -> "SensorConfig":
@@ -67,6 +101,12 @@ class SensorConfig:
             data = yaml.safe_load(fh) or {}
         sensor = (data.get("sensor") or {}) if isinstance(data, dict) else {}
         weights = sensor.get("ranking_weights") or {}
+        denylist_raw = sensor.get("slug_denylist_prefixes")
+        denylist = (
+            tuple(str(p) for p in denylist_raw)
+            if isinstance(denylist_raw, list)
+            else DEFAULT_SLUG_DENYLIST_PREFIXES
+        )
         return cls(
             page_types=list(sensor.get("page_types") or cls().page_types),
             candidate_pool_per_type=int(sensor.get("candidate_pool_per_type", 50)),
@@ -77,6 +117,7 @@ class SensorConfig:
             w_links=float(weights.get("links", 0.3)),
             w_age=float(weights.get("age", 0.3)),
             max_candidates_per_run=int(sensor.get("max_candidates_per_run", 5)),
+            slug_denylist_prefixes=denylist,
         )
 
 
@@ -226,6 +267,8 @@ def detect(*, cfg: SensorConfig, limit: int) -> list[dict[str, Any]]:
             if slug in seen:
                 continue
             seen.add(slug)
+            if _slug_is_denylisted(slug, cfg.slug_denylist_prefixes):
+                continue
             entry = _inspect_candidate(slug, row.get("type", page_type), cfg)
             if entry is not None:
                 raw.append(entry)

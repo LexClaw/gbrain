@@ -7,6 +7,16 @@ sensor:
     - entity
     - person
     - company
+  # Slug prefixes excluded from enrichment regardless of page_type.
+  # These are raw imports, source materials, or placeholder pages.
+  # See detect_sparse.DEFAULT_SLUG_DENYLIST_PREFIXES for rationale.
+  slug_denylist_prefixes:
+    - business/raw/
+    - sources/
+    - archive/
+    - raw/
+    - _archive/
+    - people/0
   target_body_length: 1500
   target_inbound_links: 3
   max_enrichment_age_days: 90
