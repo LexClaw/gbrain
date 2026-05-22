@@ -1,0 +1,28 @@
+{
+  "target_slug": "people/tom-blomfield",
+  "researched_at": "2026-05-22T03:14:00Z",
+  "researcher": "cal-subagent",
+  "queries_run": [
+    {"query": "Tom Blomfield investment thesis", "source": "web", "result_count": 5}
+  ],
+  "claims": [
+    {
+      "text": "Blomfield has publicly advocated for radical product polish in consumer fintech.",
+      "citation": {
+        "url": "https://blog.ycombinator.com/tom-blomfield-thesis",
+        "fetched_at": "2026-05-22T03:14:05Z",
+        "quote": "The bar for consumer fintech has moved from features to polish."
+      },
+      "section_hint": "## Public Thesis"
+    }
+  ],
+  "structured_facts": [],
+  "suggested_links": [],
+  "narrative_additions": [
+    {
+      "section": "## Background",
+      "text": "Tom Blomfield, generally considered one of the most accomplished consumer fintech founders of his generation, has navigated a career that spans the early UK payments boom, the rise of digital-only banking, and the recent transition into venture capital, with multiple commentators publicly describing him as a once-in-a-decade operator whose taste for product detail set the bar for an entire cohort of European founders.",
+      "citation_indexes": [0]
+    }
+  ]
+}

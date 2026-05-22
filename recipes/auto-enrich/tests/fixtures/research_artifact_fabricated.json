@@ -1,0 +1,31 @@
+{
+  "target_slug": "people/tom-blomfield",
+  "researched_at": "2026-05-22T03:14:00Z",
+  "researcher": "cal-subagent",
+  "queries_run": [
+    {"query": "Tom Blomfield personal blog", "source": "web", "result_count": 2}
+  ],
+  "claims": [
+    {
+      "text": "Tom Blomfield is a Group Partner at Y Combinator since 2021.",
+      "citation": {
+        "url": "https://www.ycombinator.com/people/tom-blomfield",
+        "fetched_at": "2026-05-22T03:14:05Z",
+        "quote": "Tom joined YC as a Group Partner in 2021."
+      },
+      "section_hint": "## Role"
+    },
+    {
+      "text": "Tom Blomfield privately believes consumer fintech is dead.",
+      "citation": {
+        "url": "",
+        "fetched_at": "2026-05-22T03:14:06Z",
+        "quote": ""
+      },
+      "section_hint": "## Public Thesis"
+    }
+  ],
+  "structured_facts": [],
+  "suggested_links": [],
+  "narrative_additions": []
+}

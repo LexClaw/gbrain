@@ -1,0 +1,55 @@
+{
+  "target_slug": "people/tom-blomfield",
+  "researched_at": "2026-05-22T03:14:00Z",
+  "researcher": "cal-subagent",
+  "queries_run": [
+    {"query": "Tom Blomfield Y Combinator partner", "source": "web", "result_count": 8},
+    {"query": "@t_blom YC", "source": "x", "result_count": 3},
+    {"query": "Tom Blomfield Monzo founder", "source": "news", "result_count": 12}
+  ],
+  "claims": [
+    {
+      "text": "Tom Blomfield is a Group Partner at Y Combinator since 2021.",
+      "citation": {
+        "url": "https://www.ycombinator.com/people/tom-blomfield",
+        "fetched_at": "2026-05-22T03:14:05Z",
+        "quote": "Tom joined YC as a Group Partner in 2021."
+      },
+      "section_hint": "## Role"
+    },
+    {
+      "text": "Tom Blomfield was a co-founder and CEO of Monzo Bank.",
+      "citation": {
+        "url": "https://en.wikipedia.org/wiki/Tom_Blomfield",
+        "fetched_at": "2026-05-22T03:14:08Z",
+        "quote": "Blomfield co-founded Monzo Bank in 2015 and served as its CEO."
+      },
+      "section_hint": "## Background"
+    },
+    {
+      "text": "Before Monzo he co-founded GoCardless, a direct debit payments processor.",
+      "citation": {
+        "url": "https://en.wikipedia.org/wiki/Tom_Blomfield",
+        "fetched_at": "2026-05-22T03:14:08Z",
+        "quote": "He co-founded GoCardless in 2011."
+      },
+      "section_hint": "## Background"
+    }
+  ],
+  "structured_facts": [
+    {"key": "role", "value": "Group Partner", "org": "y-combinator", "since": "2021"},
+    {"key": "prior_role", "value": "CEO", "org": "monzo-bank", "until": "2021"}
+  ],
+  "suggested_links": [
+    {"type": "partner_at", "target": "companies/y-combinator"},
+    {"type": "founded", "target": "companies/monzo-bank"},
+    {"type": "founded", "target": "companies/gocardless"}
+  ],
+  "narrative_additions": [
+    {
+      "section": "## Role",
+      "text": "Joined Y Combinator as a Group Partner in 2021 after exiting Monzo, where he spent six years as founding CEO.",
+      "citation_indexes": [0, 1]
+    }
+  ]
+}
