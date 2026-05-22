@@ -239,6 +239,7 @@ def _issue(
     detail: str,
     *,
     claim_index: int | None = None,
+    tool_used: str | None = None,
 ) -> dict[str, Any]:
     """Build a quality-gate issue dict.
 
@@ -248,10 +249,16 @@ def _issue(
     Non-claim issues (lint failures, fetch stats, fabricated commands) omit
     it. The human-readable ``detail`` string remains the surface for logs
     and humans; it is no longer parsed as a structured field.
+
+    ``tool_used`` is pure telemetry for the structured run logger (which
+    fetcher path served the claim's source URL: ``xurl``, ``gstack_browse``,
+    ``http``, or ``none``). It never participates in gate decisions.
     """
     issue: dict[str, Any] = {"rule": rule, "severity": severity, "detail": detail}
     if claim_index is not None:
         issue["claim_index"] = claim_index
+    if tool_used is not None:
+        issue["tool_used"] = tool_used
     return issue
 
 
