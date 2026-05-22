@@ -23,11 +23,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# Default parallelism for fan-out gbrain subprocess calls. The gbrain CLI is
+# fork/exec heavy (Bun + PGLite open per call), so per-call latency is ~0.2s.
+# Running candidates serially on a 200-slug pool takes 1-2 minutes; parallel
+# fan-out to 16 workers drops that to <15s. Override via env var for tuning.
+_SENSOR_PARALLELISM = max(1, int(os.environ.get("AUTO_ENRICH_SENSOR_WORKERS", "16")))
 
 # Allow running both as a script (python detect_sparse.py) and as a module.
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -243,25 +251,45 @@ def detect(*, cfg: SensorConfig, limit: int) -> list[dict[str, Any]]:
     run is in bootstrap mode (no page in the pool has `last_enriched`), then
     score with that flag. Bootstrap detection happens at the sensor level so
     every candidate in a given run uses the same scoring regime.
+
+    Subprocess fan-out is parallelized: the per-type `gbrain list` calls and
+    the per-candidate `get`+`backlinks` inspections each run on a thread pool
+    (worker count from AUTO_ENRICH_SENSOR_WORKERS, default 16). The gbrain CLI
+    is fork/exec heavy, so serial fan-out previously dominated wall-clock time
+    (1-2 min on a 200-slug pool). Order of evaluation does not affect the
+    final ranking: scoring is independent per candidate, results are sorted
+    by score at the end, and the seen/denylist filters are deterministic.
     """
-    raw: list[dict[str, Any]] = []
+    # Phase 1: fetch the per-type candidate lists in parallel. `gbrain list`
+    # is one of the slower verbs because it touches the page table; running
+    # the 4 page-type queries serially adds ~1s per type for no reason.
+    def _list_for_type(page_type: str) -> tuple[str, str]:
+        return page_type, run_gbrain(
+            [
+                "list",
+                "--type",
+                page_type,
+                "--sort",
+                "updated_asc",
+                "--limit",
+                str(cfg.candidate_pool_per_type),
+            ]
+        )
+
+    list_results: list[tuple[str, str]] = []
+    if cfg.page_types:
+        with ThreadPoolExecutor(max_workers=min(_SENSOR_PARALLELISM, len(cfg.page_types))) as ex:
+            # Re-raise the first GBrainCLIError so main() maps to exit code 1
+            # rather than returning a partial pool. list() forces evaluation
+            # of every future before we proceed.
+            list_results = list(ex.map(_list_for_type, cfg.page_types))
+
+    # Phase 2: collect the de-duplicated, denylist-filtered slug set. Order
+    # is preserved by walking cfg.page_types in declaration order so the
+    # bootstrap-mode decision below is stable across runs.
+    targets: list[tuple[str, str]] = []  # (slug, page_type)
     seen: set[str] = set()
-    for page_type in cfg.page_types:
-        try:
-            tsv = run_gbrain(
-                [
-                    "list",
-                    "--type",
-                    page_type,
-                    "--sort",
-                    "updated_asc",
-                    "--limit",
-                    str(cfg.candidate_pool_per_type),
-                ]
-            )
-        except GBrainCLIError:
-            # Re-raise so main() can map to exit code 1 instead of silently empty
-            raise
+    for page_type, tsv in list_results:
         for row in _parse_list_tsv(tsv):
             slug = row["slug"]
             if slug in seen:
@@ -269,9 +297,22 @@ def detect(*, cfg: SensorConfig, limit: int) -> list[dict[str, Any]]:
             seen.add(slug)
             if _slug_is_denylisted(slug, cfg.slug_denylist_prefixes):
                 continue
-            entry = _inspect_candidate(slug, row.get("type", page_type), cfg)
-            if entry is not None:
-                raw.append(entry)
+            targets.append((slug, row.get("type", page_type)))
+
+    # Phase 3: fan out `_inspect_candidate` (one `get` + one `backlinks` call
+    # per slug) across the worker pool. This is the dominant cost on a real
+    # brain (200 slugs * 2 calls * ~0.2s = ~80s serial); 16 workers drops
+    # that to <10s.
+    raw: list[dict[str, Any]] = []
+    if targets:
+        def _inspect(arg: tuple[str, str]) -> dict[str, Any] | None:
+            slug, page_type = arg
+            return _inspect_candidate(slug, page_type, cfg)
+
+        with ThreadPoolExecutor(max_workers=min(_SENSOR_PARALLELISM, len(targets))) as ex:
+            for entry in ex.map(_inspect, targets):
+                if entry is not None:
+                    raw.append(entry)
 
     bootstrap_mode = all(r.get("last_enriched") in (None, "") for r in raw) if raw else False
 
