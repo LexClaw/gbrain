@@ -256,7 +256,7 @@ def _build_sources_section(claims: list[dict]) -> str:
     for i, (url, quote) in enumerate(seen.items(), start=1):
         if quote:
             quote_excerpt = quote if len(quote) <= 240 else quote[:237] + "..."
-            lines.append(f"[^{i}]: [{url}]({url}) — \"{quote_excerpt}\"")
+            lines.append(f"[^{i}]: [{url}]({url}): \"{quote_excerpt}\"")
         else:
             lines.append(f"[^{i}]: [{url}]({url})")
     if not lines:
