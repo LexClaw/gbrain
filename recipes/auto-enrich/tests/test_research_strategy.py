@@ -106,18 +106,23 @@ def test_concept_includes_academic_wikipedia():
     assert any("Wikipedia" in q["query"] or "wikipedia" in q["rationale"] for q in plan)
 
 
-def test_unknown_type_empty_plan():
-    """Unknown page type returns empty query plan (skip-and-log)."""
+def test_unknown_type_falls_back_to_generic_web():
+    """Unknown page type returns a single generic web query per plan T2.0."""
     c = _make_candidate("meeting", frontmatter={})
     plan = research_strategy.build_query_plan(c, "A meeting about something.")
-    assert plan == [], "unknown type should return empty plan"
+    assert len(plan) == 1, "unknown type should produce a single generic web query"
+    assert plan[0]["source"] == "web"
+    assert plan[0]["query"] == "type slug"  # last segment of "test/type-slug" with hyphens to spaces
+    assert "non-classified" in plan[0]["rationale"].lower() or "generic" in plan[0]["rationale"].lower()
 
 
 def test_entity_fallback_web():
-    """Entity (other than known types) returns empty plan per spec."""
+    """Entity (other than known types) falls through to generic web query per plan T2.0."""
     c = _make_candidate("entity", frontmatter={})
     plan = research_strategy.build_query_plan(c, "Some entity page.")
-    assert plan == []
+    assert len(plan) >= 1, "entity type should produce at least one generic web query"
+    assert plan[0]["source"] == "web"
+    assert len(plan) <= research_strategy.MAX_QUERIES
 
 
 def test_query_cap_max_8():

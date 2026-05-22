@@ -35,8 +35,6 @@ import auto_enrich_lib  # noqa: E402
 from auto_enrich_lib import Heartbeat  # noqa: E402
 import research_strategy  # noqa: E402
 
-PROMPT_BUILDER = Path.home() / "hermes-workspace" / "Lex-Workspace" / "scripts" / "prompt-builder.py"
-
 RECIPE_ID = "auto-enrich"
 RECIPE_VERSION_RESEARCH = "0.2.0"
 
@@ -53,6 +51,12 @@ REQUIRED_SKILLS = [
 
 TASK_TEMPLATE = """\
 Research the candidate at slug "{slug}".
+
+You have the following skills pre-loaded for this task: {skills_csv}.
+Use them as your toolbox: data-research and perplexity-research for primary
+lookups, live-web-research-fallback-chain when primary sources miss,
+academic-verify for concept-type claims, enrich for the artifact shape,
+cal and sage for research discipline.
 
 Follow this query plan exactly. Execute each query in order and collect results:
 {query_plan_json}
@@ -101,6 +105,12 @@ def validate_artifact(artifact: dict[str, Any]) -> list[str]:
         errors.append("claims must be an array")
         return errors
 
+    # Basic key-presence + array-type checks for the other top-level arrays
+    # (existence + is-list only; deep validation belongs to Phase 3 quality gate).
+    for arr_key in ("queries_run", "structured_facts", "suggested_links", "narrative_additions"):
+        if arr_key in artifact and not isinstance(artifact[arr_key], list):
+            errors.append(f"{arr_key} must be an array")
+
     for i, claim in enumerate(claims):
         citation = claim.get("citation")
         if not isinstance(citation, dict):
@@ -117,14 +127,16 @@ def validate_artifact(artifact: dict[str, Any]) -> list[str]:
 
 
 def compile_cal_prompt(slug: str, query_plan: list[dict], page_content: str,
-                       schema_text: str) -> str:
+                       schema_text: str, skills: list[str] | None = None) -> str:
     """Build the compiled prompt text for Cal."""
     qp_json = json.dumps(query_plan, indent=2)
+    skills_csv = ", ".join(skills or REQUIRED_SKILLS)
     return TASK_TEMPLATE.format(
         slug=slug,
         query_plan_json=qp_json,
         page_content=page_content,
         schema_text=schema_text,
+        skills_csv=skills_csv,
     )
 
 
@@ -152,11 +164,13 @@ def load_schema_text() -> str:
 IRON LAW: every claim's citation must have non-empty url AND quote."""
 
 
-def dispatch_cal(prompt: str) -> tuple[int, str, str]:
+def dispatch_cal(prompt: str, skills: list[str] | None = None) -> tuple[int, str, str]:
     """Spawn Cal via hermes -z and return (returncode, stdout, stderr)."""
+    skills_list = skills if skills is not None else REQUIRED_SKILLS
     cmd = [
         "hermes", "-z", prompt,
         "--model", "claude-haiku-4-5",
+        "--skills", ",".join(skills_list),
         "--yolo",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
@@ -224,6 +238,9 @@ def run(candidate_json_path: str, output_artifact_path: str,
         print(f"candidate: {slug}")
         print(f"page_type: {page_type}")
         print(f"queries planned: {len(query_plan)}")
+        print(f"skills loaded: {','.join(REQUIRED_SKILLS)}")
+        print(f"dispatch cmd: hermes -z <prompt> --model claude-haiku-4-5 "
+              f"--skills {','.join(REQUIRED_SKILLS)} --yolo")
         print(f"---")
         print(prompt)
         print(f"---")
@@ -231,6 +248,7 @@ def run(candidate_json_path: str, output_artifact_path: str,
             "slug": slug,
             "page_type": page_type,
             "queries_planned": len(query_plan),
+            "skills": REQUIRED_SKILLS,
         })
         return 0
 

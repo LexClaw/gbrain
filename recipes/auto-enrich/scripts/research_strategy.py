@@ -7,13 +7,13 @@ Each query entry has:
 
 Caps:
   - MAX_QUERIES per candidate (default 8) prevents runaway dispatch cost.
-  - Unknown types return an empty plan (skip-and-log).
+  - Unknown types fall through to a generic web query derived from the slug.
 
 Per-type strategy (matches the auto-enrich plan lines 343-360):
   - person: X handle (if @handle in frontmatter), web, employer-website, news
   - company: official website + about page, Crunchbase, recent news, founder names
   - concept: academic-verify pass, Wikipedia, primary-source articles
-  - other: skip (empty plan)
+  - other: generic web search with target_slug-derived keywords
 """
 
 from __future__ import annotations
@@ -47,11 +47,28 @@ def build_query_plan(candidate: dict[str, Any], current_page_content: str) -> li
 
     build_fn = strategy.get(ptype)
     if build_fn is None:
-        return []
-
-    queries = build_fn(frontmatter, slug, current_page_content)
+        queries = _generic_web_plan(frontmatter, slug, current_page_content)
+    else:
+        queries = build_fn(frontmatter, slug, current_page_content)
     queries = queries[:MAX_QUERIES]
     return queries
+
+
+def _generic_web_plan(fm: dict[str, Any], slug: str, page: str) -> list[dict[str, str]]:
+    """Fallback for entity types not in {person, company, concept}.
+
+    Per plan T2.0 (lines 343-360): generic web search with target_slug-derived
+    keywords. Last segment of the slug, hyphens converted to spaces.
+    """
+    last_segment = slug.rsplit("/", 1)[-1]
+    query = last_segment.replace("-", " ").strip()
+    if not query:
+        return []
+    return [{
+        "query": query,
+        "source": "web",
+        "rationale": "Generic web search for non-classified entity",
+    }]
 
 
 # -- Per-type helpers --

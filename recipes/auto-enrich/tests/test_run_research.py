@@ -54,19 +54,72 @@ def _make_candidate_json(tmp_path: Path) -> Path:
 
 # --- Tests ---
 
-def test_prompt_contains_query_plan_slug_skills(tmp_path):
-    """The compiled Cal prompt must contain the query plan, slug, and skill list."""
+def test_dispatch_cal_command_contains_skills_flag():
+    """dispatch_cal must pass --skills with all seven REQUIRED_SKILLS to hermes -z.
+
+    This is the regression guard for Grant Phase 2 review item #2: REQUIRED_SKILLS
+    was declared but never wired into the subprocess.run command list.
+    """
+    captured = {}
+
+    class FakeResult:
+        returncode = 0
+        stdout = '{"ok": true}'
+        stderr = ""
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        return FakeResult()
+
+    real_prompt = run_research.compile_cal_prompt(
+        slug="people/alice", query_plan=[], page_content="x", schema_text="y",
+    )
+    with patch("run_research.subprocess.run", side_effect=fake_run):
+        rc, out, err = run_research.dispatch_cal(real_prompt)
+
+    assert rc == 0
+    cmd = captured["cmd"]
+    assert "--skills" in cmd, f"--skills flag missing from dispatch cmd: {cmd}"
+    skills_idx = cmd.index("--skills")
+    skills_arg = cmd[skills_idx + 1]
+    skills_list = skills_arg.split(",")
+    for skill in run_research.REQUIRED_SKILLS:
+        assert skill in skills_list, (
+            f"Required skill '{skill}' missing from --skills arg '{skills_arg}'"
+        )
+    # Defensive: prompt mentions skill list too (belt + suspenders)
+    prompt_idx = cmd.index("-z") + 1
+    prompt_text = cmd[prompt_idx]
+    for skill in run_research.REQUIRED_SKILLS:
+        assert skill in prompt_text, (
+            f"Required skill '{skill}' missing from prompt body (belt + suspenders)"
+        )
+
+
+def test_dry_run_preview_mentions_skills(tmp_path, capsys):
+    """--dry-run output must include the --skills flag for faithful preview."""
     candidate_path = _make_candidate_json(tmp_path)
-    
-    with patch("run_research.get_page_content", return_value=FAKE_PAGE), \
-         patch("run_research.dispatch_cal") as mock_dispatch:
-        # Make dispatch return a valid artifact
-        mock_dispatch.return_value = (0, '{"target_slug":"people/alice-smith","researched_at":"","researcher":"","queries_run":[],"claims":[],"structured_facts":[],"suggested_links":[],"narrative_additions":[]}', "")
-        
-        # We actually want to inspect the prompt that was built, not dispatch
-        with patch("run_research.run") as mock_run:
-            mock_run.return_value = 0
-            run_research.run(str(candidate_path), str(tmp_path / "artifact.json"))
+    with patch("run_research.get_page_content", return_value=FAKE_PAGE):
+        rc = run_research.run(str(candidate_path), str(tmp_path / "artifact.json"), dry_run=True)
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "--skills" in captured.out, "dry-run preview must mention --skills"
+    for skill in run_research.REQUIRED_SKILLS:
+        assert skill in captured.out, f"dry-run preview missing skill '{skill}'"
+
+
+def test_prompt_contains_query_plan_slug_skills(tmp_path):
+    """compile_cal_prompt embeds the slug, plan, and the seven REQUIRED_SKILLS."""
+    prompt = run_research.compile_cal_prompt(
+        slug="people/alice-smith",
+        query_plan=[{"query": "alice smith", "source": "web", "rationale": "test"}],
+        page_content=FAKE_PAGE,
+        schema_text="dummy schema",
+    )
+    assert "people/alice-smith" in prompt
+    assert "alice smith" in prompt
+    for skill in run_research.REQUIRED_SKILLS:
+        assert skill in prompt, f"Required skill '{skill}' missing from prompt"
 
 
 def test_dispatch_returns_valid_artifact(tmp_path):
