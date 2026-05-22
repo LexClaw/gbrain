@@ -100,23 +100,16 @@ def _classify_issues(issues: list[dict]) -> dict[str, int]:
 
 
 def _run_research_for(candidate: dict, work_dir: Path) -> tuple[int, Path | None]:
-    """Dispatch research for one candidate. Returns (exit_code, artifact_path)."""
+    """Dispatch research for one candidate. Returns (exit_code, artifact_path).
+
+    run_research handles the CAL_DISPATCH_MODE=mock env toggle itself; we
+    just stage the candidate JSON and pass through.
+    """
     slug = candidate.get("slug", "unknown")
     safe_slug = slug.replace("/", "_")
     cand_path = work_dir / f"candidate-{safe_slug}.json"
     art_path = work_dir / f"artifact-{safe_slug}.json"
     cand_path.write_text(json.dumps(candidate), encoding="utf-8")
-
-    if os.environ.get("CAL_DISPATCH_MODE") == "mock":
-        # Mock mode: reuse the good fixture artifact, retarget at this slug.
-        fixture = _SCRIPT_DIR.parent / "tests" / "fixtures" / "research_artifact_good.json"
-        if not fixture.exists():
-            return 3, None
-        art = json.loads(fixture.read_text())
-        art["target_slug"] = slug
-        art["researched_at"] = _now_iso()
-        art_path.write_text(json.dumps(art, indent=2), encoding="utf-8")
-        return 0, art_path
 
     rc = run_research.run(str(cand_path), str(art_path))
     if rc != 0:

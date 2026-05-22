@@ -204,10 +204,19 @@ def parse_cal_json_output(stdout: str) -> dict[str, Any]:
 
 def run(candidate_json_path: str, output_artifact_path: str,
         dry_run: bool = False, page_content_override: str | None = None) -> int:
-    """Main entry point. Returns exit code."""
+    """Main entry point. Returns exit code.
+
+    Mock mode: when CAL_DISPATCH_MODE=mock is set in the environment, the
+    function skips the live `hermes -z` dispatch entirely and copies the
+    good fixture artifact (tests/fixtures/research_artifact_good.json) to
+    --output-artifact with the candidate's slug substituted. This is the
+    smoke-test toggle documented in scripts/smoke.sh; it lets the end-to-end
+    pipeline run when Cal dispatch is environmentally blocked.
+    """
+    import os as _os
     hb = Heartbeat()
 
-    # Load candidate
+    # Load candidate (still required so we can fill target_slug correctly).
     try:
         candidate = load_candidate(Path(candidate_json_path))
     except (json.JSONDecodeError, FileNotFoundError) as exc:
@@ -216,6 +225,27 @@ def run(candidate_json_path: str, output_artifact_path: str,
 
     slug = candidate.get("slug", candidate.get("target_slug", "unknown"))
     page_type = candidate.get("page_type", "unknown")
+
+    if _os.environ.get("CAL_DISPATCH_MODE") == "mock":
+        fixture = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "research_artifact_good.json"
+        if not fixture.exists():
+            hb.emit("research_dispatch", status="mock_fixture_missing",
+                    error=str(fixture), details={"slug": slug})
+            return 3
+        artifact = json.loads(fixture.read_text(encoding="utf-8"))
+        artifact["target_slug"] = slug
+        artifact["researched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        artifact["researcher"] = "cal-subagent-mock"
+        try:
+            output = Path(output_artifact_path)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            hb.emit("research_dispatch", status="write_error", error=str(exc))
+            return 3
+        hb.emit("research_dispatch", status="mock_ok",
+                details={"slug": slug, "fixture": str(fixture)})
+        return 0
 
     # Build query plan
     if page_content_override is not None:
