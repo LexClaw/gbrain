@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,7 +93,7 @@ class Heartbeat:
             fh.write(json.dumps(entry) + "\n")
 
 
-def parse_frontmatter(markdown: str) -> tuple[dict[str, Any], str]:
+def parse_frontmatter(markdown: str, *, slug: str | None = None) -> tuple[dict[str, Any], str]:
     """Split a page returned by `gbrain get` into (frontmatter_dict, body_str).
 
     The page format is:
@@ -112,7 +113,12 @@ def parse_frontmatter(markdown: str) -> tuple[dict[str, Any], str]:
     _, fm_text, body = parts
     try:
         data = yaml.safe_load(fm_text) or {}
-    except yaml.YAMLError:
+    except yaml.YAMLError as exc:
+        slug_tag = slug or "<unknown>"
+        print(
+            f"auto-enrich: parse_frontmatter YAML error on slug={slug_tag}: {exc}",
+            file=sys.stderr,
+        )
         return {}, markdown
     if not isinstance(data, dict):
         return {}, markdown

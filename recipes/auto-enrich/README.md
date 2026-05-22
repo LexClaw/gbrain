@@ -57,6 +57,10 @@ Exit codes:
    ```
 
    When `last_enriched` is absent from the frontmatter (the common case until Phase 3 starts writing it), the age penalty maxes out at 1.0.
+
+   ### Bootstrap mode
+
+   Until any page in the brain carries `last_enriched`, every candidate hits the maximum age penalty and the term degenerates to a constant 0.3 baseline. That floor washes out body/link signal and ranks a well-developed 8K-char concept page identically to a 200-char stub. To avoid that, the sensor inspects the candidate pool first: if NO page has `last_enriched`, the run flips to `bootstrap_mode=True`, the age term is zeroed, and the body/links weights renormalize (0.4/0.7 and 0.3/0.7) so the score still spans [0, 1]. Once any page in the pool has `last_enriched`, scoring reverts to the original three-term formula. The flag is per-run and visible on each emitted candidate as `bootstrap_mode`.
 5. Sort descending, truncate to `--limit`, emit JSON.
 
 ## Discovery contract

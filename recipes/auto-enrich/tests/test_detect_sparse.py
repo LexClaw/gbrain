@@ -171,6 +171,118 @@ def test_cli_subprocess_error_exits_1(tmp_path, monkeypatch, capsys):
     assert exc.value.code == 1
 
 
+# --- Bootstrap-mode scoring (Ryan Ayers external review #1) ---
+
+
+def test_bootstrap_mode_zeroes_age_term_and_renormalizes():
+    """When no candidate has last_enriched, age weight collapses to zero and
+    body/links weights renormalize to sum to 1."""
+    cfg = detect_sparse.SensorConfig()
+    # Perfect body + perfect links: bootstrap score must be 0.0
+    bootstrap_zero = detect_sparse.compute_score(
+        body_length=10_000,
+        inbound_count=10,
+        last_enriched=None,
+        cfg=cfg,
+        bootstrap_mode=True,
+    )
+    assert bootstrap_zero == pytest.approx(0.0, abs=1e-6)
+
+    # Worst body + worst links: bootstrap score must be 1.0 (full renormalization)
+    bootstrap_max = detect_sparse.compute_score(
+        body_length=0,
+        inbound_count=0,
+        last_enriched=None,
+        cfg=cfg,
+        bootstrap_mode=True,
+    )
+    assert bootstrap_max == pytest.approx(1.0, abs=1e-6)
+
+
+def test_non_bootstrap_uses_original_formula():
+    """bootstrap_mode=False preserves the original three-term score so existing
+    callers and golden values are unchanged."""
+    cfg = detect_sparse.SensorConfig()
+    score = detect_sparse.compute_score(
+        body_length=1500,
+        inbound_count=3,
+        last_enriched=None,
+        cfg=cfg,
+        bootstrap_mode=False,
+    )
+    # Body + links perfect, age 1.0 contributes 0.3
+    assert score == pytest.approx(0.3, abs=1e-6)
+
+
+def test_bootstrap_ranks_developed_concept_below_stub():
+    """Ryan's fix verified: a long concept page with no inbound links scores
+    LOWER than a true stub during bootstrap, because the age term no longer
+    floors every score at 0.3."""
+    cfg = detect_sparse.SensorConfig()
+    developed = detect_sparse.compute_score(
+        body_length=8821,
+        inbound_count=0,
+        last_enriched=None,
+        cfg=cfg,
+        bootstrap_mode=True,
+    )
+    stub = detect_sparse.compute_score(
+        body_length=200,
+        inbound_count=0,
+        last_enriched=None,
+        cfg=cfg,
+        bootstrap_mode=True,
+    )
+    assert developed < stub
+
+
+def test_detect_flags_bootstrap_when_no_page_has_last_enriched():
+    """All sparse pages with no last_enriched -> detect() marks bootstrap_mode=True."""
+    pages = {f"people/p{i}": SPARSE_PAGE_MD for i in range(1, 4)}
+    backlinks = {f"people/p{i}": [] for i in range(1, 4)}
+    list_tsv = "\n".join(
+        f"people/p{i}\tperson\t2026-01-0{i}\tP{i}" for i in range(1, 4)
+    )
+    fake = fake_gbrain_factory(pages, backlinks, list_tsv)
+    with patch.object(detect_sparse, "run_gbrain", side_effect=fake):
+        results = detect_sparse.detect(
+            cfg=detect_sparse.SensorConfig(page_types=["person"], candidate_pool_per_type=5),
+            limit=10,
+        )
+    assert all(r["bootstrap_mode"] is True for r in results)
+
+
+def test_detect_skips_bootstrap_when_any_page_has_last_enriched():
+    """Mixed pool: at least one candidate has last_enriched -> normal scoring."""
+    pages = {"people/sparse": SPARSE_PAGE_MD, "people/full": FULL_PAGE_MD}
+    backlinks = {"people/sparse": [], "people/full": []}
+    list_tsv = "people/sparse\tperson\t2026-01-01\tSparse\npeople/full\tperson\t2026-01-02\tFull"
+    fake = fake_gbrain_factory(pages, backlinks, list_tsv)
+    with patch.object(detect_sparse, "run_gbrain", side_effect=fake):
+        results = detect_sparse.detect(
+            cfg=detect_sparse.SensorConfig(page_types=["person"], candidate_pool_per_type=5),
+            limit=10,
+        )
+    assert all(r["bootstrap_mode"] is False for r in results)
+
+
+# --- YAML error logging (Grant code-review S-3) ---
+
+
+def test_yaml_parse_error_logs_to_stderr(capsys):
+    """parse_frontmatter should log YAML errors instead of swallowing them.
+
+    Includes the slug (when provided) so cron output points at the offending
+    page.
+    """
+    broken = "---\nkey: : bad\n  also: : bad\n---\nbody\n"
+    fm, body = auto_enrich_lib.parse_frontmatter(broken, slug="entity/broken")
+    assert fm == {}
+    err = capsys.readouterr().err
+    assert "entity/broken" in err
+    assert "YAML" in err
+
+
 def test_main_writes_output_file(tmp_path, monkeypatch):
     pages = {"people/p1": SPARSE_PAGE_MD}
     backlinks = {"people/p1": []}

@@ -110,9 +110,20 @@ def compute_score(
     last_enriched: str | None,
     cfg: SensorConfig,
     now_iso: str | None = None,
+    bootstrap_mode: bool = False,
 ) -> float:
     body_penalty = _clamp01(1.0 - body_length / max(1, cfg.target_body_length))
     link_penalty = _clamp01(1.0 - inbound_count / max(1, cfg.target_inbound_links))
+
+    if bootstrap_mode:
+        # No page in the corpus has last_enriched yet. The age term degenerates
+        # to a constant 1.0 across the pool, contributing 0.3 baseline to every
+        # candidate and washing out body/link signal. Zero it and renormalize
+        # the remaining weights so the score still spans [0, 1].
+        denom = cfg.w_body + cfg.w_links
+        if denom <= 0:
+            return 0.0
+        return (cfg.w_body / denom) * body_penalty + (cfg.w_links / denom) * link_penalty
 
     enriched_dt = _parse_iso(last_enriched)
     if enriched_dt is None:
@@ -148,11 +159,14 @@ def _parse_list_tsv(tsv: str) -> list[dict[str, str]]:
 
 
 def _inspect_candidate(slug: str, page_type: str, cfg: SensorConfig) -> dict[str, Any] | None:
+    """Gather raw signal for one candidate. Scoring happens in detect() once the
+    corpus-level bootstrap flag is known. Returns None on CLI failure for this
+    slug so the caller can skip it without aborting the run."""
     try:
         page = run_gbrain(["get", slug])
     except GBrainCLIError:
         return None
-    fm, body = parse_frontmatter(page)
+    fm, body = parse_frontmatter(page, slug=slug)
     body_length = len(body)
 
     try:
@@ -164,12 +178,6 @@ def _inspect_candidate(slug: str, page_type: str, cfg: SensorConfig) -> dict[str
         backlinks = []
 
     last_enriched = fm.get("last_enriched") if isinstance(fm, dict) else None
-    score = compute_score(
-        body_length=body_length,
-        inbound_count=len(backlinks),
-        last_enriched=str(last_enriched) if last_enriched is not None else None,
-        cfg=cfg,
-    )
     reason_parts = []
     if body_length < cfg.target_body_length:
         reason_parts.append(f"body={body_length}<{cfg.target_body_length}")
@@ -180,7 +188,6 @@ def _inspect_candidate(slug: str, page_type: str, cfg: SensorConfig) -> dict[str
     return {
         "slug": slug,
         "page_type": page_type,
-        "score": round(score, 6),
         "body_length": body_length,
         "inbound_link_count": len(backlinks),
         "last_enriched": last_enriched,
@@ -189,8 +196,14 @@ def _inspect_candidate(slug: str, page_type: str, cfg: SensorConfig) -> dict[str
 
 
 def detect(*, cfg: SensorConfig, limit: int) -> list[dict[str, Any]]:
-    """Enumerate candidates, score them, return top `limit` sorted desc by score."""
-    candidates: list[dict[str, Any]] = []
+    """Enumerate candidates, score them, return top `limit` sorted desc by score.
+
+    Two-pass: gather raw signal for the full candidate set, decide whether the
+    run is in bootstrap mode (no page in the pool has `last_enriched`), then
+    score with that flag. Bootstrap detection happens at the sensor level so
+    every candidate in a given run uses the same scoring regime.
+    """
+    raw: list[dict[str, Any]] = []
     seen: set[str] = set()
     for page_type in cfg.page_types:
         try:
@@ -213,9 +226,26 @@ def detect(*, cfg: SensorConfig, limit: int) -> list[dict[str, Any]]:
             if slug in seen:
                 continue
             seen.add(slug)
-            scored = _inspect_candidate(slug, row.get("type", page_type), cfg)
-            if scored is not None:
-                candidates.append(scored)
+            entry = _inspect_candidate(slug, row.get("type", page_type), cfg)
+            if entry is not None:
+                raw.append(entry)
+
+    bootstrap_mode = all(r.get("last_enriched") in (None, "") for r in raw) if raw else False
+
+    candidates: list[dict[str, Any]] = []
+    for entry in raw:
+        score = compute_score(
+            body_length=entry["body_length"],
+            inbound_count=entry["inbound_link_count"],
+            last_enriched=str(entry["last_enriched"]) if entry["last_enriched"] is not None else None,
+            cfg=cfg,
+            bootstrap_mode=bootstrap_mode,
+        )
+        scored = dict(entry)
+        scored["score"] = round(score, 6)
+        scored["bootstrap_mode"] = bootstrap_mode
+        candidates.append(scored)
+
     candidates.sort(key=lambda r: r["score"], reverse=True)
     return candidates[:limit]
 
