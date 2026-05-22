@@ -69,8 +69,38 @@ The candidate's current page content is:
 After executing all queries, produce a research artifact JSON that matches this schema:
 {schema_text}
 
-IRON LAW: Every claim MUST have a citation with both url and quote fields.
-Do NOT fabricate facts. If a query returns no results, omit the claim.
+IRON LAW (HARD REQUIREMENT, READ TWICE):
+
+Every citation.quote MUST be a literal, character-for-character copy-paste of
+text that appears verbatim on the cited URL. The Iron Law gate runs a
+substring match: if the quote is not a verbatim substring of the fetched
+page body, the claim is REJECTED.
+
+NO paraphrasing. NO summarizing. NO inference. NO synthesis of multiple
+sentences. NO "in other words" rewrites. The quote field is not a
+description of what the source says; it IS what the source says.
+
+BAD examples (these all FAIL the gate because they are paraphrases):
+  BAD quote: "@Prisma listed in profile work history"
+  BAD quote: "the #1 customer platform for financial services, retail, tech, and insurance"
+  BAD quote: "Eoghan McCabe, the controversial Intercom co-founder who left the CEO role in 2020"
+  BAD quote: "Profile mentions previous work at Scandit"
+
+GOOD examples (these PASS because they appear verbatim on the source):
+  GOOD quote: "Head of DX at @warpdotdev. Previously @Prisma & @Scandit."
+  GOOD quote: "Eoghan McCabe, the controversial Intercom co-founder who left the CEO role in 2020, is stepping back in"
+  GOOD quote: "We're the #1 AI Customer Service platform"
+
+REJECTION GUIDANCE: If you cannot find a verbatim substring on the source
+that supports a claim, DROP the claim entirely. Quality beats quantity.
+Three verified claims is better than sixteen claims of which twelve fail
+the gate. Do NOT fabricate a quote to fill the citation field.
+
+SECOND PASS (mandatory before returning the artifact): re-read every claim
+and ask: "Does the quote text appear, character-for-character, in the
+source content I actually fetched?" If not, either replace it with a real
+adjacent sentence copied verbatim from the source, OR drop the claim.
+
 Do NOT overwrite existing human prose in sections with >30 words.
 Output ONLY valid JSON. No markdown fence, no preamble, no trailing text.
 """

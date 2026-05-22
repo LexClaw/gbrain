@@ -470,3 +470,202 @@ def test_iron_law_uses_normalized_comparison_so_html_entities_dont_break_match(t
         issues, _ = quality_check.check_iron_law(artifact)
     crit = [i for i in issues if i["severity"] == "critical"]
     assert crit == [], f"normalization should have matched, got {issues}"
+
+
+# ---------------------------------------------------------------------------
+# X profile URL support (BUG 1 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_x_profile_url_pattern_match():
+    """_X_PROFILE_RE matches bare profile URLs but NOT status URLs."""
+    r = quality_check._X_PROFILE_RE
+    assert r.match("https://x.com/petradonka")
+    assert r.match("https://x.com/foo/")
+    assert r.match("https://twitter.com/bar")
+    assert r.match("https://www.x.com/baz")
+    assert r.match("http://x.com/qux")
+    # Status URLs must NOT match the profile regex (tweet path priority).
+    assert not r.match("https://x.com/petradonka/status/123")
+    assert not r.match("https://x.com/foo/status/456")
+    # Other paths and lookalikes rejected.
+    assert not r.match("https://x.com.fake.com/foo")
+    assert not r.match("https://x.com/foo/extra/path")
+
+
+def test_fetch_x_profile_text_uses_xurl():
+    """Monkeypatch subprocess.run, assert correct xurl path and concatenated output."""
+    payload = {
+        "data": {
+            "name": "Petra Donka",
+            "username": "petradonka",
+            "description": "Head of DX at @warpdotdev. Previously @Prisma & @Scandit.",
+            "location": "Berlin",
+            "url": "https://petradonka.com",
+            "verified": True,
+            "created_at": "2014-01-01T00:00:00.000Z",
+        }
+    }
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        captured["cmd"] = cmd
+        return MagicMock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    with patch.object(quality_check.subprocess, "run", fake_run):
+        out = quality_check._fetch_x_profile_text("petradonka")
+
+    assert captured["cmd"][0] == "xurl"
+    assert "/2/users/by/username/petradonka" in captured["cmd"][1]
+    assert "description" in captured["cmd"][1]
+    assert out is not None
+    assert "Petra Donka" in out
+    assert "@petradonka" in out
+    assert "Head of DX at @warpdotdev. Previously @Prisma & @Scandit." in out
+    assert "Location: Berlin" in out
+    assert "URL: https://petradonka.com" in out
+    assert "Verified" in out
+
+
+def test_fetch_x_profile_text_handles_missing_fields():
+    """If only description present, output is just description-ish (no Location/URL lines)."""
+    payload = {"data": {"description": "just a bio"}}
+
+    def fake_run(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        return MagicMock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    with patch.object(quality_check.subprocess, "run", fake_run):
+        out = quality_check._fetch_x_profile_text("foo")
+
+    assert out == "just a bio"
+
+
+def test_fetch_x_profile_text_xurl_failure_returns_none():
+    """Timeout and non-zero exit both return None (fail-open)."""
+    def fake_timeout(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    with patch.object(quality_check.subprocess, "run", fake_timeout):
+        assert quality_check._fetch_x_profile_text("foo") is None
+
+    def fake_nonzero(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        return MagicMock(returncode=1, stdout="", stderr="boom")
+
+    with patch.object(quality_check.subprocess, "run", fake_nonzero):
+        assert quality_check._fetch_x_profile_text("foo") is None
+
+    # Bad JSON also returns None.
+    def fake_badjson(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        return MagicMock(returncode=0, stdout="not json{{", stderr="")
+
+    with patch.object(quality_check.subprocess, "run", fake_badjson):
+        assert quality_check._fetch_x_profile_text("foo") is None
+
+
+def test_iron_law_x_profile_url_uses_api_path():
+    """End-to-end: claim citing x.com/petradonka with verbatim bio quote passes
+    via the X API path. No plain HTTP fetch occurs."""
+    artifact = {
+        "claims": [
+            {
+                "text": "Petra works at Warp",
+                "citation": {
+                    "url": "https://x.com/petradonka",
+                    "quote": "Head of DX at @warpdotdev. Previously @Prisma & @Scandit.",
+                },
+            }
+        ],
+    }
+
+    def fake_run(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        body = {"data": {
+            "name": "Petra Donka",
+            "username": "petradonka",
+            "description": "Head of DX at @warpdotdev. Previously @Prisma & @Scandit.",
+        }}
+        return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+
+    http_calls = []
+
+    def fake_urlopen(req, timeout=None):  # noqa: ARG001
+        http_calls.append(req.get_full_url())
+        raise AssertionError("plain HTTP should not be called for profile URL when xurl succeeds")
+
+    with patch.object(quality_check.subprocess, "run", fake_run), \
+         patch.object(quality_check.urllib.request, "urlopen", fake_urlopen):
+        issues, stats = quality_check.check_iron_law(artifact)
+
+    crit = [i for i in issues if i["severity"] == "critical"]
+    assert crit == [], f"expected pass; got critical issues {crit}"
+    assert http_calls == [], "plain HTTP must not be hit when xurl profile path succeeds"
+
+
+def test_x_status_takes_precedence_over_profile_pattern():
+    """When URL matches the tweet regex, the profile fetcher is NEVER called."""
+    artifact = {
+        "claims": [
+            {
+                "text": "tweet content",
+                "citation": {
+                    "url": "https://x.com/foo/status/123",
+                    "quote": "tweeted hello world",
+                },
+            }
+        ],
+    }
+
+    calls = []
+
+    def fake_xurl(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        calls.append(cmd[1])
+        # Return the tweet endpoint payload regardless; we just want to assert
+        # we never see the by/username path.
+        body = {"data": {"text": "tweeted hello world"}}
+        return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+
+    # If the profile fetcher is wired wrongly, it will hit /2/users/by/username.
+    profile_spy_called = {"v": False}
+    real_profile = quality_check._fetch_x_profile_text
+
+    def spy_profile(handle, timeout=5):  # noqa: ARG001
+        profile_spy_called["v"] = True
+        return real_profile(handle, timeout)
+
+    with patch.object(quality_check.subprocess, "run", fake_xurl), \
+         patch.object(quality_check, "_fetch_x_profile_text", spy_profile):
+        quality_check.check_iron_law(artifact)
+
+    assert profile_spy_called["v"] is False, "profile fetcher must NOT be called for status URLs"
+    # And the calls that did happen must be tweet endpoint, not user endpoint.
+    assert any("/2/tweets/" in c for c in calls)
+    assert not any("/2/users/by/username/" in c for c in calls)
+
+
+def test_x_profile_xurl_failure_falls_back_to_http():
+    """If xurl profile fetch fails, fall back to plain HTTP fetch (fail-open)."""
+    artifact = {
+        "claims": [
+            {
+                "text": "claim",
+                "citation": {
+                    "url": "https://x.com/foo",
+                    "quote": "hello world",
+                },
+            }
+        ],
+    }
+
+    def fake_run(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        return MagicMock(returncode=1, stdout="", stderr="api down")
+
+    fake_url_opener = _mock_urlopen_factory({"https://x.com/foo": "<html>hello world</html>"})
+
+    with patch.object(quality_check.subprocess, "run", fake_run), \
+         patch.object(quality_check.urllib.request, "urlopen", fake_url_opener):
+        issues, _ = quality_check.check_iron_law(artifact)
+
+    crit = [i for i in issues if i["severity"] == "critical"]
+    assert crit == [], f"http fallback should have matched; got {crit}"
+    # Low-severity warning about the xurl failure should appear.
+    low = [i for i in issues if i["severity"] == "low" and "profile" in i["detail"]]
+    assert low, "expected a low-severity warning about xurl profile fallback"

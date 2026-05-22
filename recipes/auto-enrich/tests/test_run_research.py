@@ -421,3 +421,44 @@ def test_parse_cal_json_output_rejects_empty():
     # Sanity: legitimate parse failures are still ValueError (EmptyCalOutputError is a subclass).
     with pytest.raises(ValueError):
         run_research.parse_cal_json_output("not json at all")
+
+
+# ---------------------------------------------------------------------------
+# Verbatim-quote prompt enforcement (BUG 2 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_compile_cal_prompt_contains_verbatim_requirement():
+    """The Cal prompt must include strong verbatim language plus BAD and GOOD examples."""
+    prompt = run_research.compile_cal_prompt(
+        slug="people/petra-donka",
+        query_plan=[{"query": "x", "source": "p", "result_count": 0}],
+        page_content="page",
+        schema_text="schema",
+    )
+    low = prompt.lower()
+    # Verbatim language present in at least one form.
+    assert "verbatim" in low
+    assert "character-for-character" in low
+    # Substring matching is mentioned (the actual gate semantics).
+    assert "substring" in low
+    # At least one concrete BAD and one concrete GOOD example appear.
+    assert "BAD" in prompt
+    assert "GOOD" in prompt
+    assert "@Prisma" in prompt or "Eoghan" in prompt or "Head of DX" in prompt
+
+
+def test_compile_cal_prompt_contains_drop_not_fabricate_guidance():
+    """Prompt must instruct dropping unsupported claims rather than fabricating quotes."""
+    prompt = run_research.compile_cal_prompt(
+        slug="companies/intercom",
+        query_plan=[],
+        page_content="",
+        schema_text="",
+    )
+    low = prompt.lower()
+    # Drop-rather-than-fabricate framing.
+    assert "drop" in low
+    assert "fabricate" in low or "do not fabricate" in low
+    # Quality > quantity framing or equivalent.
+    assert "quality" in low or "rather than" in low

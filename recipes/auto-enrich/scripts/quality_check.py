@@ -61,6 +61,15 @@ _X_TWEET_RE = re.compile(
     r"^https?://(?:www\.)?(?:x|twitter)\.com/[^/\s]+/status/(\d+)(?:[/?#].*)?$"
 )
 
+# X / Twitter profile URL detector. Matches:
+#   https://x.com/<handle>
+#   https://twitter.com/<handle>
+# Tweet path takes precedence; the dispatch in check_iron_law tries
+# _X_TWEET_RE first and only falls through here for bare profile URLs.
+_X_PROFILE_RE = re.compile(
+    r"^https?://(?:www\.)?(?:x|twitter)\.com/([A-Za-z0-9_]+)/?$"
+)
+
 
 def _fetch_x_tweet_text(tweet_id: str, timeout: int = XURL_TIMEOUT) -> str | None:
     """Return concatenated tweet.text + note_tweet.text via xurl, or None on failure.
@@ -93,6 +102,50 @@ def _fetch_x_tweet_text(tweet_id: str, timeout: int = XURL_TIMEOUT) -> str | Non
     note = note or ""
     combined = text + (("\n\n" + note) if note else "")
     combined = combined.strip()
+    return combined or None
+
+
+def _fetch_x_profile_text(handle: str, timeout: int = XURL_TIMEOUT) -> str | None:
+    """Return concatenated name + description + location + URL via xurl
+    /2/users/by/username/<handle>, or None on any failure.
+
+    Profile URLs (https://x.com/<handle>) hit a JS shell on plain HTTP, so
+    the bio (description) is not available for substring matching. The X
+    API returns it cleanly. Fail-open: any xurl / parse / JSON error returns
+    None so the caller can fall back to the plain HTTP path.
+    """
+    try:
+        result = subprocess.run(
+            ["xurl", f"/2/users/by/username/{handle}?user.fields=description,url,location,verified,name,created_at"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        return None
+    parts: list[str] = []
+    if data.get("name"):
+        parts.append(str(data["name"]))
+    if data.get("username"):
+        parts.append(f"@{data['username']}")
+    if data.get("description"):
+        parts.append(str(data["description"]))
+    if data.get("location"):
+        parts.append(f"Location: {data['location']}")
+    if data.get("url"):
+        parts.append(f"URL: {data['url']}")
+    if data.get("verified"):
+        parts.append("Verified")
+    if data.get("created_at"):
+        parts.append(f"Joined: {data['created_at']}")
+    combined = "\n".join(parts).strip()
     return combined or None
 
 
@@ -178,7 +231,19 @@ def check_iron_law(artifact: dict[str, Any]) -> tuple[list[dict[str, str]], dict
                     ))
                     body_cache[url] = _fetch_url_body(url)
             else:
-                body_cache[url] = _fetch_url_body(url)
+                m_profile = _X_PROFILE_RE.match(url)
+                if m_profile:
+                    profile_text = _fetch_x_profile_text(m_profile.group(1))
+                    if profile_text is not None:
+                        body_cache[url] = (profile_text, None)
+                    else:
+                        issues.append(_issue(
+                            "iron_law", "low",
+                            f"claims[{i}]: xurl X profile fetch failed for {url}, falling back to HTTP",
+                        ))
+                        body_cache[url] = _fetch_url_body(url)
+                else:
+                    body_cache[url] = _fetch_url_body(url)
         body, err = body_cache[url]
         if body is None:
             fetch_failures += 1
