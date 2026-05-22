@@ -1,6 +1,6 @@
 # Auto-Enrichment Recipe
 
-Phase 1 (sensor + scaffold).
+Phase 2 (research strategy + Cal dispatch).
 
 ## What this directory contains
 
@@ -9,12 +9,19 @@ recipes/auto-enrich.md            # discoverable manifest (flat per integrations
 recipes/auto-enrich/
   README.md                        # this file
   config.yaml                      # tunables: weights, thresholds, paths
+  docs/
+    research-artifact-schema.md    # research artifact JSON contract (Phase 2)
   scripts/
     auto_enrich_lib.py             # Heartbeat class + gbrain subprocess wrapper
     detect_sparse.py               # sensor: ranks sparse/orphan/stale pages
+    research_strategy.py           # per-type research query plan builder (Phase 2)
+    run_research.py                # Cal dispatch + artifact validation (Phase 2)
     run_sensor.sh                  # one-shot bash entry point
   tests/
-    test_detect_sparse.py          # TDD coverage for the sensor
+    test_detect_sparse.py          # TDD coverage for the sensor (15 tests)
+    test_research_strategy.py      # TDD for query-plan builder (12 tests)
+    test_run_research.py           # TDD for Cal dispatch (16 tests)
+    fixtures/                      # research artifact test fixtures (Phase 2)
 ```
 
 Runtime state lives at `~/.gbrain/integrations/auto-enrich/` (not committed):
@@ -99,6 +106,52 @@ Override the gbrain binary for local iteration with the `GBRAIN_BIN` env var. Wh
 ```bash
 GBRAIN_BIN=/Users/me/gbrain/bin/gbrain.js python3 recipes/auto-enrich/scripts/detect_sparse.py --limit 5
 ```
+
+## Phase 2: Research
+
+The research pipeline composes as:
+
+```
+sensor candidate -> build_query_plan -> run_research -> artifact
+```
+
+1. **Sensor** (Phase 1) identifies sparse pages and emits candidate JSON.
+2. **Research strategy** (`scripts/research_strategy.py`) builds a type-specific query plan
+   from the candidate's frontmatter and current page content.
+   - Person: X handle + LinkedIn + employer website + news
+   - Company: website + Crunchbase + news + founder verification
+   - Concept: academic + Wikipedia + primary source
+   - Other: skip
+3. **Cal dispatch** (`scripts/run_research.py`) compiles the query plan and schema into a
+   prompt, spawns `hermes -z` with Cal (claude-haiku-4-5), and validates the returned JSON.
+4. **Artifact** is written to disk for Phase 3 quality-gate + synthesize.
+
+### Research artifact schema
+
+See `docs/research-artifact-schema.md` for the full schema, field reference, and Iron Law
+requirements. Brief summary:
+
+- Cal returns a JSON object with: `target_slug`, `researched_at`, `researcher`, `queries_run`,
+  `claims` (each with `citation.url` and `citation.quote`), `structured_facts`,
+  `suggested_links`, `narrative_additions`.
+- Iron Law: every claim MUST cite. Empty citation -> artifact rejected.
+
+### Running research
+
+```bash
+# Dry-run (prints the planned Cal prompt)
+python3 recipes/auto-enrich/scripts/run_research.py \
+  --candidate-json /path/to/candidate.json \
+  --output-artifact /tmp/artifact.json \
+  --dry-run
+
+# Live dispatch (spawns Cal)
+python3 recipes/auto-enrich/scripts/run_research.py \
+  --candidate-json /path/to/candidate.json \
+  --output-artifact /tmp/artifact.json
+```
+
+Exit codes: 0 ok, 1 dispatch error, 2 schema validation error, 3 CLI/config error.
 
 ## Phase boundaries
 

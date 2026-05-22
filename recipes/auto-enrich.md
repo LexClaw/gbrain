@@ -1,8 +1,8 @@
 ---
 id: auto-enrich
 name: Auto-Enrichment Recipe
-version: 0.1.0
-description: Nightly Cal dispatch that enriches sparse/orphan brain pages with research, citations, and cross-links via claude-haiku-4-5.
+version: 0.2.0
+description: Nightly Cal dispatch that enriches sparse/orphan brain pages with research, citations, and cross-links via claude-haiku-4-5. Phase 2 wires research strategy + Cal dispatch to produce validated research artifacts.
 category: sense
 requires: []
 secrets: []

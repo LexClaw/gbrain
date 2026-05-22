@@ -1,0 +1,295 @@
+"""run_research.py: dispatch Cal to research a candidate and collect a research artifact.
+
+CLI:
+    python3 run_research.py --candidate-json PATH --output-artifact PATH [--dry-run]
+
+Workflow:
+    1. Load candidate JSON from Phase 1 sensor output
+    2. Call research_strategy.build_query_plan() to produce queries
+    3. Compile a Cal prompt via prompt-builder.py
+    4. Dispatch Cal via `hermes -z <prompt> --model claude-haiku-4-5 --yolo`
+    5. Capture structured JSON output, validate against the artifact schema
+    6. Write artifact to --output-artifact
+
+Exit codes:
+    0: success, artifact written
+    1: dispatch error (hermes subprocess non-zero)
+    2: schema validation error
+    3: CLI/config error (missing files, bad args)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SCRIPT_DIR))
+
+import auto_enrich_lib  # noqa: E402
+from auto_enrich_lib import Heartbeat  # noqa: E402
+import research_strategy  # noqa: E402
+
+PROMPT_BUILDER = Path.home() / "hermes-workspace" / "Lex-Workspace" / "scripts" / "prompt-builder.py"
+
+RECIPE_ID = "auto-enrich"
+RECIPE_VERSION_RESEARCH = "0.2.0"
+
+# Seven-skill anchor set for Cal research dispatch
+REQUIRED_SKILLS = [
+    "data-research",
+    "enrich",
+    "perplexity-research",
+    "live-web-research-fallback-chain",
+    "academic-verify",
+    "cal",
+    "sage",
+]
+
+TASK_TEMPLATE = """\
+Research the candidate at slug "{slug}".
+
+Follow this query plan exactly. Execute each query in order and collect results:
+{query_plan_json}
+
+The candidate's current page content is:
+---
+{page_content}
+---
+
+After executing all queries, produce a research artifact JSON that matches this schema:
+{schema_text}
+
+IRON LAW: Every claim MUST have a citation with both url and quote fields.
+Do NOT fabricate facts. If a query returns no results, omit the claim.
+Do NOT overwrite existing human prose in sections with >30 words.
+Output ONLY valid JSON. No markdown fence, no preamble, no trailing text.
+"""
+
+
+def load_candidate(path: Path) -> dict[str, Any]:
+    """Load a candidate dict from a JSON file."""
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def validate_artifact(artifact: dict[str, Any]) -> list[str]:
+    """Validate a research artifact against the schema.
+
+    Returns a list of error strings (empty = valid).
+    Checks:
+      - All top-level required keys present
+      - Every claim has citation.url (non-empty) and citation.quote (non-empty)
+    """
+    errors: list[str] = []
+    required_keys = [
+        "target_slug", "researched_at", "researcher",
+        "queries_run", "claims", "structured_facts",
+        "suggested_links", "narrative_additions",
+    ]
+    for key in required_keys:
+        if key not in artifact:
+            errors.append(f"missing top-level key: {key}")
+
+    claims = artifact.get("claims", [])
+    if not isinstance(claims, list):
+        errors.append("claims must be an array")
+        return errors
+
+    for i, claim in enumerate(claims):
+        citation = claim.get("citation")
+        if not isinstance(citation, dict):
+            errors.append(f"claims[{i}]: citation is not a dict")
+            continue
+        url = citation.get("url", "")
+        if not url or not url.strip():
+            errors.append(f"claims[{i}]: citation.url is empty (Iron Law violation)")
+        quote = citation.get("quote", "")
+        if not quote or not quote.strip():
+            errors.append(f"claims[{i}]: citation.quote is empty (Iron Law violation)")
+
+    return errors
+
+
+def compile_cal_prompt(slug: str, query_plan: list[dict], page_content: str,
+                       schema_text: str) -> str:
+    """Build the compiled prompt text for Cal."""
+    qp_json = json.dumps(query_plan, indent=2)
+    return TASK_TEMPLATE.format(
+        slug=slug,
+        query_plan_json=qp_json,
+        page_content=page_content,
+        schema_text=schema_text,
+    )
+
+
+def get_page_content(slug: str) -> str:
+    """Fetch current page content from the brain via gbrain."""
+    return auto_enrich_lib.run_gbrain(["get", slug])
+
+
+def load_schema_text() -> str:
+    """Load the research artifact schema markdown for inclusion in the Cal prompt."""
+    schema_path = _SCRIPT_DIR.parent / "docs" / "research-artifact-schema.md"
+    if schema_path.exists():
+        return schema_path.read_text(encoding="utf-8")
+    # Fallback: embed a minimal schema inline
+    return """Research artifact JSON must have these top-level keys:
+- target_slug (string): the page slug
+- researched_at (ISO8601 string)
+- researcher (string): "cal-subagent"
+- queries_run (array of {query, source, result_count})
+- claims (array of {text, citation: {url, fetched_at, quote}, section_hint})
+- structured_facts (array of {key, value, ...})
+- suggested_links (array of {type, target})
+- narrative_additions (array of {section, text, citation_indexes})
+
+IRON LAW: every claim's citation must have non-empty url AND quote."""
+
+
+def dispatch_cal(prompt: str) -> tuple[int, str, str]:
+    """Spawn Cal via hermes -z and return (returncode, stdout, stderr)."""
+    cmd = [
+        "hermes", "-z", prompt,
+        "--model", "claude-haiku-4-5",
+        "--yolo",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+    return result.returncode, result.stdout, result.stderr
+
+
+def parse_cal_json_output(stdout: str) -> dict[str, Any]:
+    """Extract JSON from Cal's stdout.
+
+    Cal may return just the JSON or wrap it in a markdown fence.
+    """
+    text = stdout.strip()
+    # Try bare JSON first
+    if text.startswith("{"):
+        return json.loads(text)
+
+    # Try code fence
+    import re
+    m = re.search(r"```(?:json\s*\n)?(.*?)```", text, re.DOTALL)
+    if m:
+        return json.loads(m.group(1).strip())
+
+    # Last-ditch: find the first and last braces
+    first = text.find("{")
+    last = text.rfind("}")
+    if first >= 0 and last > first:
+        return json.loads(text[first:last + 1])
+
+    raise ValueError(f"Could not parse JSON from Cal output (first 200 chars: {text[:200]})")
+
+
+def run(candidate_json_path: str, output_artifact_path: str,
+        dry_run: bool = False, page_content_override: str | None = None) -> int:
+    """Main entry point. Returns exit code."""
+    hb = Heartbeat()
+
+    # Load candidate
+    try:
+        candidate = load_candidate(Path(candidate_json_path))
+    except (json.JSONDecodeError, FileNotFoundError) as exc:
+        hb.emit("research_dispatch", status="error", error=f"load candidate: {exc}")
+        return 3
+
+    slug = candidate.get("slug", candidate.get("target_slug", "unknown"))
+    page_type = candidate.get("page_type", "unknown")
+
+    # Build query plan
+    if page_content_override is not None:
+        page_content = page_content_override
+    else:
+        try:
+            page_content = get_page_content(slug)
+        except auto_enrich_lib.GBrainCLIError as exc:
+            hb.emit("research_dispatch", status="error", error=f"gbrain get: {exc}")
+            return 3
+
+    query_plan = research_strategy.build_query_plan(candidate, page_content)
+    schema_text = load_schema_text()
+
+    # Compose prompt
+    prompt = compile_cal_prompt(slug, query_plan, page_content, schema_text)
+
+    if dry_run:
+        print(f"=== PLANNED CAL PROMPT (dry-run) ===")
+        print(f"candidate: {slug}")
+        print(f"page_type: {page_type}")
+        print(f"queries planned: {len(query_plan)}")
+        print(f"---")
+        print(prompt)
+        print(f"---")
+        hb.emit("research_dispatch", status="dry_run", details={
+            "slug": slug,
+            "page_type": page_type,
+            "queries_planned": len(query_plan),
+        })
+        return 0
+
+    # Dispatch Cal
+    returncode, stdout, stderr = dispatch_cal(prompt)
+    if returncode != 0:
+        hb.emit("research_dispatch", status="dispatch_error", error=stderr[:500], details={
+            "slug": slug,
+            "exit_code": returncode,
+        })
+        return 1
+
+    # Parse artifact
+    try:
+        artifact = parse_cal_json_output(stdout)
+    except (json.JSONDecodeError, ValueError) as exc:
+        hb.emit("research_dispatch", status="parse_error",
+                error=f"Cal JSON parse: {exc}", details={"slug": slug})
+        return 2
+
+    # Validate
+    errors = validate_artifact(artifact)
+    if errors:
+        hb.emit("research_dispatch", status="schema_validation_failed",
+                error=" | ".join(errors), details={"slug": slug})
+        return 2
+
+    # Enforce researcher tag and timestamp
+    artifact["researcher"] = "cal-subagent"
+    artifact["researched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Write artifact
+    try:
+        output = Path(output_artifact_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        hb.emit("research_dispatch", status="write_error",
+                error=f"Could not write artifact: {exc}")
+        return 3
+
+    hb.emit("research_dispatch", status="ok", details={
+        "slug": slug,
+        "claims_count": len(artifact.get("claims", [])),
+        "queries_run": len(artifact.get("queries_run", [])),
+        "artifact_path": str(output),
+    })
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Dispatch Cal to research a candidate page")
+    parser.add_argument("--candidate-json", required=True, help="Path to candidate JSON from sensor")
+    parser.add_argument("--output-artifact", required=True, help="Path to write research artifact JSON")
+    parser.add_argument("--dry-run", action="store_true", help="Print planned prompt without dispatching")
+    args = parser.parse_args()
+
+    sys.exit(run(args.candidate_json, args.output_artifact, dry_run=args.dry_run))
+
+
+if __name__ == "__main__":
+    main()
