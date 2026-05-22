@@ -16,18 +16,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import quality_check  # noqa: E402
 
 
-def _issue(rule: str, severity: str, detail: str) -> dict:
-    return {"rule": rule, "severity": severity, "detail": detail}
+def _issue(rule: str, severity: str, detail: str, claim_index=None) -> dict:
+    out = {"rule": rule, "severity": severity, "detail": detail}
+    if claim_index is not None:
+        out["claim_index"] = claim_index
+    return out
 
 
 # ---- failing_iron_law_indices ----
 
 def test_failing_iron_law_indices_collects_blocking_only():
     issues = [
-        _issue("iron_law", "critical", "claims[0]: quote not found on page https://x"),
-        _issue("iron_law", "critical", "claims[2]: citation.quote empty"),
+        _issue("iron_law", "critical", "claims[0]: quote not found on page https://x", claim_index=0),
+        _issue("iron_law", "critical", "claims[2]: citation.quote empty", claim_index=2),
         # Non-blocking iron_law (fetch hint) should NOT be collected
-        _issue("iron_law", "low", "claims[1]: fetch fail for https://x: timeout (fail-open)"),
+        _issue("iron_law", "low", "claims[1]: fetch fail for https://x: timeout (fail-open)", claim_index=1),
         # Other rules ignored
         _issue("no_fabrication", "high", "fabricated gbrain verb foo"),
     ]
@@ -39,10 +42,22 @@ def test_failing_iron_law_indices_empty_when_no_iron_law():
     assert quality_check.failing_iron_law_indices(issues) == set()
 
 
-def test_failing_iron_law_indices_handles_malformed_detail():
-    # Detail that doesn't start with "claims[N]:" must not crash, just skip.
+def test_failing_iron_law_indices_ignores_issues_without_claim_index():
+    # E.g. the aggregate iron_law_fetch_stats issue, or any future Iron Law
+    # issue that is structurally not per-claim. They have no claim_index
+    # field and must be skipped, not crash.
     issues = [_issue("iron_law", "critical", "global iron law failure")]
     assert quality_check.failing_iron_law_indices(issues) == set()
+
+
+def test_failing_iron_law_indices_uses_structured_field_not_regex():
+    # If someone someday changes the detail-string prefix away from
+    # 'claims[N]:', the structured field is still authoritative. This
+    # test pins that contract.
+    issues = [
+        _issue("iron_law", "critical", "Detail without the claims[N] prefix", claim_index=7),
+    ]
+    assert quality_check.failing_iron_law_indices(issues) == {7}
 
 
 # ---- filter_artifact_drop_claims ----

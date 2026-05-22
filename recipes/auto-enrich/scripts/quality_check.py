@@ -45,10 +45,6 @@ from auto_enrich_lib import parse_frontmatter  # noqa: E402
 # Severities that block.
 BLOCKING = {"critical", "high"}
 
-# Regex to recover the claim index from an iron_law issue detail.
-# Iron Law issues are emitted as "claims[N]: ..." (see check_iron_law).
-_IRON_CLAIM_INDEX_RE = re.compile(r"^claims\[(\d+)\]:")
-
 
 def failing_iron_law_indices(issues: list[dict[str, Any]]) -> set[int]:
     """Return the set of claim indices that hit a blocking Iron Law issue.
@@ -58,6 +54,11 @@ def failing_iron_law_indices(issues: list[dict[str, Any]]) -> set[int]:
     the remaining verified claims still get synthesized. Non-blocking
     Iron Law issues (low-severity fetch hints) are NOT collected here —
     they don't fail the claim, they just annotate it.
+
+    Reads the structured ``claim_index`` field set by ``_issue()`` on Iron
+    Law callsites. Issues without ``claim_index`` (e.g. the
+    ``iron_law_fetch_stats`` aggregate emitted by ``check()``) are
+    correctly ignored — they aren't per-claim failures.
     """
     out: set[int] = set()
     for it in issues:
@@ -65,9 +66,9 @@ def failing_iron_law_indices(issues: list[dict[str, Any]]) -> set[int]:
             continue
         if it.get("severity") not in BLOCKING:
             continue
-        m = _IRON_CLAIM_INDEX_RE.match(it.get("detail") or "")
-        if m:
-            out.add(int(m.group(1)))
+        ci = it.get("claim_index")
+        if isinstance(ci, int):
+            out.add(ci)
     return out
 
 
@@ -232,8 +233,26 @@ def _normalize_for_match(s: str) -> str:
     return s.strip().lower()
 
 
-def _issue(rule: str, severity: str, detail: str) -> dict[str, str]:
-    return {"rule": rule, "severity": severity, "detail": detail}
+def _issue(
+    rule: str,
+    severity: str,
+    detail: str,
+    *,
+    claim_index: int | None = None,
+) -> dict[str, Any]:
+    """Build a quality-gate issue dict.
+
+    ``claim_index`` is the structured field that ``failing_iron_law_indices``
+    reads to decide which claims to drop during partial-credit recovery.
+    Iron Law callsites that operate on a specific claim MUST pass it.
+    Non-claim issues (lint failures, fetch stats, fabricated commands) omit
+    it. The human-readable ``detail`` string remains the surface for logs
+    and humans; it is no longer parsed as a structured field.
+    """
+    issue: dict[str, Any] = {"rule": rule, "severity": severity, "detail": detail}
+    if claim_index is not None:
+        issue["claim_index"] = claim_index
+    return issue
 
 
 def _fetch_via_gstack_browse(
@@ -319,15 +338,27 @@ def check_iron_law(artifact: dict[str, Any]) -> tuple[list[dict[str, str]], dict
     for i, claim in enumerate(claims):
         cit = claim.get("citation") if isinstance(claim, dict) else None
         if not isinstance(cit, dict):
-            issues.append(_issue("iron_law", "critical", f"claims[{i}]: missing citation"))
+            issues.append(_issue(
+                "iron_law", "critical",
+                f"claims[{i}]: missing citation",
+                claim_index=i,
+            ))
             continue
         url = (cit.get("url") or "").strip()
         quote = (cit.get("quote") or "").strip()
         if not url:
-            issues.append(_issue("iron_law", "critical", f"claims[{i}]: citation.url empty"))
+            issues.append(_issue(
+                "iron_law", "critical",
+                f"claims[{i}]: citation.url empty",
+                claim_index=i,
+            ))
             continue
         if not quote:
-            issues.append(_issue("iron_law", "critical", f"claims[{i}]: citation.quote empty"))
+            issues.append(_issue(
+                "iron_law", "critical",
+                f"claims[{i}]: citation.quote empty",
+                claim_index=i,
+            ))
             continue
 
         if url not in body_cache:
@@ -345,6 +376,7 @@ def check_iron_law(artifact: dict[str, Any]) -> tuple[list[dict[str, str]], dict
                     issues.append(_issue(
                         "iron_law", "low",
                         f"claims[{i}]: xurl X API fetch failed for {url}, falling back to HTTP",
+                        claim_index=i,
                     ))
                     body_cache[url] = _fetch_url_body(url)
             else:
@@ -357,6 +389,7 @@ def check_iron_law(artifact: dict[str, Any]) -> tuple[list[dict[str, str]], dict
                         issues.append(_issue(
                             "iron_law", "low",
                             f"claims[{i}]: xurl X profile fetch failed for {url}, falling back to HTTP",
+                            claim_index=i,
                         ))
                         body_cache[url] = _fetch_url_body(url)
                 else:
@@ -370,6 +403,7 @@ def check_iron_law(artifact: dict[str, Any]) -> tuple[list[dict[str, str]], dict
                         issues.append(_issue(
                             "iron_law", "low",
                             f"claims[{i}]: gstack-browse fetch unavailable/failed for {url}, falling back to HTTP",
+                            claim_index=i,
                         ))
                         body_cache[url] = _fetch_url_body(url)
         body, err = body_cache[url]
@@ -377,13 +411,15 @@ def check_iron_law(artifact: dict[str, Any]) -> tuple[list[dict[str, str]], dict
             fetch_failures += 1
             issues.append(_issue(
                 "iron_law", "low",
-                f"claims[{i}]: fetch fail for {url}: {err} (fail-open, did not block)"
+                f"claims[{i}]: fetch fail for {url}: {err} (fail-open, did not block)",
+                claim_index=i,
             ))
             continue
         if _normalize_for_match(quote) not in _normalize_for_match(body):
             issues.append(_issue(
                 "iron_law", "critical",
-                f"claims[{i}]: quote not found on page {url}"
+                f"claims[{i}]: quote not found on page {url}",
+                claim_index=i,
             ))
 
     stats = {
