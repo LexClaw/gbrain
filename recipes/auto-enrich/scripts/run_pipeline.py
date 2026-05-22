@@ -157,17 +157,77 @@ def process_candidate(
     current_page = _current_page_safe(slug)
     pre_passed, pre_issues = quality_check.check(artifact, current_page, draft_path=None)
     if not pre_passed:
-        buckets = _classify_issues(pre_issues)
-        for k, v in buckets.items():
-            counters[k] += v
-        counters["escalations_count"] += 1
-        _append_escalation({
-            "ts": _now_iso(), "slug": slug, "stage": "quality_pre",
-            "issues": pre_issues,
-        })
-        hb.emit("pipeline_step", status="quality_pre_failed",
-                details={"slug": slug, "issues_count": len(pre_issues)})
-        return False
+        # Partial-credit recovery: if the ONLY blocking issues are per-claim
+        # Iron Law violations, drop the failing claims and re-check. This
+        # lets us enrich a page with the 2 verified facts even when Cal
+        # also returned 2 unverified ones — matches how a real research
+        # assistant works ("keep the good, drop the noise"). If anything
+        # else blocks (fabricated commands, non-destructive overwrite,
+        # claims-list-empty), no recovery.
+        drop = quality_check.failing_iron_law_indices(pre_issues)
+        non_iron_blocking = [
+            i for i in pre_issues
+            if i.get("severity") in quality_check.BLOCKING
+            and i.get("rule") != "iron_law"
+        ]
+        original_claim_count = len(artifact.get("claims", []) or [])
+        if drop and not non_iron_blocking and len(drop) < original_claim_count:
+            filtered = quality_check.filter_artifact_drop_claims(artifact, drop)
+            re_passed, re_issues = quality_check.check(
+                filtered, current_page, draft_path=None,
+            )
+            if re_passed:
+                # Log the drop for transparency, then proceed with the
+                # filtered artifact through synthesize.
+                _append_escalation({
+                    "ts": _now_iso(), "slug": slug,
+                    "stage": "quality_pre_partial_credit",
+                    "dropped_claims": sorted(drop),
+                    "dropped_claim_count": len(drop),
+                    "kept_claim_count": len(filtered.get("claims", [])),
+                    "original_issues": pre_issues,
+                })
+                hb.emit("pipeline_step", status="quality_pre_partial_credit",
+                        details={
+                            "slug": slug,
+                            "dropped": len(drop),
+                            "kept": len(filtered.get("claims", [])),
+                        })
+                # Persist the filtered artifact so synthesize reads the
+                # surviving claims, not the originals.
+                filtered_path = work_dir / f"artifact-{slug.replace('/', '_')}-filtered.json"
+                filtered_path.write_text(json.dumps(filtered, indent=2))
+                art_path = filtered_path
+                artifact = filtered
+                pre_issues = re_issues  # for downstream visibility
+            else:
+                # Re-check still failed (e.g. dropping claims left an empty
+                # list and another rule fires) — fall through to normal fail.
+                buckets = _classify_issues(pre_issues)
+                for k, v in buckets.items():
+                    counters[k] += v
+                counters["escalations_count"] += 1
+                _append_escalation({
+                    "ts": _now_iso(), "slug": slug, "stage": "quality_pre",
+                    "issues": pre_issues,
+                    "partial_credit_attempted": True,
+                    "post_filter_issues": re_issues,
+                })
+                hb.emit("pipeline_step", status="quality_pre_failed",
+                        details={"slug": slug, "issues_count": len(pre_issues)})
+                return False
+        else:
+            buckets = _classify_issues(pre_issues)
+            for k, v in buckets.items():
+                counters[k] += v
+            counters["escalations_count"] += 1
+            _append_escalation({
+                "ts": _now_iso(), "slug": slug, "stage": "quality_pre",
+                "issues": pre_issues,
+            })
+            hb.emit("pipeline_step", status="quality_pre_failed",
+                    details={"slug": slug, "issues_count": len(pre_issues)})
+            return False
 
     # Step 3: synthesize
     draft_path = work_dir / f"draft-{slug.replace('/', '_')}.md"

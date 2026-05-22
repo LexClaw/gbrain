@@ -91,6 +91,16 @@ GOOD examples (these PASS because they appear verbatim on the source):
   GOOD quote: "Eoghan McCabe, the controversial Intercom co-founder who left the CEO role in 2020, is stepping back in"
   GOOD quote: "We're the #1 AI Customer Service platform"
 
+DATES AND NUMBERS — DO NOT REFORMAT:
+If the source says "2008-10-27T20:08:30.000Z", your quote must contain
+that exact string (or a substring of it like "2008-10-27"). Do NOT translate
+to "October 2008" — that string does not appear on the source and the gate
+will reject it. Same rule for numbers: if the API returns 801, quote "801",
+not "around 800" or "roughly 800 followers". The gate does literal substring
+matching; it has no calendar logic and no rounding logic. Quote the raw
+value as it appears, and let the synthesized prose around it do the
+human-friendly framing.
+
 REJECTION GUIDANCE: If you cannot find a verbatim substring on the source
 that supports a claim, DROP the claim entirely. Quality beats quantity.
 Three verified claims is better than sixteen claims of which twelve fail

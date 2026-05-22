@@ -45,6 +45,52 @@ from auto_enrich_lib import parse_frontmatter  # noqa: E402
 # Severities that block.
 BLOCKING = {"critical", "high"}
 
+# Regex to recover the claim index from an iron_law issue detail.
+# Iron Law issues are emitted as "claims[N]: ..." (see check_iron_law).
+_IRON_CLAIM_INDEX_RE = re.compile(r"^claims\[(\d+)\]:")
+
+
+def failing_iron_law_indices(issues: list[dict[str, Any]]) -> set[int]:
+    """Return the set of claim indices that hit a blocking Iron Law issue.
+
+    Used by the partial-credit pipeline: claims with quote-mismatch /
+    missing-citation / quote-empty failures are dropped from the artifact;
+    the remaining verified claims still get synthesized. Non-blocking
+    Iron Law issues (low-severity fetch hints) are NOT collected here —
+    they don't fail the claim, they just annotate it.
+    """
+    out: set[int] = set()
+    for it in issues:
+        if it.get("rule") != "iron_law":
+            continue
+        if it.get("severity") not in BLOCKING:
+            continue
+        m = _IRON_CLAIM_INDEX_RE.match(it.get("detail") or "")
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
+def filter_artifact_drop_claims(
+    artifact: dict[str, Any], drop_indices: set[int]
+) -> dict[str, Any]:
+    """Return a shallow copy of artifact with the listed claim indices removed.
+
+    The original artifact is left untouched (callers may keep it for the
+    escalation log). The returned dict has a fresh `claims` list and a new
+    `dropped_claim_count` field for downstream visibility.
+    """
+    if not drop_indices:
+        return artifact
+    new_claims = [
+        c for i, c in enumerate(artifact.get("claims", []) or [])
+        if i not in drop_indices
+    ]
+    new_art = dict(artifact)
+    new_art["claims"] = new_claims
+    new_art["dropped_claim_count"] = len(drop_indices)
+    return new_art
+
 # HTTP fetch settings for Iron Law.
 FETCH_TIMEOUT = 5
 FETCH_UA = "auto-enrich-quality-gate/0.3.0"
@@ -127,7 +173,7 @@ def _fetch_x_profile_text(handle: str, timeout: int = XURL_TIMEOUT) -> str | Non
     """
     try:
         result = subprocess.run(
-            ["xurl", f"/2/users/by/username/{handle}?user.fields=description,url,location,verified,name,created_at"],
+            ["xurl", f"/2/users/by/username/{handle}?user.fields=description,url,location,verified,name,created_at,public_metrics"],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -156,6 +202,17 @@ def _fetch_x_profile_text(handle: str, timeout: int = XURL_TIMEOUT) -> str | Non
         parts.append("Verified")
     if data.get("created_at"):
         parts.append(f"Joined: {data['created_at']}")
+    metrics = data.get("public_metrics")
+    if isinstance(metrics, dict):
+        for key in ("followers_count", "following_count", "tweet_count", "listed_count"):
+            if key in metrics:
+                # Emit both the raw integer ("801") and the labeled form
+                # ("801 Followers" / "Followers: 801") so verbatim quotes
+                # from Cal in any common shape will match.
+                val = metrics[key]
+                label = key.replace("_count", "").capitalize()
+                parts.append(f"{val} {label}")
+                parts.append(f"{label}: {val}")
     combined = "\n".join(parts).strip()
     return combined or None
 
