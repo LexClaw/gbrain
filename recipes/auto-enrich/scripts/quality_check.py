@@ -27,6 +27,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import os
 import subprocess
 import sys
 import unicodedata
@@ -52,6 +53,16 @@ FETCH_UA = "auto-enrich-quality-gate/0.3.0"
 GBRAIN_HELP_TIMEOUT = 10
 GBRAIN_LINT_TIMEOUT = 30
 XURL_TIMEOUT = 5
+
+# gstack-browse fetch settings. The binary is the Hit Network canonical
+# headless browser; it renders JS-heavy pages plain urllib cannot reach.
+GSTACK_BROWSE_BIN = str(Path(os.path.expanduser(
+    "~/.hermes/skills/gstack/browse/dist/browse"
+)))
+GSTACK_GOTO_TIMEOUT = 20
+GSTACK_TEXT_TIMEOUT = 10
+_GSTACK_SENTINEL_BEGIN_PREFIX = "--- BEGIN UNTRUSTED EXTERNAL CONTENT"
+_GSTACK_SENTINEL_END = "--- END UNTRUSTED EXTERNAL CONTENT ---"
 
 # X / Twitter status URL detector. Matches:
 #   https://x.com/<handle>/status/<id>
@@ -168,6 +179,55 @@ def _issue(rule: str, severity: str, detail: str) -> dict[str, str]:
     return {"rule": rule, "severity": severity, "detail": detail}
 
 
+def _fetch_via_gstack_browse(
+    url: str,
+    timeout_seconds: int = GSTACK_GOTO_TIMEOUT,
+) -> str | None:
+    """Fetch a JS-rendered URL via the gstack-browse headless browser.
+
+    Returns the page text (with the BEGIN/END sentinel lines stripped), or
+    None on any failure (missing binary, non-zero exit, timeout, OSError).
+    Two-step protocol: `browse goto <url>` then `browse text`.
+    """
+    binary = GSTACK_BROWSE_BIN
+    if not os.path.exists(binary):
+        return None
+    try:
+        goto = subprocess.run(
+            [binary, "goto", url],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        if goto.returncode != 0:
+            return None
+        body = subprocess.run(
+            [binary, "text"],
+            capture_output=True,
+            text=True,
+            timeout=GSTACK_TEXT_TIMEOUT,
+            check=False,
+        )
+        if body.returncode != 0:
+            return None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    raw = body.stdout or ""
+    # Strip sentinel lines. BEGIN line includes the source URL after the
+    # prefix, so we match by prefix; END line is fixed.
+    out_lines: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_GSTACK_SENTINEL_BEGIN_PREFIX):
+            continue
+        if stripped == _GSTACK_SENTINEL_END:
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
 def _fetch_url_body(url: str) -> tuple[str | None, str | None]:
     """Fetch a URL with a short timeout. Returns (body, error_message)."""
     try:
@@ -243,7 +303,18 @@ def check_iron_law(artifact: dict[str, Any]) -> tuple[list[dict[str, str]], dict
                         ))
                         body_cache[url] = _fetch_url_body(url)
                 else:
-                    body_cache[url] = _fetch_url_body(url)
+                    # Non-X URL: prefer gstack-browse (renders JS); fall
+                    # back to plain HTTP urllib if browse is unavailable
+                    # or fails (last resort, fail-open).
+                    gstack_text = _fetch_via_gstack_browse(url)
+                    if gstack_text is not None:
+                        body_cache[url] = (gstack_text, None)
+                    else:
+                        issues.append(_issue(
+                            "iron_law", "low",
+                            f"claims[{i}]: gstack-browse fetch unavailable/failed for {url}, falling back to HTTP",
+                        ))
+                        body_cache[url] = _fetch_url_body(url)
         body, err = body_cache[url]
         if body is None:
             fetch_failures += 1

@@ -69,6 +69,18 @@ def _patch_lint_fail(stderr="malformed frontmatter"):
 
 # --- Fixtures (artifact + page) ---
 
+@pytest.fixture(autouse=True)
+def _disable_gstack_browse_by_default(request):
+    """Autouse: stub _fetch_via_gstack_browse to return None so existing
+    tests fall through to the mocked urllib path. Tests that exercise the
+    gstack-browse code path opt out by marking ``no_gstack_stub``."""
+    if "no_gstack_stub" in request.keywords:
+        yield
+        return
+    with patch.object(quality_check, "_fetch_via_gstack_browse", return_value=None):
+        yield
+
+
 @pytest.fixture
 def good_artifact():
     return json.loads((FIXTURES / "research_artifact_good.json").read_text())
@@ -669,3 +681,197 @@ def test_x_profile_xurl_failure_falls_back_to_http():
     # Low-severity warning about the xurl failure should appear.
     low = [i for i in issues if i["severity"] == "low" and "profile" in i["detail"]]
     assert low, "expected a low-severity warning about xurl profile fallback"
+
+
+# --- gstack-browse fetch path tests (Round 3) ---
+
+GSTACK_BIN_PATH_FRAGMENT = "gstack/browse/dist/browse"
+
+
+@pytest.mark.no_gstack_stub
+def test_fetch_via_gstack_browse_command_shape():
+    """Two subprocess calls in order: `<binary> goto <url>` then
+    `<binary> text`. Binary path includes gstack/browse/dist/browse."""
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        calls.append({"cmd": list(cmd), "timeout": timeout})
+        if cmd[1] == "goto":
+            return MagicMock(returncode=0, stdout="Navigated\n", stderr="")
+        return MagicMock(returncode=0, stdout="some page text\n", stderr="")
+
+    with patch.object(quality_check.os.path, "exists", return_value=True), \
+         patch.object(quality_check.subprocess, "run", fake_run):
+        out = quality_check._fetch_via_gstack_browse("https://example.com")
+
+    assert out is not None
+    assert len(calls) == 2
+    assert calls[0]["cmd"][1] == "goto"
+    assert calls[0]["cmd"][2] == "https://example.com"
+    assert GSTACK_BIN_PATH_FRAGMENT in calls[0]["cmd"][0]
+    assert calls[1]["cmd"][1] == "text"
+    assert GSTACK_BIN_PATH_FRAGMENT in calls[1]["cmd"][0]
+
+
+@pytest.mark.no_gstack_stub
+def test_fetch_via_gstack_browse_strips_sentinels():
+    """BEGIN/END sentinel lines stripped from returned content."""
+    payload = (
+        "--- BEGIN UNTRUSTED EXTERNAL CONTENT (source: https://example.com/) ---\n"
+        "Real body line one\n"
+        "Real body line two\n"
+        "--- END UNTRUSTED EXTERNAL CONTENT ---\n"
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        if cmd[1] == "goto":
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout=payload, stderr="")
+
+    with patch.object(quality_check.os.path, "exists", return_value=True), \
+         patch.object(quality_check.subprocess, "run", fake_run):
+        out = quality_check._fetch_via_gstack_browse("https://example.com")
+
+    assert out is not None
+    assert "BEGIN UNTRUSTED EXTERNAL CONTENT" not in out
+    assert "END UNTRUSTED EXTERNAL CONTENT" not in out
+    assert "Real body line one" in out
+    assert "Real body line two" in out
+
+
+@pytest.mark.no_gstack_stub
+def test_fetch_via_gstack_browse_returns_none_on_missing_binary():
+    """If binary path does not exist, return None without invoking subprocess."""
+    run_called = {"v": False}
+
+    def fake_run(*a, **kw):
+        run_called["v"] = True
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch.object(quality_check.os.path, "exists", return_value=False), \
+         patch.object(quality_check.subprocess, "run", fake_run):
+        out = quality_check._fetch_via_gstack_browse("https://example.com")
+
+    assert out is None
+    assert run_called["v"] is False
+
+
+@pytest.mark.no_gstack_stub
+def test_fetch_via_gstack_browse_returns_none_on_timeout():
+    """TimeoutExpired and OSError both yield None."""
+    def timeout_boom(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    with patch.object(quality_check.os.path, "exists", return_value=True), \
+         patch.object(quality_check.subprocess, "run", timeout_boom):
+        assert quality_check._fetch_via_gstack_browse("https://example.com") is None
+
+    def os_boom(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        raise OSError("exec format error")
+
+    with patch.object(quality_check.os.path, "exists", return_value=True), \
+         patch.object(quality_check.subprocess, "run", os_boom):
+        assert quality_check._fetch_via_gstack_browse("https://example.com") is None
+
+
+@pytest.mark.no_gstack_stub
+def test_iron_law_uses_gstack_browse_for_generic_url():
+    """For non-X URL, _fetch_via_gstack_browse is called and plain HTTP urllib is NOT."""
+    artifact = {
+        "claims": [
+            {
+                "text": "Anyword has a parent company",
+                "citation": {
+                    "url": "https://anyword.com/about",
+                    "quote": "Keywee Inc. (d.b.a. Anyword)",
+                },
+            }
+        ],
+    }
+
+    gstack_called = {"v": False}
+
+    def fake_gstack(url, timeout_seconds=20):  # noqa: ARG001
+        gstack_called["v"] = True
+        return "About page content: Keywee Inc. (d.b.a. Anyword) operates the platform."
+
+    def fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise AssertionError("plain HTTP must not be called when gstack-browse succeeds")
+
+    with patch.object(quality_check, "_fetch_via_gstack_browse", fake_gstack), \
+         patch.object(quality_check.urllib.request, "urlopen", fake_urlopen):
+        issues, _ = quality_check.check_iron_law(artifact)
+
+    assert gstack_called["v"] is True
+    crit = [i for i in issues if i["severity"] == "critical"]
+    assert crit == [], f"expected pass, got {crit}"
+
+
+@pytest.mark.no_gstack_stub
+def test_iron_law_falls_back_to_http_when_gstack_browse_returns_none():
+    """When gstack-browse returns None, plain HTTP urllib IS called."""
+    artifact = {
+        "claims": [
+            {
+                "text": "claim",
+                "citation": {
+                    "url": "https://example.com/foo",
+                    "quote": "fallback body",
+                },
+            }
+        ],
+    }
+
+    http_calls = []
+    fake_url_opener = _mock_urlopen_factory({"https://example.com/foo": "<html>fallback body</html>"})
+
+    def tracking_urlopen(req, timeout=None):
+        http_calls.append(req.get_full_url())
+        return fake_url_opener(req, timeout=timeout)
+
+    with patch.object(quality_check, "_fetch_via_gstack_browse", return_value=None), \
+         patch.object(quality_check.urllib.request, "urlopen", tracking_urlopen):
+        issues, _ = quality_check.check_iron_law(artifact)
+
+    assert http_calls == ["https://example.com/foo"]
+    crit = [i for i in issues if i["severity"] == "critical"]
+    assert crit == [], f"http fallback should have matched; got {crit}"
+    low = [i for i in issues if i["severity"] == "low" and "gstack-browse" in i["detail"]]
+    assert low, "expected low-severity warning about gstack-browse failure"
+
+
+@pytest.mark.no_gstack_stub
+def test_x_urls_still_use_xurl_not_gstack_browse():
+    """Regression: x.com/status URLs go to xurl, gstack-browse must NOT be called."""
+    artifact = {
+        "claims": [
+            {
+                "text": "tweet content",
+                "citation": {
+                    "url": "https://x.com/foo/status/123",
+                    "quote": "tweeted hello world",
+                },
+            }
+        ],
+    }
+
+    gstack_called = {"v": False}
+
+    def fake_gstack(url, timeout_seconds=20):  # noqa: ARG001
+        gstack_called["v"] = True
+        return None
+
+    xurl_called = {"v": False}
+
+    def fake_xurl(tweet_id, timeout=5):  # noqa: ARG001
+        xurl_called["v"] = True
+        return "tweeted hello world"
+
+    with patch.object(quality_check, "_fetch_via_gstack_browse", fake_gstack), \
+         patch.object(quality_check, "_fetch_x_tweet_text", fake_xurl):
+        issues, _ = quality_check.check_iron_law(artifact)
+
+    assert xurl_called["v"] is True, "xurl should handle X status URLs"
+    assert gstack_called["v"] is False, "gstack-browse must not be called for X URLs"
+    crit = [i for i in issues if i["severity"] == "critical"]
+    assert crit == []

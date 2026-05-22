@@ -151,6 +151,24 @@ whitespace, so `&gt;` vs `>` and curly vs straight quotes do not produce false
 negatives. If `xurl` is missing, times out, or returns a non-2xx, the gate
 falls back to the plain HTTP path with the existing fail-open warning.
 
+#### Generic URL handling via gstack-browse
+
+For non-X URLs, the Iron Law gate defaults to `gstack-browse` (the Hit Network
+canonical headless browser, binary at
+`~/.hermes/skills/gstack/browse/dist/browse`) before any plain HTTP fetch. The
+gate calls `browse goto <url>` followed by `browse text`, strips the
+`BEGIN/END UNTRUSTED EXTERNAL CONTENT` sentinel lines, and feeds the rendered
+body through the same `_normalize_for_match` path used everywhere else. This
+lets the gate verify quotes against JS-rendered pages (SPAs like anyword.com,
+dynamically loaded marketing pages, news sites with deferred hydration) that
+plain `urllib` cannot reach because it only ever sees the JS shell. Fetch
+chain order is: (1) xurl tweet API for `x.com/.../status/<id>`, (2) xurl
+profile API for bare `x.com/<handle>`, (3) gstack-browse for everything else,
+(4) plain HTTP urllib as last resort. Any failure of step 3 emits a
+low-severity warning and falls through to step 4 (fail-open). When the
+gstack-browse binary is missing the gate degrades to plain HTTP without
+blocking.
+
 ### Running research
 
 ```bash
