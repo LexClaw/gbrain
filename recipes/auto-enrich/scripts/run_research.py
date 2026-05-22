@@ -80,6 +80,18 @@ NO paraphrasing. NO summarizing. NO inference. NO synthesis of multiple
 sentences. NO "in other words" rewrites. The quote field is not a
 description of what the source says; it IS what the source says.
 
+DATES AND NUMBERS — DO NOT REFORMAT (READ THIS BEFORE WRITING ANY CLAIM):
+- If the source string is "2008-10-27T20:08:30.000Z", your quote must
+  contain "2008-10-27" (or the full timestamp). DO NOT write "October 2008".
+- If the API returns 803, your quote must contain "803". DO NOT write
+  "around 800" or "approximately 800".
+- If the source says "May 14, 2026", your quote must contain "May 14, 2026"
+  exactly — not "May 2026" and not "14 May 2026".
+The gate has zero calendar logic and zero rounding logic. It only knows
+"does this exact string appear on the page." Quote the raw source value
+verbatim. The synthesized prose around the claim can phrase it
+human-friendly later.
+
 BAD examples (these all FAIL the gate because they are paraphrases):
   BAD quote: "@Prisma listed in profile work history"
   BAD quote: "the #1 customer platform for financial services, retail, tech, and insurance"
@@ -90,16 +102,6 @@ GOOD examples (these PASS because they appear verbatim on the source):
   GOOD quote: "Head of DX at @warpdotdev. Previously @Prisma & @Scandit."
   GOOD quote: "Eoghan McCabe, the controversial Intercom co-founder who left the CEO role in 2020, is stepping back in"
   GOOD quote: "We're the #1 AI Customer Service platform"
-
-DATES AND NUMBERS — DO NOT REFORMAT:
-If the source says "2008-10-27T20:08:30.000Z", your quote must contain
-that exact string (or a substring of it like "2008-10-27"). Do NOT translate
-to "October 2008" — that string does not appear on the source and the gate
-will reject it. Same rule for numbers: if the API returns 801, quote "801",
-not "around 800" or "roughly 800 followers". The gate does literal substring
-matching; it has no calendar logic and no rounding logic. Quote the raw
-value as it appears, and let the synthesized prose around it do the
-human-friendly framing.
 
 REJECTION GUIDANCE: If you cannot find a verbatim substring on the source
 that supports a claim, DROP the claim entirely. Quality beats quantity.
