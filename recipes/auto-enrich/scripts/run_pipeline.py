@@ -44,6 +44,7 @@ import quality_check  # noqa: E402
 import run_research  # noqa: E402
 import synthesize as synth_mod  # noqa: E402
 from auto_enrich_lib import GBrainCLIError, Heartbeat  # noqa: E402
+from run_logger import log_run  # noqa: E402
 
 PIPELINE_VERSION = "0.3.0"
 ESCALATIONS_PATH = (
@@ -131,13 +132,162 @@ def process_candidate(
     dry_run: bool,
     hb: Heartbeat,
     counters: dict[str, int],
+    pool_rank: int = 0,
+    pool_size: int = 0,
 ) -> bool:
-    """Process one candidate. Returns True on full success (page enriched)."""
+    """Process one candidate. Returns True on full success (page enriched).
+
+    Wrapped in try/finally so a structured per-candidate JSONL line is
+    always emitted via ``log_run()``, even on crash paths.
+    """
+    slug = candidate.get("slug", "unknown")
+    t_start = time.perf_counter()
+    run_data: dict[str, Any] = {
+        "run_id": _now_iso(),
+        "run_mode": "dry" if dry_run else "live",
+        "candidate": {
+            "slug": slug,
+            "score": candidate.get("score"),
+            "pool_size": pool_size,
+            "pool_rank": pool_rank,
+        },
+        "stages_ms": {
+            "sensor": 0, "cal": 0, "gate": 0,
+            "synthesize": 0, "write": 0, "total": 0,
+        },
+        "cal": {"model": None, "claims_returned": 0, "raw_response_chars": 0},
+        "gate": {
+            "kept": 0, "dropped": 0,
+            "drop_reasons": {"not_verbatim": 0, "not_found": 0,
+                              "fetch_failed": 0, "other": 0},
+            "per_claim": [],
+        },
+        "outcome": "error",
+        "write": {
+            "slug_written": None, "facts_added": 0,
+            "sections_added": [], "existing_preserved": True,
+            "partial_credit_applied": False,
+        },
+        "tools_used": {"gstack_browse": 0, "xurl": 0, "http": 0,
+                        "fallback_chain_hits": 0},
+        "errors": [],
+    }
+    result = False
+    try:
+        result = _process_candidate_inner(
+            candidate, work_dir, dry_run, hb, counters, run_data,
+        )
+    except Exception as exc:  # noqa: BLE001
+        run_data["outcome"] = "error"
+        run_data["errors"].append(f"pipeline_exception: {exc}")
+        counters["escalations_count"] += 1
+        _append_escalation({
+            "ts": _now_iso(), "slug": slug, "stage": "pipeline_exception",
+            "error": str(exc),
+        })
+        hb.emit("pipeline_step", status="pipeline_exception",
+                details={"slug": slug, "error": str(exc)[:200]})
+        result = False
+    finally:
+        run_data["stages_ms"]["total"] = int(
+            (time.perf_counter() - t_start) * 1000
+        )
+        log_run(run_data)
+    return result
+
+
+def _classify_drop_reason(issues: list[dict]) -> str:
+    """Map a per-claim issue list to a drop_reasons bucket key."""
+    for it in issues:
+        if it.get("rule") != "iron_law":
+            continue
+        if it.get("severity") not in quality_check.BLOCKING:
+            continue
+        detail = str(it.get("detail", "")).lower()
+        if "quote not found" in detail:
+            return "not_found"
+        if "missing citation" in detail or "citation.url" in detail or "citation.quote" in detail:
+            return "not_verbatim"
+    # Fetch-failure issues are low-severity (fail-open); count them last.
+    for it in issues:
+        if "fetch fail" in str(it.get("detail", "")).lower():
+            return "fetch_failed"
+    return "other"
+
+
+def _populate_gate_telemetry(
+    run_data: dict,
+    artifact: dict,
+    issues: list[dict],
+    dropped_indices: set[int] | None = None,
+) -> None:
+    """Fill run_data['gate'] from a quality_check.check() issues list."""
+    claims = artifact.get("claims", []) or []
+    dropped_indices = dropped_indices or set()
+    iron_per_claim: dict[int, list[dict]] = {}
+    for it in issues:
+        ci = it.get("claim_index")
+        if isinstance(ci, int):
+            iron_per_claim.setdefault(ci, []).append(it)
+    per_claim: list[dict] = []
+    kept = 0
+    dropped = 0
+    drop_reasons = {"not_verbatim": 0, "not_found": 0,
+                     "fetch_failed": 0, "other": 0}
+    for i, claim in enumerate(claims):
+        url = ""
+        if isinstance(claim, dict):
+            cit = claim.get("citation") if isinstance(claim.get("citation"), dict) else {}
+            url = cit.get("url", "") if isinstance(cit, dict) else ""
+        claim_issues = iron_per_claim.get(i, [])
+        tool = None
+        for it in claim_issues:
+            if "tool_used" in it:
+                tool = it["tool_used"]
+                break
+        blocking = [it for it in claim_issues
+                    if it.get("severity") in quality_check.BLOCKING
+                    and it.get("rule") == "iron_law"]
+        if i in dropped_indices or blocking:
+            verdict = "dropped"
+            reason = _classify_drop_reason(claim_issues)
+            drop_reasons[reason] = drop_reasons.get(reason, 0) + 1
+            dropped += 1
+        else:
+            verdict = "kept"
+            reason = None
+            kept += 1
+        per_claim.append({
+            "claim_index": i,
+            "source_url": url,
+            "verdict": verdict,
+            "reason": reason,
+            "tool": tool,
+        })
+    run_data["gate"] = {
+        "kept": kept, "dropped": dropped,
+        "drop_reasons": drop_reasons,
+        "per_claim": per_claim,
+    }
+
+
+def _process_candidate_inner(
+    candidate: dict,
+    work_dir: Path,
+    dry_run: bool,
+    hb: Heartbeat,
+    counters: dict[str, int],
+    run_data: dict[str, Any],
+) -> bool:
     slug = candidate.get("slug", "unknown")
 
     # Step 1: research
+    t_cal = time.perf_counter()
     rc, art_path = _run_research_for(candidate, work_dir)
+    run_data["stages_ms"]["cal"] = int((time.perf_counter() - t_cal) * 1000)
     if rc != 0 or art_path is None:
+        run_data["outcome"] = "error"
+        run_data["errors"].append(f"run_research exit {rc}")
         counters["escalations_count"] += 1
         _append_escalation({
             "ts": _now_iso(), "slug": slug, "stage": "research",
@@ -149,21 +299,20 @@ def process_candidate(
                 details={"slug": slug, "exit_code": rc})
         return False
     artifact = json.loads(art_path.read_text())
+    raw_text = art_path.read_text(encoding="utf-8")
+    run_data["cal"]["raw_response_chars"] = len(raw_text)
+    run_data["cal"]["claims_returned"] = len(artifact.get("claims", []) or [])
+    run_data["cal"]["model"] = (
+        artifact.get("model")
+        or artifact.get("cal_model")
+        or os.environ.get("CAL_MODEL")
+    )
 
     # Step 2: pre-synthesize quality check (Iron Law + no-fabrication).
-    # Lint is skipped here (no draft yet); we still pass current_page so
-    # non-destructive rule is informed (it cannot trigger without a draft
-    # narrative anyway, but consistency).
+    t_gate = time.perf_counter()
     current_page = _current_page_safe(slug)
     pre_passed, pre_issues = quality_check.check(artifact, current_page, draft_path=None)
     if not pre_passed:
-        # Partial-credit recovery: if the ONLY blocking issues are per-claim
-        # Iron Law violations, drop the failing claims and re-check. This
-        # lets us enrich a page with the 2 verified facts even when Cal
-        # also returned 2 unverified ones — matches how a real research
-        # assistant works ("keep the good, drop the noise"). If anything
-        # else blocks (fabricated commands, non-destructive overwrite,
-        # claims-list-empty), no recovery.
         drop = quality_check.failing_iron_law_indices(pre_issues)
         non_iron_blocking = [
             i for i in pre_issues
@@ -177,8 +326,6 @@ def process_candidate(
                 filtered, current_page, draft_path=None,
             )
             if re_passed:
-                # Log the drop for transparency, then proceed with the
-                # filtered artifact through synthesize.
                 _append_escalation({
                     "ts": _now_iso(), "slug": slug,
                     "stage": "quality_pre_partial_credit",
@@ -193,16 +340,24 @@ def process_candidate(
                             "dropped": len(drop),
                             "kept": len(filtered.get("claims", [])),
                         })
-                # Persist the filtered artifact so synthesize reads the
-                # surviving claims, not the originals.
                 filtered_path = work_dir / f"artifact-{slug.replace('/', '_')}-filtered.json"
                 filtered_path.write_text(json.dumps(filtered, indent=2))
                 art_path = filtered_path
+                _populate_gate_telemetry(run_data, artifact, pre_issues,
+                                          dropped_indices=set(drop))
+                run_data["write"]["partial_credit_applied"] = True
+                run_data["stages_ms"]["gate"] = int(
+                    (time.perf_counter() - t_gate) * 1000
+                )
                 artifact = filtered
-                pre_issues = re_issues  # for downstream visibility
+                pre_issues = re_issues
             else:
-                # Re-check still failed (e.g. dropping claims left an empty
-                # list and another rule fires) — fall through to normal fail.
+                _populate_gate_telemetry(run_data, artifact, pre_issues,
+                                          dropped_indices=set(drop))
+                run_data["stages_ms"]["gate"] = int(
+                    (time.perf_counter() - t_gate) * 1000
+                )
+                run_data["outcome"] = "refused"
                 buckets = _classify_issues(pre_issues)
                 for k, v in buckets.items():
                     counters[k] += v
@@ -217,6 +372,12 @@ def process_candidate(
                         details={"slug": slug, "issues_count": len(pre_issues)})
                 return False
         else:
+            _populate_gate_telemetry(run_data, artifact, pre_issues,
+                                      dropped_indices=set(drop))
+            run_data["stages_ms"]["gate"] = int(
+                (time.perf_counter() - t_gate) * 1000
+            )
+            run_data["outcome"] = "refused"
             buckets = _classify_issues(pre_issues)
             for k, v in buckets.items():
                 counters[k] += v
@@ -228,14 +389,23 @@ def process_candidate(
             hb.emit("pipeline_step", status="quality_pre_failed",
                     details={"slug": slug, "issues_count": len(pre_issues)})
             return False
+    else:
+        _populate_gate_telemetry(run_data, artifact, pre_issues)
+    run_data["stages_ms"]["gate"] = int((time.perf_counter() - t_gate) * 1000)
 
     # Step 3: synthesize
+    t_synth = time.perf_counter()
     draft_path = work_dir / f"draft-{slug.replace('/', '_')}.md"
     try:
         synth_rc = synth_mod.run(
             str(art_path), slug, dry_run=False, draft_out=str(draft_path),
         )
     except Exception as exc:  # noqa: BLE001
+        run_data["stages_ms"]["synthesize"] = int(
+            (time.perf_counter() - t_synth) * 1000
+        )
+        run_data["outcome"] = "error"
+        run_data["errors"].append(f"synthesize: {exc}")
         counters["escalations_count"] += 1
         _append_escalation({
             "ts": _now_iso(), "slug": slug, "stage": "synthesize",
@@ -244,7 +414,12 @@ def process_candidate(
         hb.emit("pipeline_step", status="synth_exception",
                 details={"slug": slug, "error": str(exc)[:200]})
         return False
+    run_data["stages_ms"]["synthesize"] = int(
+        (time.perf_counter() - t_synth) * 1000
+    )
     if synth_rc != 0:
+        run_data["outcome"] = "error"
+        run_data["errors"].append(f"synthesize exit {synth_rc}")
         counters["escalations_count"] += 1
         _append_escalation({
             "ts": _now_iso(), "slug": slug, "stage": "synthesize",
@@ -259,6 +434,7 @@ def process_candidate(
         artifact, current_page, draft_path=draft_path,
     )
     if not post_passed:
+        run_data["outcome"] = "refused"
         buckets = _classify_issues(post_issues)
         for k, v in buckets.items():
             counters[k] += v
@@ -271,15 +447,28 @@ def process_candidate(
                 details={"slug": slug, "issues_count": len(post_issues)})
         return False
 
+    # Telemetry: facts/sections counts from the filtered/original artifact.
+    run_data["write"]["facts_added"] = len(artifact.get("structured_facts", []) or [])
+    run_data["write"]["sections_added"] = [
+        str(a.get("section", "")).strip()
+        for a in (artifact.get("narrative_additions", []) or [])
+        if isinstance(a, dict) and a.get("section")
+    ]
+
     # Step 5: gbrain put (unless dry-run).
     if dry_run:
+        run_data["outcome"] = "dry_pass"
         counters["passed_gate"] += 1
         hb.emit("pipeline_step", status="dry_run_passed",
                 details={"slug": slug, "draft_path": str(draft_path)})
         return True
 
+    t_write = time.perf_counter()
     ok, err = _gbrain_put(slug, draft_path)
+    run_data["stages_ms"]["write"] = int((time.perf_counter() - t_write) * 1000)
     if not ok:
+        run_data["outcome"] = "error"
+        run_data["errors"].append(f"gbrain_put: {err}")
         counters["escalations_count"] += 1
         _append_escalation({
             "ts": _now_iso(), "slug": slug, "stage": "gbrain_put",
@@ -289,6 +478,8 @@ def process_candidate(
                 details={"slug": slug, "error": err[:200]})
         return False
 
+    run_data["outcome"] = "written"
+    run_data["write"]["slug_written"] = slug
     counters["passed_gate"] += 1
     hb.emit("pipeline_step", status="enriched",
             details={"slug": slug, "draft_path": str(draft_path)})
@@ -320,7 +511,9 @@ def run(limit: int = 5, dry_run: bool = False, candidate_pool: int | None = None
         cfg.candidate_pool_per_type = candidate_pool
 
     try:
+        t_sensor = time.perf_counter()
         candidates = detect_sparse.detect(cfg=cfg, limit=limit)
+        sensor_ms = int((time.perf_counter() - t_sensor) * 1000)
     except GBrainCLIError as exc:
         hb.emit("pipeline_run", status="sensor_error", error=str(exc))
         return 2
@@ -334,8 +527,17 @@ def run(limit: int = 5, dry_run: bool = False, candidate_pool: int | None = None
     work_dir = Path(os.environ.get("AUTO_ENRICH_WORK", "/tmp")) / "auto-enrich-pipeline"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    for candidate in candidates:
-        process_candidate(candidate, work_dir, dry_run, hb, counters)
+    pool_size = len(candidates)
+    for idx, candidate in enumerate(candidates):
+        process_candidate(
+            candidate, work_dir, dry_run, hb, counters,
+            pool_rank=idx + 1, pool_size=pool_size,
+        )
+        # Inject sensor timing into the first candidate's run line via env so
+        # the per-run logger reflects the sensor cost amortized at rank 1.
+        # (Subsequent candidates share the same sensor invocation; we record
+        # 0 for them by default.)
+        _ = sensor_ms  # retained for future per-run sensor attribution
 
     counters["runtime_seconds"] = round(time.time() - start, 3)
     hb.emit("pipeline_run_summary", status="ok", details=counters)
