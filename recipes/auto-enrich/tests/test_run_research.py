@@ -314,3 +314,110 @@ def test_compile_cal_prompt_resembles_expected_shape():
     assert "test page content" in prompt
     assert "test schema" in prompt
     assert "IRON LAW" in prompt
+
+
+# --- Regression tests for Cal empty-output bug (feat/auto-enrich-cal-fix) ---
+
+def test_dispatch_cal_uses_qualified_model_name():
+    """dispatch_cal must use the fully qualified Anthropic model id.
+
+    hermes 0.14.0 silently exits 0 with empty stdout when given the short
+    alias 'claude-haiku-4-5'. Guard the qualified id so the bug cannot
+    regress on a careless edit.
+    """
+    captured = {}
+
+    class FakeResult:
+        returncode = 0
+        stdout = '{"ok": true}'
+        stderr = ""
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        return FakeResult()
+
+    with patch("run_research.subprocess.run", side_effect=fake_run):
+        rc, _, _ = run_research.dispatch_cal("prompt")
+
+    assert rc == 0
+    cmd = captured["cmd"]
+    assert "--model" in cmd, f"--model flag missing: {cmd}"
+    model = cmd[cmd.index("--model") + 1]
+    assert model == run_research.CAL_DISPATCH_MODEL
+    assert model != "claude-haiku-4-5", (
+        "Short alias regression: hermes 0.14.0 silently returns empty stdout "
+        "for this name. Use the qualified id."
+    )
+
+
+def test_dispatch_cal_empty_stdout_treated_as_error(tmp_path):
+    """subprocess returncode=0 + empty stdout -> synthetic non-zero rc + heartbeat anomaly."""
+    class FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = "some stderr text"
+
+    hb_path = tmp_path / "hb.jsonl"
+    hb = run_research.Heartbeat(path=hb_path, source_version=run_research.RECIPE_VERSION_RESEARCH)
+
+    with patch("run_research.subprocess.run", return_value=FakeResult()):
+        rc, out, err = run_research.dispatch_cal("p", heartbeat=hb, slug="people/test")
+
+    assert rc == run_research.DISPATCH_ANOMALY_EMPTY_STDOUT
+    assert rc != 0
+    assert out == ""
+    assert err == "some stderr text"
+    assert hb_path.exists()
+    events = [json.loads(l) for l in hb_path.read_text().strip().split("\n") if l]
+    anomalies = [e for e in events if e.get("event") == "dispatch_anomaly"]
+    assert anomalies, f"No dispatch_anomaly event emitted. events={events}"
+    a = anomalies[-1]
+    assert a["status"] == "empty_stdout_on_success_exit"
+    assert a["details"]["slug"] == "people/test"
+    assert a["details"]["stderr"].startswith("some stderr")
+
+
+def test_dispatch_cal_empty_whitespace_only_stdout_treated_as_error():
+    """returncode=0 + whitespace-only stdout is also an anomaly."""
+    class FakeResult:
+        returncode = 0
+        stdout = "   \n  \t\n"
+        stderr = ""
+
+    with patch("run_research.subprocess.run", return_value=FakeResult()):
+        rc, _, _ = run_research.dispatch_cal("p")
+    assert rc == run_research.DISPATCH_ANOMALY_EMPTY_STDOUT
+
+
+def test_run_handles_cal_empty_output(tmp_path):
+    """end-to-end run() with empty-stdout dispatch -> exit non-zero, cal_no_output heartbeat, no artifact."""
+    candidate_path = _make_candidate_json(tmp_path)
+    hb_path = tmp_path / "hb.jsonl"
+    hb = run_research.Heartbeat(path=hb_path, source_version=run_research.RECIPE_VERSION_RESEARCH)
+
+    with patch("run_research.get_page_content", return_value=FAKE_PAGE), \
+         patch("run_research.dispatch_cal",
+               return_value=(run_research.DISPATCH_ANOMALY_EMPTY_STDOUT, "", "stderr")), \
+         patch("run_research.Heartbeat", return_value=hb):
+        rc = run_research.run(str(candidate_path), str(tmp_path / "artifact.json"))
+
+    assert rc != 0
+    assert not (tmp_path / "artifact.json").exists()
+    events = [json.loads(l) for l in hb_path.read_text().strip().split("\n") if l]
+    statuses = [e.get("status") for e in events]
+    assert "cal_no_output" in statuses, f"cal_no_output missing from statuses: {statuses}"
+    assert "parse_error" not in statuses, (
+        "Misleading parse_error must NOT be emitted on empty stdout; "
+        f"got statuses={statuses}"
+    )
+
+
+def test_parse_cal_json_output_rejects_empty():
+    """parse_cal_json_output("") and ("   ") raise EmptyCalOutputError, not a generic ValueError message."""
+    with pytest.raises(run_research.EmptyCalOutputError):
+        run_research.parse_cal_json_output("")
+    with pytest.raises(run_research.EmptyCalOutputError):
+        run_research.parse_cal_json_output("   \n\t  ")
+    # Sanity: legitimate parse failures are still ValueError (EmptyCalOutputError is a subclass).
+    with pytest.raises(ValueError):
+        run_research.parse_cal_json_output("not json at all")

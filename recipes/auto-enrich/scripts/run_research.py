@@ -164,25 +164,73 @@ def load_schema_text() -> str:
 IRON LAW: every claim's citation must have non-empty url AND quote."""
 
 
-def dispatch_cal(prompt: str, skills: list[str] | None = None) -> tuple[int, str, str]:
-    """Spawn Cal via hermes -z and return (returncode, stdout, stderr)."""
+# Cal dispatch model. hermes 0.14.0 silently exits 0 with empty stdout when
+# given an unrecognized short alias (e.g. "claude-haiku-4-5"). The fully
+# qualified Anthropic API model id below is the recognized form. If this
+# alias also stops resolving, drop the --model flag entirely (see
+# CAL_DISPATCH_MODEL_OVERRIDE below) and let hermes use its configured default.
+CAL_DISPATCH_MODEL = "claude-haiku-4-5-20251001"
+
+# Synthetic return code emitted by dispatch_cal() when hermes exits 0 with
+# empty stdout. Distinct from real hermes exit codes so run() can route
+# the error path to a clearer status than the legacy "parse_error".
+DISPATCH_ANOMALY_EMPTY_STDOUT = 99
+
+
+def dispatch_cal(prompt: str, skills: list[str] | None = None,
+                 heartbeat: "Heartbeat | None" = None,
+                 slug: str | None = None) -> tuple[int, str, str]:
+    """Spawn Cal via hermes -z and return (returncode, stdout, stderr).
+
+    Empty-stdout-on-exit-0 is treated as a dispatch anomaly (the historical
+    failure mode when --model resolves to an unknown alias). The function
+    returns DISPATCH_ANOMALY_EMPTY_STDOUT in that case and emits a
+    `dispatch_anomaly` heartbeat event when a Heartbeat is provided.
+    """
+    import os as _os
+    import time as _time
     skills_list = skills if skills is not None else REQUIRED_SKILLS
-    cmd = [
-        "hermes", "-z", prompt,
-        "--model", "claude-haiku-4-5",
-        "--skills", ",".join(skills_list),
-        "--yolo",
-    ]
+    model = _os.environ.get("CAL_DISPATCH_MODEL_OVERRIDE", CAL_DISPATCH_MODEL)
+    cmd = ["hermes", "-z", prompt]
+    if model:
+        cmd += ["--model", model]
+    cmd += ["--skills", ",".join(skills_list), "--yolo"]
+
+    started = _time.monotonic()
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+    wall = _time.monotonic() - started
+
+    if result.returncode == 0 and not (result.stdout or "").strip():
+        if heartbeat is not None:
+            heartbeat.emit(
+                "dispatch_anomaly",
+                status="empty_stdout_on_success_exit",
+                details={
+                    "slug": slug,
+                    "model": model,
+                    "stderr": (result.stderr or "")[:500],
+                    "wall_seconds": round(wall, 3),
+                },
+            )
+        return DISPATCH_ANOMALY_EMPTY_STDOUT, result.stdout, result.stderr
+
     return result.returncode, result.stdout, result.stderr
+
+
+class EmptyCalOutputError(ValueError):
+    """Raised when Cal stdout is empty or whitespace-only."""
 
 
 def parse_cal_json_output(stdout: str) -> dict[str, Any]:
     """Extract JSON from Cal's stdout.
 
     Cal may return just the JSON or wrap it in a markdown fence.
+    Raises EmptyCalOutputError if the input is empty/whitespace-only
+    (a distinct failure mode from "output present but unparseable").
     """
-    text = stdout.strip()
+    text = (stdout or "").strip()
+    if not text:
+        raise EmptyCalOutputError("Cal produced no output")
     # Try bare JSON first
     if text.startswith("{"):
         return json.loads(text)
@@ -269,7 +317,7 @@ def run(candidate_json_path: str, output_artifact_path: str,
         print(f"page_type: {page_type}")
         print(f"queries planned: {len(query_plan)}")
         print(f"skills loaded: {','.join(REQUIRED_SKILLS)}")
-        print(f"dispatch cmd: hermes -z <prompt> --model claude-haiku-4-5 "
+        print(f"dispatch cmd: hermes -z <prompt> --model {CAL_DISPATCH_MODEL} "
               f"--skills {','.join(REQUIRED_SKILLS)} --yolo")
         print(f"---")
         print(prompt)
@@ -283,7 +331,16 @@ def run(candidate_json_path: str, output_artifact_path: str,
         return 0
 
     # Dispatch Cal
-    returncode, stdout, stderr = dispatch_cal(prompt)
+    returncode, stdout, stderr = dispatch_cal(prompt, heartbeat=hb, slug=slug)
+    if returncode == DISPATCH_ANOMALY_EMPTY_STDOUT:
+        # dispatch_cal already emitted a `dispatch_anomaly` event; emit a
+        # research_dispatch event with the clearer cal_no_output status so
+        # downstream tooling sees both signals.
+        hb.emit("research_dispatch", status="cal_no_output",
+                error="Cal exited 0 with empty stdout (dispatch anomaly)",
+                details={"slug": slug, "exit_code": returncode,
+                         "stderr": (stderr or "")[:500]})
+        return 1
     if returncode != 0:
         hb.emit("research_dispatch", status="dispatch_error", error=stderr[:500], details={
             "slug": slug,
@@ -294,6 +351,13 @@ def run(candidate_json_path: str, output_artifact_path: str,
     # Parse artifact
     try:
         artifact = parse_cal_json_output(stdout)
+    except EmptyCalOutputError as exc:
+        # Defensive: dispatch_cal should have already caught this above, but
+        # surface it cleanly if it slips through (e.g. tests that bypass
+        # dispatch_cal and feed empty stdout straight into run()).
+        hb.emit("research_dispatch", status="cal_no_output",
+                error=str(exc), details={"slug": slug})
+        return 1
     except (json.JSONDecodeError, ValueError) as exc:
         hb.emit("research_dispatch", status="parse_error",
                 error=f"Cal JSON parse: {exc}", details={"slug": slug})
