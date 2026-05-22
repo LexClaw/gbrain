@@ -287,3 +287,186 @@ def test_iron_law_quote_not_on_page_blocks(good_artifact, stub_page, tmp_path):
             if i["rule"] == "iron_law" and i["severity"] == "critical"
             and "quote not found" in i["detail"]]
     assert crit, f"expected critical quote-not-found issue, got {issues}"
+
+
+# --- X API gate tests (T1-T9) ---
+
+
+def test_x_url_pattern_match():
+    """T1: _X_TWEET_RE matches x.com/twitter.com status URLs with numeric ids,
+    and rejects non-status, non-numeric, and lookalike-domain URLs."""
+    r = quality_check._X_TWEET_RE
+    assert r.match("https://x.com/kloss_xyz/status/2039849322574205190")
+    assert r.match("https://twitter.com/foo/status/123")
+    assert r.match("http://x.com/bar/status/456")
+    assert r.match("https://www.x.com/bar/status/789")
+
+    assert not r.match("https://x.com/foo")
+    assert not r.match("https://x.com/foo/status/abc")
+    assert not r.match("https://x.com.fake.com/foo/status/123")
+    assert not r.match("https://example.com/foo/status/123")
+
+
+def test_fetch_x_tweet_text_uses_xurl():
+    """T2: _fetch_x_tweet_text shells out to xurl with the right path and
+    returns data.text + double-newline + data.note_tweet.text."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        captured["cmd"] = cmd
+        body = {"data": {"text": "short", "note_tweet": {"text": "long form body"}}}
+        return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+
+    with patch.object(quality_check.subprocess, "run", fake_run):
+        out = quality_check._fetch_x_tweet_text("12345")
+
+    assert captured["cmd"] == ["xurl", "/2/tweets/12345?tweet.fields=text,note_tweet"]
+    assert out == "short\n\nlong form body"
+
+
+def test_fetch_x_tweet_text_handles_no_note_tweet():
+    """T3: with no note_tweet field, result equals data.text."""
+    def fake_run(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        body = {"data": {"text": "just the short one"}}
+        return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+
+    with patch.object(quality_check.subprocess, "run", fake_run):
+        out = quality_check._fetch_x_tweet_text("9")
+    assert out == "just the short one"
+
+
+def test_fetch_x_tweet_text_xurl_failure_returns_none():
+    """T4: TimeoutExpired and non-zero exit both yield None."""
+    def boom(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    with patch.object(quality_check.subprocess, "run", boom):
+        assert quality_check._fetch_x_tweet_text("1") is None
+
+    def nonzero(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        return MagicMock(returncode=1, stdout="", stderr="auth error")
+
+    with patch.object(quality_check.subprocess, "run", nonzero):
+        assert quality_check._fetch_x_tweet_text("1") is None
+
+
+def test_iron_law_x_url_uses_api_path_when_quote_matches(stub_page, tmp_path):
+    """T5: claim cites an X URL; mocked xurl returns long-form text containing
+    the quote; Iron Law passes for that claim and NO plain HTTP fetch happens."""
+    artifact = {
+        "claims": [
+            {
+                "text": "Pedro likes pipelines",
+                "citation": {
+                    "url": "https://x.com/pedro_franceschi/status/1234567890",
+                    "quote": "signal ingestion pipeline screens his email",
+                },
+            }
+        ],
+        "narrative_additions": [],
+        "structured_facts": [],
+    }
+    full_tweet = (
+        "short hook here.\n\n"
+        "The signal ingestion pipeline screens his email and triages it."
+    )
+
+    def fake_xurl_run(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        body = {"data": {"text": "short hook here.", "note_tweet": {
+            "text": "The signal ingestion pipeline screens his email and triages it."}}}
+        return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+
+    def boom_urlopen(req, timeout=None):  # noqa: ARG001
+        raise AssertionError("plain HTTP fetch must NOT happen for X URL")
+
+    draft = tmp_path / "draft.md"
+    draft.write_text("# stub\n")
+    with patch.object(quality_check.subprocess, "run", fake_xurl_run), \
+         patch.object(quality_check.urllib.request, "urlopen", boom_urlopen), \
+         _patch_live_verbs(KNOWN_VERBS):
+        # Patch lint via _live_gbrain_verbs path + draft-less call: run only iron law.
+        issues, stats = quality_check.check_iron_law(artifact)
+    crit = [i for i in issues if i["severity"] == "critical"]
+    assert crit == [], f"expected no critical issues, got {issues}"
+    assert stats["fetch_attempts"] == 1
+    assert stats["fetch_failures"] == 0
+    # confirm full_tweet variable used so flake8 stays quiet
+    assert "signal ingestion pipeline" in full_tweet
+
+
+def test_iron_law_x_url_falls_back_to_http_when_xurl_fails(stub_page, tmp_path):
+    """T6: xurl returns None; the existing plain HTTP path runs (and we assert
+    it was called)."""
+    artifact = {
+        "claims": [
+            {
+                "text": "fallback claim",
+                "citation": {
+                    "url": "https://x.com/foo/status/42",
+                    "quote": "fallback page contents",
+                },
+            }
+        ],
+    }
+    http_calls: list[str] = []
+
+    def fake_xurl(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        # Simulate xurl auth / network failure.
+        return MagicMock(returncode=1, stdout="", stderr="boom")
+
+    def fake_urlopen(req, timeout=None):  # noqa: ARG001
+        http_calls.append(req.get_full_url())
+        body = b"<html>here is fallback page contents from http</html>"
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: False
+        return resp
+
+    with patch.object(quality_check.subprocess, "run", fake_xurl), \
+         patch.object(quality_check.urllib.request, "urlopen", fake_urlopen):
+        issues, stats = quality_check.check_iron_law(artifact)
+
+    assert http_calls == ["https://x.com/foo/status/42"], (
+        f"expected HTTP fallback to fire, got {http_calls}"
+    )
+    crit = [i for i in issues if i["severity"] == "critical"]
+    assert crit == [], f"expected fallback substring match to succeed, got {issues}"
+
+
+def test_normalize_for_match_unescapes_html_entities():
+    """T7."""
+    assert quality_check._normalize_for_match("foo &gt; bar") == "foo > bar"
+    assert quality_check._normalize_for_match("a &amp; b") == "a & b"
+
+
+def test_normalize_for_match_collapses_whitespace():
+    """T8."""
+    assert quality_check._normalize_for_match("foo  \n\t bar") == "foo bar"
+    assert quality_check._normalize_for_match("  leading   trailing  ") == "leading trailing"
+
+
+def test_iron_law_uses_normalized_comparison_so_html_entities_dont_break_match(tmp_path):  # noqa: ARG001
+    """T9: tweet body has literal &gt;; claim quote uses raw >. After
+    normalization both reduce to the same string and Iron Law passes."""
+    artifact = {
+        "claims": [
+            {
+                "text": "blockquote claim",
+                "citation": {
+                    "url": "https://x.com/pf/status/99",
+                    "quote": "> signal ingestion pipeline screens his email",
+                },
+            }
+        ],
+    }
+
+    def fake_xurl(cmd, capture_output, text, timeout, check):  # noqa: ARG001
+        body = {"data": {"text": "intro", "note_tweet": {
+            "text": "&gt; signal ingestion pipeline screens his email"}}}
+        return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+
+    with patch.object(quality_check.subprocess, "run", fake_xurl):
+        issues, _ = quality_check.check_iron_law(artifact)
+    crit = [i for i in issues if i["severity"] == "critical"]
+    assert crit == [], f"normalization should have matched, got {issues}"

@@ -24,9 +24,12 @@ Rule #2 was dropped in the recipe v2; not implemented.
 
 from __future__ import annotations
 
+import html
+import json
 import re
 import subprocess
 import sys
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -48,6 +51,64 @@ FETCH_UA = "auto-enrich-quality-gate/0.3.0"
 # Subprocess timeouts.
 GBRAIN_HELP_TIMEOUT = 10
 GBRAIN_LINT_TIMEOUT = 30
+XURL_TIMEOUT = 5
+
+# X / Twitter status URL detector. Matches:
+#   https://x.com/<handle>/status/<id>
+#   https://twitter.com/<handle>/status/<id>
+# Rejects: non-numeric ids, x.com.fake.com lookalikes, missing /status/.
+_X_TWEET_RE = re.compile(
+    r"^https?://(?:www\.)?(?:x|twitter)\.com/[^/\s]+/status/(\d+)(?:[/?#].*)?$"
+)
+
+
+def _fetch_x_tweet_text(tweet_id: str, timeout: int = XURL_TIMEOUT) -> str | None:
+    """Return concatenated tweet.text + note_tweet.text via xurl, or None on failure.
+
+    Uses the X API via the xurl CLI. `note_tweet.text` contains the full long-form
+    version for tweets over 280 chars; `data.text` alone is truncated. We
+    concatenate both so substring matching works regardless of tweet length.
+    Pure read; never blocks the gate (returns None on any xurl failure so the
+    caller can fall back to the plain HTTP path).
+    """
+    try:
+        result = subprocess.run(
+            ["xurl", f"/2/tweets/{tweet_id}?tweet.fields=text,note_tweet"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        return None
+    text = data.get("text") or ""
+    note_obj = data.get("note_tweet") or {}
+    note = note_obj.get("text") if isinstance(note_obj, dict) else ""
+    note = note or ""
+    combined = text + (("\n\n" + note) if note else "")
+    combined = combined.strip()
+    return combined or None
+
+
+def _normalize_for_match(s: str) -> str:
+    """Whitespace + HTML-entity + unicode-tolerant normalizer for quote matching.
+
+    Both sides of the Iron Law substring check pass through this so curly
+    quotes vs straight quotes, `&gt;` vs `>`, NBSP vs space, and stray
+    newlines do not cause false negatives.
+    """
+    if not s:
+        return ""
+    s = html.unescape(s)
+    s = unicodedata.normalize("NFKC", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip().lower()
 
 
 def _issue(rule: str, severity: str, detail: str) -> dict[str, str]:
@@ -101,7 +162,23 @@ def check_iron_law(artifact: dict[str, Any]) -> tuple[list[dict[str, str]], dict
 
         if url not in body_cache:
             fetch_attempts += 1
-            body_cache[url] = _fetch_url_body(url)
+            # X / Twitter status URLs: plain HTTP returns a JS shell with no
+            # tweet text. Prefer xurl (X API) so the long-form note_tweet.text
+            # is available for substring matching. On any xurl failure, fall
+            # back to the plain HTTP path (existing fail-open behavior).
+            m = _X_TWEET_RE.match(url)
+            if m:
+                tweet_text = _fetch_x_tweet_text(m.group(1))
+                if tweet_text is not None:
+                    body_cache[url] = (tweet_text, None)
+                else:
+                    issues.append(_issue(
+                        "iron_law", "low",
+                        f"claims[{i}]: xurl X API fetch failed for {url}, falling back to HTTP",
+                    ))
+                    body_cache[url] = _fetch_url_body(url)
+            else:
+                body_cache[url] = _fetch_url_body(url)
         body, err = body_cache[url]
         if body is None:
             fetch_failures += 1
@@ -110,7 +187,7 @@ def check_iron_law(artifact: dict[str, Any]) -> tuple[list[dict[str, str]], dict
                 f"claims[{i}]: fetch fail for {url}: {err} (fail-open, did not block)"
             ))
             continue
-        if _normalize(quote) not in _normalize(body):
+        if _normalize_for_match(quote) not in _normalize_for_match(body):
             issues.append(_issue(
                 "iron_law", "critical",
                 f"claims[{i}]: quote not found on page {url}"

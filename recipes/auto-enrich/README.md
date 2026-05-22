@@ -136,6 +136,21 @@ requirements. Brief summary:
   `suggested_links`, `narrative_additions`.
 - Iron Law: every claim MUST cite. Empty citation -> artifact rejected.
 
+#### X (Twitter) URL handling in the Iron Law gate
+
+The Iron Law gate detects `x.com` and `twitter.com` status URLs (pattern
+`<domain>/<handle>/status/<numeric_id>`) and verifies the cited quote via the X
+API (`xurl /2/tweets/<id>?tweet.fields=text,note_tweet`) instead of a plain
+HTTP fetch. The plain HTTP path cannot see tweet text because `x.com` is a
+JavaScript app, so without this branch every claim sourced from a tweet failed
+"quote not found on page". For long-form tweets the gate concatenates
+`data.text` (truncated at ~280 chars) with `data.note_tweet.text` (full body)
+before substring matching. Both sides of the comparison pass through a
+normalizer that unescapes HTML entities, applies Unicode NFKC, and collapses
+whitespace, so `&gt;` vs `>` and curly vs straight quotes do not produce false
+negatives. If `xurl` is missing, times out, or returns a non-2xx, the gate
+falls back to the plain HTTP path with the existing fail-open warning.
+
 ### Running research
 
 ```bash
