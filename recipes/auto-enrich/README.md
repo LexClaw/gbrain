@@ -82,6 +82,20 @@ python3 -m pytest tests/ -v
 
 The test suite mocks the `gbrain` subprocess boundary so it does not touch the live brain. Live verification is documented in the deliverable report.
 
+## Development
+
+Install the recipe's Python deps (scoped to this recipe; gbrain core is TypeScript):
+
+```bash
+pip install -r recipes/auto-enrich/requirements.txt
+```
+
+Override the gbrain binary for local iteration with the `GBRAIN_BIN` env var. When unset, the sensor calls `gbrain` on `PATH`.
+
+```bash
+GBRAIN_BIN=/Users/me/gbrain/bin/gbrain.js python3 recipes/auto-enrich/scripts/detect_sparse.py --limit 5
+```
+
 ## Phase boundaries
 
 - Phase 1 (this PR): sensor + recipe scaffold + heartbeat. No writes.

@@ -41,7 +41,7 @@ class GBrainCLIError(RuntimeError):
 def run_gbrain(args: list[str], *, timeout: int = 60) -> str:
     """Invoke `gbrain <args...>` and return stdout. Raises GBrainCLIError on
     non-zero. Pattern matches recipes/web-to-brain/scripts/web_lib.py."""
-    argv = ["gbrain", *args]
+    argv = [os.environ.get("GBRAIN_BIN", "gbrain"), *args]
     try:
         result = subprocess.run(
             argv,
