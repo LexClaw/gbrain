@@ -118,13 +118,50 @@ def test_prompt_contains_query_plan_slug_skills(tmp_path):
         assert skill in prompt, f"Required skill '{skill}' missing from prompt"
 
 
+def test_prompt_requires_grounded_suggested_links():
+    """compile_cal_prompt tells Cal to verify suggested_links against gbrain."""
+    prompt = run_research.compile_cal_prompt(
+        slug="concepts/claude",
+        query_plan=[],
+        page_content=FAKE_PAGE,
+        schema_text="dummy schema",
+    )
+
+    assert "SUGGESTED_LINKS GROUNDING" in prompt
+    assert "gbrain search <topic>" in prompt
+    assert "gbrain get <slug>" in prompt
+    assert "ai/entities/*" in prompt
+    assert "concepts/claude" in prompt
+
+
+def test_ground_suggested_links_filters_unverified_targets():
+    artifact = {
+        "suggested_links": [
+            {"type": "mentions", "target": "concepts/claude"},
+            {"type": "mentions", "target": "ai/entities/claude-code"},
+        ]
+    }
+
+    with patch("run_research.slug_exists", side_effect=lambda s: s == "concepts/claude"):
+        grounded = run_research.ground_suggested_links(artifact)
+
+    assert grounded["suggested_links"] == [
+        {"type": "mentions", "target": "concepts/claude"}
+    ]
+    assert grounded["suggested_links_original_count"] == 2
+    assert grounded["suggested_links_valid_count"] == 1
+    assert grounded["suggested_links_valid_rate"] == 0.5
+    assert grounded["suggested_links_invalid_targets"] == ["ai/entities/claude-code"]
+
+
 def test_dispatch_returns_valid_artifact(tmp_path):
     """Mock a good Cal response -> exit 0, artifact written."""
     candidate_path = _make_candidate_json(tmp_path)
     good_artifact = json.loads((FIXTURES / "research_artifact_good.json").read_text())
     
     with patch("run_research.get_page_content", return_value=FAKE_PAGE), \
-         patch("run_research.dispatch_cal", return_value=(0, json.dumps(good_artifact), "")):
+         patch("run_research.dispatch_cal", return_value=(0, json.dumps(good_artifact), "")), \
+         patch("run_research.slug_exists", return_value=True):
         rc = run_research.run(str(candidate_path), str(tmp_path / "artifact.json"))
     
     assert rc == 0, f"Expected exit 0, got {rc}"
@@ -133,6 +170,7 @@ def test_dispatch_returns_valid_artifact(tmp_path):
     written = json.loads(artifact_path.read_text())
     assert written["researcher"] == "cal-subagent"
     assert "researched_at" in written
+    assert written["suggested_links_valid_rate"] == 1.0
 
 
 def test_missing_claims_key_schema_error(tmp_path):
@@ -211,7 +249,8 @@ def test_heartbeat_appended_on_success_path(tmp_path):
     hb = run_research.Heartbeat(path=hb_path, source_version=run_research.RECIPE_VERSION_RESEARCH)
     
     with patch("run_research.get_page_content", return_value=FAKE_PAGE), \
-         patch("run_research.dispatch_cal", return_value=(0, json.dumps(good_artifact), "")):
+         patch("run_research.dispatch_cal", return_value=(0, json.dumps(good_artifact), "")), \
+         patch("run_research.slug_exists", return_value=True):
         # Patch Heartbeat to use our test path
         with patch("run_research.Heartbeat", return_value=hb):
             rc = run_research.run(str(candidate_path), str(tmp_path / "artifact.json"))

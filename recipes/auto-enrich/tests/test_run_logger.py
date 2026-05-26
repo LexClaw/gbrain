@@ -128,3 +128,15 @@ def test_json_is_valid(log_path):
     assert parsed["candidate"]["slug"] == "companies/lavender"
     assert parsed["gate"]["drop_reasons"]["not_verbatim"] == 1
     assert parsed["outcome"] == "dry_pass"
+
+
+def test_refused_run_preserves_refusal_reason(log_path):
+    payload = _sample_run(
+        outcome="refused",
+        refusal_reason="quality_pre_blocking_issue",
+    )
+    run_logger.log_run(payload)
+    line = log_path.read_text(encoding="utf-8").splitlines()[0]
+    parsed = json.loads(line)
+    assert parsed["outcome"] == "refused"
+    assert parsed["refusal_reason"] == "quality_pre_blocking_issue"

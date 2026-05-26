@@ -86,6 +86,14 @@ _RULE_TO_COUNTER = {
     "fabricated_command": "gated_fabricated",
 }
 
+REFUSAL_REASON_QUALITY_PRE_ALL_CLAIMS_DROPPED = "quality_pre_all_claims_dropped"
+REFUSAL_REASON_QUALITY_PRE_NON_IRON_BLOCKER = "quality_pre_non_iron_blocker"
+REFUSAL_REASON_QUALITY_PRE_BLOCKING_ISSUE = "quality_pre_blocking_issue"
+REFUSAL_REASON_QUALITY_PRE_PARTIAL_CREDIT_RECHECK_FAILED = (
+    "quality_pre_partial_credit_recheck_failed"
+)
+REFUSAL_REASON_QUALITY_POST_BLOCKING_ISSUE = "quality_post_blocking_issue"
+
 
 def _classify_issues(issues: list[dict]) -> dict[str, int]:
     """Bucket blocking issues by counter-key (heartbeat field name)."""
@@ -98,6 +106,27 @@ def _classify_issues(issues: list[dict]) -> dict[str, int]:
         if ckey:
             out[ckey] += 1
     return out
+
+
+def _blocking_non_iron_issues(issues: list[dict]) -> list[dict]:
+    return [
+        i for i in issues
+        if i.get("severity") in quality_check.BLOCKING
+        and i.get("rule") != "iron_law"
+    ]
+
+
+def _quality_pre_refusal_reason(
+    pre_issues: list[dict],
+    drop: set[int],
+    original_claim_count: int,
+) -> str:
+    """Return the refusal reason for a pre-synthesize gate failure."""
+    if drop and len(drop) >= original_claim_count:
+        return REFUSAL_REASON_QUALITY_PRE_ALL_CLAIMS_DROPPED
+    if _blocking_non_iron_issues(pre_issues):
+        return REFUSAL_REASON_QUALITY_PRE_NON_IRON_BLOCKER
+    return REFUSAL_REASON_QUALITY_PRE_BLOCKING_ISSUE
 
 
 def _run_research_for(candidate: dict, work_dir: Path) -> tuple[int, Path | None]:
@@ -314,11 +343,7 @@ def _process_candidate_inner(
     pre_passed, pre_issues = quality_check.check(artifact, current_page, draft_path=None)
     if not pre_passed:
         drop = quality_check.failing_iron_law_indices(pre_issues)
-        non_iron_blocking = [
-            i for i in pre_issues
-            if i.get("severity") in quality_check.BLOCKING
-            and i.get("rule") != "iron_law"
-        ]
+        non_iron_blocking = _blocking_non_iron_issues(pre_issues)
         original_claim_count = len(artifact.get("claims", []) or [])
         if drop and not non_iron_blocking and len(drop) < original_claim_count:
             filtered = quality_check.filter_artifact_drop_claims(artifact, drop)
@@ -358,6 +383,9 @@ def _process_candidate_inner(
                     (time.perf_counter() - t_gate) * 1000
                 )
                 run_data["outcome"] = "refused"
+                run_data["refusal_reason"] = (
+                    REFUSAL_REASON_QUALITY_PRE_PARTIAL_CREDIT_RECHECK_FAILED
+                )
                 buckets = _classify_issues(pre_issues)
                 for k, v in buckets.items():
                     counters[k] += v
@@ -378,6 +406,9 @@ def _process_candidate_inner(
                 (time.perf_counter() - t_gate) * 1000
             )
             run_data["outcome"] = "refused"
+            run_data["refusal_reason"] = _quality_pre_refusal_reason(
+                pre_issues, drop, original_claim_count,
+            )
             buckets = _classify_issues(pre_issues)
             for k, v in buckets.items():
                 counters[k] += v
@@ -435,6 +466,7 @@ def _process_candidate_inner(
     )
     if not post_passed:
         run_data["outcome"] = "refused"
+        run_data["refusal_reason"] = REFUSAL_REASON_QUALITY_POST_BLOCKING_ISSUE
         buckets = _classify_issues(post_issues)
         for k, v in buckets.items():
             counters[k] += v

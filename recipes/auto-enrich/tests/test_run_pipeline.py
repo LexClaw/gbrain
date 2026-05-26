@@ -100,8 +100,28 @@ def test_good_candidate_full_pass_calls_gbrain_put(artifact_file, tmp_path, monk
     assert put_mock.called, "gbrain put must be called on full pass"
 
 
+def test_run_log_includes_suggested_links_valid_rate(artifact_file, tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTO_ENRICH_WORK", str(tmp_path))
+    monkeypatch.setenv("AUTO_ENRICH_LOG_PATH", str(tmp_path / "runs.jsonl"))
+
+    with _patch_sensor([SAMPLE_CANDIDATE]), \
+         _patch_research_ok(artifact_file), \
+         _patch_fetch_page_empty(), \
+         _patch_quality(pre_pass=True, post_pass=True), \
+         _patch_synth_ok(), \
+         _patch_gbrain_put_ok():
+        rc = run_pipeline.run(limit=1, dry_run=False)
+
+    assert rc == 0
+    run_rec = json.loads((tmp_path / "runs.jsonl").read_text().strip())
+    assert run_rec["cal"]["suggested_links_valid_rate"] == 1.0
+    assert run_rec["cal"]["suggested_links_valid_count"] == 1
+    assert run_rec["cal"]["suggested_links_original_count"] == 1
+
+
 def test_bad_iron_law_escalates(artifact_file, tmp_path, monkeypatch):
     monkeypatch.setenv("AUTO_ENRICH_WORK", str(tmp_path))
+    monkeypatch.setenv("AUTO_ENRICH_LOG_PATH", str(tmp_path / "runs.jsonl"))
     monkeypatch.setattr(run_pipeline, "ESCALATIONS_PATH", tmp_path / "esc.jsonl")
     pre_issues = [{"rule": "iron_law", "severity": "critical",
                    "detail": "claims[1]: citation.url empty"}]
@@ -119,10 +139,34 @@ def test_bad_iron_law_escalates(artifact_file, tmp_path, monkeypatch):
     assert len(esc) == 1
     rec = json.loads(esc[0])
     assert rec["stage"] == "quality_pre"
+    run_rec = json.loads((tmp_path / "runs.jsonl").read_text().strip())
+    assert run_rec["outcome"] == "refused"
+    assert run_rec["refusal_reason"] == "quality_pre_blocking_issue"
+
+
+def test_pre_gate_non_iron_blocker_logs_refusal_reason(artifact_file, tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTO_ENRICH_WORK", str(tmp_path))
+    monkeypatch.setenv("AUTO_ENRICH_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    monkeypatch.setattr(run_pipeline, "ESCALATIONS_PATH", tmp_path / "esc.jsonl")
+    pre_issues = [{"rule": "fabricated_command", "severity": "high",
+                   "detail": "artifact references `gbrain nope`"}]
+    with _patch_sensor([SAMPLE_CANDIDATE]), \
+         _patch_research_ok(artifact_file), \
+         _patch_fetch_page_empty(), \
+         _patch_quality(pre_pass=False, pre_issues=pre_issues), \
+         _patch_synth_ok(), \
+         _patch_gbrain_put_ok() as put_mock:
+        rc = run_pipeline.run(limit=1, dry_run=False)
+    assert rc == 1
+    assert not put_mock.called
+    run_rec = json.loads((tmp_path / "runs.jsonl").read_text().strip())
+    assert run_rec["outcome"] == "refused"
+    assert run_rec["refusal_reason"] == "quality_pre_non_iron_blocker"
 
 
 def test_bad_lint_post_synthesize_escalates(artifact_file, tmp_path, monkeypatch):
     monkeypatch.setenv("AUTO_ENRICH_WORK", str(tmp_path))
+    monkeypatch.setenv("AUTO_ENRICH_LOG_PATH", str(tmp_path / "runs.jsonl"))
     monkeypatch.setattr(run_pipeline, "ESCALATIONS_PATH", tmp_path / "esc.jsonl")
     post_issues = [{"rule": "lint", "severity": "high",
                     "detail": "gbrain lint exit 1"}]

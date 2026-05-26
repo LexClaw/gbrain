@@ -18,6 +18,7 @@ Schema (see plan 2026-05-22-auto-enrich-structured-logger.md):
       "gate":       {"kept": ..., "dropped": ..., "drop_reasons": {...},
                      "per_claim": [...]},
       "outcome":    "written" | "dry_pass" | "refused" | "error",
+      "refusal_reason": "<reason>",  # present when outcome == "refused"
       "write":      {"slug_written": ..., "facts_added": ..., "sections_added": [...],
                      "existing_preserved": ..., "partial_credit_applied": ...},
       "tools_used": {"gstack_browse": ..., "xurl": ..., "http": ...,
