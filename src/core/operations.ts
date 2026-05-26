@@ -20,6 +20,11 @@ import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
 import { bumpLastRetrievedAt } from './last-retrieved.ts';
+import {
+  getCallerHint,
+  normalizeSearchQuery,
+  writeSearchTelemetryJsonl,
+} from './search/telemetry.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
@@ -1051,6 +1056,7 @@ const search: Operation = {
   handler: async (ctx, p) => {
     const startedAt = Date.now();
     const queryText = p.query as string;
+    const normalizedQuery = normalizeSearchQuery(queryText) || queryText;
     // v0.34.1 (#861 — P0 leak seal): thread caller's source scope into
     // searchKeyword. Pre-fix this op silently returned cross-source hits
     // for any auth'd OAuth client.
@@ -1061,6 +1067,15 @@ const search: Operation = {
     });
     const results = dedupResults(raw);
     const latency_ms = Date.now() - startedAt;
+
+    writeSearchTelemetryJsonl({
+      ts: new Date().toISOString(),
+      raw_query: queryText,
+      normalized_query: normalizedQuery,
+      result_count: results.length,
+      wall_ms: latency_ms,
+      caller_hint: getCallerHint(),
+    });
 
     // v0.37.0 (D11): op-layer last_retrieved_at write-back. Fire-and-forget;
     // results already returned by engine, this just marks them as user-surfaced
@@ -1211,6 +1226,14 @@ const query: Operation = {
         embeddingColumn: 'embedding_image',
         ...querySourceScope,
       });
+      writeSearchTelemetryJsonl({
+        ts: new Date().toISOString(),
+        raw_query: queryText ?? '[image]',
+        normalized_query: queryText ? normalizeSearchQuery(queryText) || queryText : '[image]',
+        result_count: results.length,
+        wall_ms: Date.now() - startedAt,
+        caller_hint: getCallerHint(),
+      });
       return results;
     }
 
@@ -1262,6 +1285,15 @@ const query: Operation = {
       embeddingColumn: embeddingColumnParam,
     });
     const latency_ms = Date.now() - startedAt;
+
+    writeSearchTelemetryJsonl({
+      ts: new Date().toISOString(),
+      raw_query: queryText,
+      normalized_query: normalizeSearchQuery(queryText) || queryText,
+      result_count: results.length,
+      wall_ms: latency_ms,
+      caller_hint: getCallerHint(),
+    });
 
     // v0.37.0 (D11): op-layer last_retrieved_at write-back. Same shape as the
     // search handler — fire-and-forget, internal callers bypass this path.

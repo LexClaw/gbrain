@@ -20,7 +20,10 @@ import { applyReranker } from './rerank.ts';
 import { autoDetectDetail, classifyQuery, isAmbiguousModalityQuery } from './query-intent.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
 import { enforceTokenBudget } from './token-budget.ts';
-import { recordSearchTelemetry } from './telemetry.ts';
+import {
+  normalizeSearchQuery,
+  recordSearchTelemetry,
+} from './telemetry.ts';
 import {
   weightsForIntent,
   effectiveRrfK,
@@ -334,6 +337,10 @@ export async function hybridSearch(
   query: string,
   opts?: HybridSearchOpts,
 ): Promise<SearchResult[]> {
+  const rawQuery = query;
+  const normalizedQuery = normalizeSearchQuery(rawQuery);
+  const searchQuery = normalizedQuery || rawQuery;
+
   // v0.32.3 search-lite mode: resolve the active mode + per-key overrides
   // once at entry. Mode supplies DEFAULTS for intentWeighting, tokenBudget,
   // expansion, and searchLimit when the caller leaves those undefined.
@@ -382,14 +389,14 @@ export async function hybridSearch(
   // weight-adjustment path. Intent weighting is on by default and can
   // be disabled via `opts.intentWeighting = false`. The mode bundle
   // supplies the default when neither per-call nor per-key sets it.
-  const suggestions = classifyQuery(query);
+  const suggestions = classifyQuery(searchQuery);
   const intentWeightingOn = resolvedMode.intentWeighting;
   const intentWeights = intentWeightingOn
     ? weightsForIntent(suggestions.intent)
     : weightsForIntent('general');
 
   // Auto-detect detail level from query intent when caller doesn't specify
-  const detail = opts?.detail ?? autoDetectDetail(query);
+  const detail = opts?.detail ?? autoDetectDetail(searchQuery);
   const detailResolved: 'low' | 'medium' | 'high' | null = detail ?? null;
   const searchOpts: SearchOpts = {
     limit: innerLimit,
@@ -469,7 +476,7 @@ export async function hybridSearch(
     ? opts.crossModal
     : (suggestions.suggestedModality ?? 'text');
   const keywordResults: SearchResult[] =
-    earlyModality === 'image' ? [] : await engine.searchKeyword(query, searchOpts);
+    earlyModality === 'image' ? [] : await engine.searchKeyword(searchQuery, searchOpts);
 
   // v0.29.1: resolve salience/recency from caller (back-compat aliases for
   // PR #618's `recencyBoost` numeric scale) or fall back to the heuristic.
@@ -573,11 +580,11 @@ export async function hybridSearch(
     explicitModality === undefined &&
     regexModality === 'text' &&
     resolvedMode.cross_modal_llm_intent &&
-    isAmbiguousModalityQuery(query)
+    isAmbiguousModalityQuery(searchQuery)
   ) {
     try {
       const { classifyModalityWithLLM } = await import('./llm-intent.ts');
-      regexModality = await classifyModalityWithLLM(query, 'text');
+      regexModality = await classifyModalityWithLLM(searchQuery, 'text');
     } catch {
       // Fail-open: regex result stands.
     }
@@ -593,12 +600,12 @@ export async function hybridSearch(
   // SearchOpts.expansion still wins via resolveSearchMode's chain.
   //
   // D9: image-modality skips expansion regardless of mode bundle.
-  let queries = [query];
+  let queries = [searchQuery];
   const expansionAllowed = resolvedMode.expansion && effectiveModality !== 'image';
   if (expansionAllowed && opts?.expandFn) {
     try {
-      queries = await opts.expandFn(query);
-      if (queries.length === 0) queries = [query];
+      queries = await opts.expandFn(searchQuery);
+      if (queries.length === 0) queries = [searchQuery];
       // "Applied" = produced variants beyond the original, not just called.
       expansionApplied = queries.length > 1;
     } catch {
@@ -630,7 +637,7 @@ export async function hybridSearch(
       if (!aiIsAvailable('embedding')) {
         throw new Error('gateway not configured for embedding — unified multimodal would also fail');
       }
-      const unifiedEmbedding = await embedQueryMultimodal(query);
+      const unifiedEmbedding = await embedQueryMultimodal(searchQuery);
       const unifiedSearchOpts: SearchOpts = {
         ...searchOpts,
         embeddingColumn: 'embedding_multimodal',
@@ -665,7 +672,7 @@ export async function hybridSearch(
       if (!aiIsAvailable('embedding')) {
         throw new Error('gateway not configured for embedding — multimodal would also fail');
       }
-      const imageEmbedding = await embedQueryMultimodal(query);
+      const imageEmbedding = await embedQueryMultimodal(searchQuery);
       const imageSearchOpts: SearchOpts = {
         ...searchOpts,
         embeddingColumn: 'embedding_image',
@@ -802,7 +809,7 @@ export async function hybridSearch(
     // v0.32.x search-lite: intent exact-match boost (entity/event intents).
     // No-op when boost factor is 1.0 (general intent or weighting disabled).
     if (intentWeights.exactMatchBoost !== 1.0) {
-      applyExactMatchBoost(fused, query, intentWeights);
+      applyExactMatchBoost(fused, searchQuery, intentWeights);
     }
     fused.sort((a, b) => b.score - a.score);
   }
@@ -863,7 +870,7 @@ export async function hybridSearch(
   // call's onMeta fires with the escalated detail_resolved; do NOT also
   // fire here (would double-emit and capture stale meta).
   if (deduped.length === 0 && opts?.detail === 'low') {
-    return hybridSearch(engine, query, { ...opts, detail: 'high' });
+    return hybridSearch(engine, rawQuery, { ...opts, detail: 'high' });
   }
 
   // v0.35.0.0+: cross-encoder reranker. Slots between dedup and slice so the
@@ -882,7 +889,7 @@ export async function hybridSearch(
     timeoutMs: resolvedMode.reranker_timeout_ms,
   };
   const reranked = rerankerOpts.enabled
-    ? await applyReranker(query, deduped, rerankerOpts as any)
+    ? await applyReranker(searchQuery, deduped, rerankerOpts as any)
     : deduped;
 
   const sliced = reranked.slice(offset, offset + limit);
@@ -932,6 +939,10 @@ export async function hybridSearchCached(
   query: string,
   opts?: HybridSearchOpts,
 ): Promise<SearchResult[]> {
+  const rawQuery = query;
+  const normalizedQuery = normalizeSearchQuery(rawQuery);
+  const searchQuery = normalizedQuery || rawQuery;
+
   // v0.32.3 search-lite mode: resolve mode + per-key overrides once. The
   // resolved knob set drives cache enable/threshold/TTL AND the knobs_hash
   // that scopes the cache row so a tokenmax write can't be served to a
@@ -1018,7 +1029,7 @@ export async function hybridSearchCached(
       const providerProbeCached = resolvedColCached.embeddingModel || undefined;
       if (isAvailable('embedding', providerProbeCached)) {
         // v0.35.0.0+: query-side embedding (cache lookup path).
-        queryEmbedding = await embedQuery(query);
+        queryEmbedding = await embedQuery(searchQuery);
       } else {
         cacheStatus = 'disabled';
       }
@@ -1072,7 +1083,7 @@ export async function hybridSearchCached(
   // we use a single-element box to keep the type stable.
   const innerMetaBox: { current: HybridSearchMeta | null } = { current: null };
   const userOnMeta = opts?.onMeta;
-  const results = await hybridSearch(engine, query, {
+  const results = await hybridSearch(engine, searchQuery, {
     ...opts,
     onMeta: (m) => {
       innerMetaBox.current = m;
@@ -1112,7 +1123,7 @@ export async function hybridSearchCached(
   ) {
     trackCacheWrite(
       cache
-        .store(query, queryEmbedding, results, finalMeta, { sourceId: opts?.sourceId, knobsHash: cacheKnobsHash })
+        .store(searchQuery, queryEmbedding, results, finalMeta, { sourceId: opts?.sourceId, knobsHash: cacheKnobsHash })
         .catch(() => { /* swallow */ }),
     );
   }
