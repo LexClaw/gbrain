@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -37,6 +39,8 @@ import research_strategy  # noqa: E402
 
 RECIPE_ID = "auto-enrich"
 RECIPE_VERSION_RESEARCH = "0.2.0"
+PROMPT_BUILDER_PATH = Path.home() / "hermes-workspace" / "Lex-Workspace" / "scripts" / "prompt-builder.py"
+MODEL_MARKER_RE = re.compile(r"^<!-- HERMES-MODEL: (.*?) -->\s*$", re.MULTILINE)
 
 # Seven-skill anchor set for Cal research dispatch
 REQUIRED_SKILLS = [
@@ -206,40 +210,92 @@ def load_schema_text() -> str:
 IRON LAW: every claim's citation must have non-empty url AND quote."""
 
 
-# Cal dispatch model. hermes 0.14.0 silently exits 0 with empty stdout when
-# given an unrecognized short alias (e.g. "claude-haiku-4-5"). The fully
-# qualified Anthropic API model id below is the recognized form. If this
-# alias also stops resolving, drop the --model flag entirely (see
-# CAL_DISPATCH_MODEL_OVERRIDE below) and let hermes use its configured default.
-CAL_DISPATCH_MODEL = "claude-haiku-4-5-20251001"
-
 # Synthetic return code emitted by dispatch_cal() when hermes exits 0 with
 # empty stdout. Distinct from real hermes exit codes so run() can route
 # the error path to a clearer status than the legacy "parse_error".
 DISPATCH_ANOMALY_EMPTY_STDOUT = 99
 
 
+def parse_hermes_model_marker(compiled_prompt: str) -> tuple[str, dict[str, str] | None]:
+    """Strip prompt-builder's HERMES-MODEL marker and return its JSON payload."""
+    payload: dict[str, str] | None = None
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal payload
+        try:
+            parsed = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return ""
+        if isinstance(parsed, dict):
+            payload = {str(k): str(v) for k, v in parsed.items() if v is not None}
+        return ""
+
+    stripped = MODEL_MARKER_RE.sub(_replace, compiled_prompt).strip() + "\n"
+    return stripped, payload
+
+
+def compile_with_prompt_builder(task: str, heartbeat: "Heartbeat | None" = None,
+                                slug: str | None = None) -> tuple[str, dict[str, str] | None]:
+    """Compile the Cal task through prompt-builder.py and honor HERMES-MODEL."""
+    cmd = [
+        sys.executable,
+        str(PROMPT_BUILDER_PATH),
+        "--agent", "cal",
+        "--task-type", "research",
+        "--task", task,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "prompt-builder failed").strip())
+    prompt, model_payload = parse_hermes_model_marker(result.stdout)
+    if heartbeat is not None:
+        heartbeat.emit("prompt_builder_compile", status="ok", details={
+            "slug": slug,
+            "agent": "cal",
+            "task_type": "research",
+            "model": model_payload,
+        })
+    return prompt, model_payload
+
+
+def _model_to_cli_args(model_payload: dict[str, str] | None) -> tuple[list[str], dict[str, str]]:
+    """Convert prompt-builder model payload into hermes -z CLI args and env."""
+    if not model_payload:
+        return [], {}
+    args: list[str] = []
+    env: dict[str, str] = {}
+    provider = model_payload.get("provider")
+    model = os.environ.get("CAL_DISPATCH_MODEL_OVERRIDE") or model_payload.get("model")
+    if provider:
+        args += ["--provider", provider]
+    if model:
+        args += ["--model", model]
+        env["HERMES_INFERENCE_MODEL"] = model
+    base_url = model_payload.get("base_url")
+    if base_url:
+        env["CUSTOM_BASE_URL"] = base_url
+    return args, env
+
+
 def dispatch_cal(prompt: str, skills: list[str] | None = None,
                  heartbeat: "Heartbeat | None" = None,
-                 slug: str | None = None) -> tuple[int, str, str]:
+                 slug: str | None = None,
+                 model_payload: dict[str, str] | None = None) -> tuple[int, str, str]:
     """Spawn Cal via hermes -z and return (returncode, stdout, stderr).
 
-    Empty-stdout-on-exit-0 is treated as a dispatch anomaly (the historical
-    failure mode when --model resolves to an unknown alias). The function
-    returns DISPATCH_ANOMALY_EMPTY_STDOUT in that case and emits a
-    `dispatch_anomaly` heartbeat event when a Heartbeat is provided.
+    Empty-stdout-on-exit-0 is treated as a dispatch anomaly. The model payload
+    comes from prompt-builder.py's HERMES-MODEL marker and is threaded into the
+    dispatch command for HR-2 companion compliance.
     """
-    import os as _os
     import time as _time
     skills_list = skills if skills is not None else REQUIRED_SKILLS
-    model = _os.environ.get("CAL_DISPATCH_MODEL_OVERRIDE", CAL_DISPATCH_MODEL)
-    cmd = ["hermes", "-z", prompt]
-    if model:
-        cmd += ["--model", model]
-    cmd += ["--skills", ",".join(skills_list), "--yolo"]
+    model_args, model_env = _model_to_cli_args(model_payload)
+    cmd = ["hermes", "-z", prompt] + model_args + ["--skills", ",".join(skills_list), "--yolo"]
 
     started = _time.monotonic()
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+    env = os.environ.copy()
+    env.update(model_env)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False, env=env)
     wall = _time.monotonic() - started
 
     if result.returncode == 0 and not (result.stdout or "").strip():
@@ -249,7 +305,7 @@ def dispatch_cal(prompt: str, skills: list[str] | None = None,
                 status="empty_stdout_on_success_exit",
                 details={
                     "slug": slug,
-                    "model": model,
+                    "model": model_payload,
                     "stderr": (result.stderr or "")[:500],
                     "wall_seconds": round(wall, 3),
                 },
@@ -350,30 +406,40 @@ def run(candidate_json_path: str, output_artifact_path: str,
     query_plan = research_strategy.build_query_plan(candidate, page_content)
     schema_text = load_schema_text()
 
-    # Compose prompt
-    prompt = compile_cal_prompt(slug, query_plan, page_content, schema_text)
+    # Compose task, then compile it through prompt-builder.py for Cal routing.
+    task = compile_cal_prompt(slug, query_plan, page_content, schema_text)
+    try:
+        prompt, model_payload = compile_with_prompt_builder(task, heartbeat=hb, slug=slug)
+    except RuntimeError as exc:
+        hb.emit("research_dispatch", status="prompt_builder_error",
+                error=str(exc)[:500], details={"slug": slug})
+        return 1
 
     if dry_run:
-        print(f"=== PLANNED CAL PROMPT (dry-run) ===")
+        model_args, _ = _model_to_cli_args(model_payload)
+        print("=== PLANNED CAL PROMPT (dry-run) ===")
         print(f"candidate: {slug}")
         print(f"page_type: {page_type}")
         print(f"queries planned: {len(query_plan)}")
         print(f"skills loaded: {','.join(REQUIRED_SKILLS)}")
-        print(f"dispatch cmd: hermes -z <prompt> --model {CAL_DISPATCH_MODEL} "
-              f"--skills {','.join(REQUIRED_SKILLS)} --yolo")
-        print(f"---")
+        print(f"model payload: {json.dumps(model_payload, sort_keys=True)}")
+        print("dispatch cmd: hermes -z <prompt> "
+              f"{' '.join(model_args)} --skills {','.join(REQUIRED_SKILLS)} --yolo")
+        print("---")
         print(prompt)
-        print(f"---")
+        print("---")
         hb.emit("research_dispatch", status="dry_run", details={
             "slug": slug,
             "page_type": page_type,
             "queries_planned": len(query_plan),
             "skills": REQUIRED_SKILLS,
+            "model": model_payload,
         })
         return 0
 
     # Dispatch Cal
-    returncode, stdout, stderr = dispatch_cal(prompt, heartbeat=hb, slug=slug)
+    returncode, stdout, stderr = dispatch_cal(prompt, heartbeat=hb, slug=slug,
+                                              model_payload=model_payload)
     if returncode == DISPATCH_ANOMALY_EMPTY_STDOUT:
         # dispatch_cal already emitted a `dispatch_anomaly` event; emit a
         # research_dispatch event with the clearer cal_no_output status so
@@ -412,9 +478,14 @@ def run(candidate_json_path: str, output_artifact_path: str,
                 error=" | ".join(errors), details={"slug": slug})
         return 2
 
-    # Enforce researcher tag and timestamp
+    # Enforce researcher tag, timestamp, and prompt-builder model attribution.
     artifact["researcher"] = "cal-subagent"
     artifact["researched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if model_payload:
+        artifact["model"] = "/".join(
+            part for part in (model_payload.get("provider"), model_payload.get("model")) if part
+        )
+        artifact["model_payload"] = model_payload
 
     # Write artifact
     try:

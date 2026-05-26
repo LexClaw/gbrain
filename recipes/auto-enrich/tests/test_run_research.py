@@ -55,11 +55,7 @@ def _make_candidate_json(tmp_path: Path) -> Path:
 # --- Tests ---
 
 def test_dispatch_cal_command_contains_skills_flag():
-    """dispatch_cal must pass --skills with all seven REQUIRED_SKILLS to hermes -z.
-
-    This is the regression guard for Grant Phase 2 review item #2: REQUIRED_SKILLS
-    was declared but never wired into the subprocess.run command list.
-    """
+    """dispatch_cal must pass --skills with all seven REQUIRED_SKILLS to hermes -z."""
     captured = {}
 
     class FakeResult:
@@ -319,13 +315,12 @@ def test_compile_cal_prompt_resembles_expected_shape():
 # --- Regression tests for Cal empty-output bug (feat/auto-enrich-cal-fix) ---
 
 def test_dispatch_cal_uses_qualified_model_name():
-    """dispatch_cal must use the fully qualified Anthropic model id.
-
-    hermes 0.14.0 silently exits 0 with empty stdout when given the short
-    alias 'claude-haiku-4-5'. Guard the qualified id so the bug cannot
-    regress on a careless edit.
-    """
+    """dispatch_cal threads the prompt-builder model payload into hermes."""
     captured = {}
+    payload = {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+    }
 
     class FakeResult:
         returncode = 0
@@ -334,20 +329,53 @@ def test_dispatch_cal_uses_qualified_model_name():
 
     def fake_run(cmd, *args, **kwargs):
         captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env", {})
         return FakeResult()
 
     with patch("run_research.subprocess.run", side_effect=fake_run):
-        rc, _, _ = run_research.dispatch_cal("prompt")
+        rc, _, _ = run_research.dispatch_cal("prompt", model_payload=payload)
 
     assert rc == 0
     cmd = captured["cmd"]
-    assert "--model" in cmd, f"--model flag missing: {cmd}"
+    assert cmd[cmd.index("--provider") + 1] == "anthropic"
     model = cmd[cmd.index("--model") + 1]
-    assert model == run_research.CAL_DISPATCH_MODEL
+    assert model == "claude-haiku-4-5-20251001"
+    assert captured["env"]["HERMES_INFERENCE_MODEL"] == model
     assert model != "claude-haiku-4-5", (
         "Short alias regression: hermes 0.14.0 silently returns empty stdout "
         "for this name. Use the qualified id."
     )
+
+
+def test_parse_hermes_model_marker_strips_marker_and_returns_payload():
+    """prompt-builder HERMES-MODEL markers feed dispatch model args."""
+    compiled = (
+        '<!-- HERMES-MODEL: {"provider":"ollama","model":"hf.co/test"} -->\n'
+        "Prompt body\n"
+    )
+
+    prompt, payload = run_research.parse_hermes_model_marker(compiled)
+
+    assert prompt == "Prompt body\n"
+    assert payload == {"provider": "ollama", "model": "hf.co/test"}
+
+
+def test_model_to_cli_args_omits_model_when_builder_has_no_payload():
+    """--model remains conditional when prompt-builder has no model marker."""
+    args, env = run_research._model_to_cli_args(None)
+
+    assert args == []
+    assert env == {}
+
+
+def test_model_to_cli_args_honors_override(monkeypatch):
+    """CAL_DISPATCH_MODEL_OVERRIDE can still replace a bad builder model."""
+    monkeypatch.setenv("CAL_DISPATCH_MODEL_OVERRIDE", "override-model")
+
+    args, env = run_research._model_to_cli_args({"provider": "anthropic", "model": "bad"})
+
+    assert args == ["--provider", "anthropic", "--model", "override-model"]
+    assert env["HERMES_INFERENCE_MODEL"] == "override-model"
 
 
 def test_dispatch_cal_empty_stdout_treated_as_error(tmp_path):

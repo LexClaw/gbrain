@@ -30,6 +30,52 @@ Runtime state lives at `~/.gbrain/integrations/auto-enrich/` (not committed):
 - `metrics.jsonl` (Phase 3)
 - `escalations.jsonl` (Phase 3)
 
+## Scheduler: launchd
+
+Auto-enrich runs under macOS launchd because this workload is long-running background enrichment that should use idle Mac time instead of the Hermes cron 600s foreground cap. This follows the `hit-network/scheduler-fits-work` skill: use launchd for host-local, interval-based, long-running jobs.
+
+Lifecycle commands:
+
+```bash
+# Install or update the LaunchAgent, then verify idempotency
+cd ~/gbrain/recipes/auto-enrich/scripts
+bash install-launchd.sh --self-test
+
+# Status
+launchctl print "gui/$(id -u)/com.hitnetwork.auto-enrich"
+launchctl list | grep com.hitnetwork.auto-enrich
+
+# Manual run
+launchctl kickstart -k "gui/$(id -u)/com.hitnetwork.auto-enrich"
+
+# Disable without deleting the plist
+launchctl disable "gui/$(id -u)/com.hitnetwork.auto-enrich"
+launchctl bootout "gui/$(id -u)/com.hitnetwork.auto-enrich"
+
+# Uninstall from LaunchAgents
+launchctl bootout "gui/$(id -u)/com.hitnetwork.auto-enrich" || true
+rm -f ~/Library/LaunchAgents/com.hitnetwork.auto-enrich.plist
+```
+
+Logs:
+
+- `~/.gbrain/integrations/auto-enrich/launchd.out.log`, launchd stdout.
+- `~/.gbrain/integrations/auto-enrich/launchd.err.log`, launchd stderr.
+- `~/.gbrain/integrations/auto-enrich/pipeline.log`, existing pipeline log appended by `launchd-wrapper.sh`.
+- `~/.hermes/logs/auto-enrich-runs.jsonl`, existing JSONL telemetry from the pipeline.
+
+Watchdog:
+
+- `scripts/launchd-watchdog.sh` is registered as a Hermes cron every 5 minutes in script-only mode.
+- It checks for a JSONL row within the last 3 hours and checks launchd `last exit code`.
+- On failure, it bootouts launchd, resumes the Hermes cron, and emits an alert with `launchd.err.log` and `pipeline.log` tails.
+
+Rollback to Hermes cron:
+
+```bash
+hermes cronjob action=resume job_id=ff688e4f0d19
+```
+
 ## Running the sensor
 
 ```bash
