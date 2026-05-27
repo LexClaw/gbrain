@@ -28,7 +28,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
@@ -51,7 +51,31 @@ MANUAL_SLUG_RESOLUTIONS = {
     "ai/tools/codex": "concepts/codex",
     "ai/tools/cursor-ide": "concepts/cursor",
     "ai/entities/claude-code": "concepts/claude-code",
+    "tools/cursor": "companies/cursor",
+    "tools/codex-cli": "concepts/codex",
+    "ai/products/claude-code": "concepts/claude-code",
+    "ai/products/claude-cowork": "concepts/claude-cowork",
+    "ai/entities/anthropic-cowork": "concepts/claude-cowork",
+    "open-source/projects/hermes-agent": "ai/entities/hermes-agent",
 }
+
+# Canonical prefixes in this brain, ordered by frequency and preferred match.
+CANONICAL_PREFIXES = [
+    "concepts/",
+    "ai/concepts/",
+    "ai/entities/",
+    "companies/",
+    "people/",
+    "tools/",
+    "ai/tools/",
+    "crypto/concepts/",
+    "crypto/entities/",
+    "investors/",
+    "organizations/",
+    "open-source/projects/",
+    "ai/products/",
+    "ai/models/",
+]
 
 
 SLUG_GROUNDING_TEXT = """\
@@ -280,12 +304,37 @@ def slug_exists(slug: str) -> bool:
         return False
 
 
+def resolve_via_prefix_variants(
+    target: str,
+    exists: Callable[[str], bool] = slug_exists,
+) -> str | None:
+    """Resolve <wrong-prefix>/<basename> by testing canonical exact slugs."""
+    slug = str(target or "").strip()
+    if not slug or "/" not in slug:
+        return None
+    basename = slug.rsplit("/", 1)[-1]
+    if not basename:
+        return None
+    if exists(slug):
+        return slug
+    for prefix in CANONICAL_PREFIXES:
+        candidate = prefix + basename
+        if candidate == slug:
+            continue
+        if exists(candidate):
+            return candidate
+    return None
+
+
 def _slug_search_query(slug: str) -> str:
     """Turn a wrong-path slug into the shortest useful canonical search query."""
     return Path(str(slug or "").strip()).name.replace("-", " ").strip()
 
 
-def search_slug_resolution(slug: str) -> tuple[str | None, float]:
+def search_slug_resolution(
+    slug: str,
+    exists: Callable[[str], bool] = slug_exists,
+) -> tuple[str | None, float]:
     """Return the top verified search slug and score for a wrong-path target."""
     query = _slug_search_query(slug)
     if not query:
@@ -300,21 +349,27 @@ def search_slug_resolution(slug: str) -> tuple[str | None, float]:
             continue
         score = float(match.group("score"))
         candidate = match.group("slug")
-        if score >= SLUG_RESOLUTION_MIN_SCORE and slug_exists(candidate):
+        if score >= SLUG_RESOLUTION_MIN_SCORE and exists(candidate):
             return candidate, score
         return None, score
     return None, 0.0
 
 
-def resolve_suggested_link_target(slug: str) -> tuple[str | None, float]:
+def resolve_suggested_link_target(
+    slug: str,
+    exists: Callable[[str], bool] = slug_exists,
+) -> tuple[str | None, float]:
     """Resolve a non-existent suggested_links target to a canonical brain slug."""
     target = str(slug or "").strip()
     if not target:
         return None, 0.0
     manual = MANUAL_SLUG_RESOLUTIONS.get(target)
-    if manual and slug_exists(manual):
+    if manual and exists(manual):
         return manual, SLUG_RESOLUTION_MIN_SCORE
-    return search_slug_resolution(target)
+    variant = resolve_via_prefix_variants(target, exists=exists)
+    if variant:
+        return variant, SLUG_RESOLUTION_MIN_SCORE
+    return search_slug_resolution(target, exists=exists)
 
 
 def ground_suggested_links(artifact: dict[str, Any]) -> dict[str, Any]:
@@ -330,15 +385,25 @@ def ground_suggested_links(artifact: dict[str, Any]) -> dict[str, Any]:
     verified: list[dict[str, Any]] = []
     invalid: list[str] = []
     resolved: list[dict[str, Any]] = []
+    exists_cache: dict[str, bool] = {}
+
+    def cached_slug_exists(slug: str) -> bool:
+        target = str(slug or "").strip()
+        if not target:
+            return False
+        if target not in exists_cache:
+            exists_cache[target] = slug_exists(target)
+        return exists_cache[target]
+
     for link in links:
         if not isinstance(link, dict):
             invalid.append("")
             continue
         target = str(link.get("target") or "").strip()
-        if target and slug_exists(target):
+        if target and cached_slug_exists(target):
             verified.append(link)
             continue
-        resolved_target, score = resolve_suggested_link_target(target)
+        resolved_target, score = resolve_suggested_link_target(target, exists=cached_slug_exists)
         if resolved_target:
             rewritten = dict(link)
             rewritten["target"] = resolved_target

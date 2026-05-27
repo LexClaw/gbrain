@@ -134,6 +134,88 @@ def test_prompt_requires_grounded_suggested_links():
     assert "concepts/claude" in prompt
 
 
+def test_resolve_via_prefix_variants_finds_concepts_for_ai_entities():
+    calls = []
+
+    def fake_exists(slug):
+        calls.append(slug)
+        return slug == "concepts/claude-code"
+
+    assert run_research.resolve_via_prefix_variants(
+        "ai/entities/claude-code",
+        exists=fake_exists,
+    ) == "concepts/claude-code"
+    assert "ai/entities/claude-code" in calls
+    assert "concepts/claude-code" in calls
+
+
+def test_resolve_via_prefix_variants_finds_companies_for_tools():
+    assert run_research.resolve_via_prefix_variants(
+        "tools/cursor",
+        exists=lambda slug: slug == "companies/cursor",
+    ) == "companies/cursor"
+
+
+def test_resolve_via_prefix_variants_returns_self_if_already_canonical():
+    assert run_research.resolve_via_prefix_variants(
+        "concepts/codex",
+        exists=lambda slug: slug == "concepts/codex",
+    ) == "concepts/codex"
+
+
+def test_resolve_via_prefix_variants_returns_none_when_no_variant_exists():
+    assert run_research.resolve_via_prefix_variants(
+        "ai/entities/not-real",
+        exists=lambda slug: False,
+    ) is None
+
+
+def test_ground_suggested_links_uses_prefix_variant_before_search():
+    artifact = {
+        "suggested_links": [
+            {"type": "mentions", "target": "tools/cursor"},
+        ]
+    }
+
+    def fake_exists(slug):
+        return slug == "companies/cursor"
+
+    with patch("run_research.slug_exists", side_effect=fake_exists), \
+         patch("run_research.search_slug_resolution") as search:
+        grounded = run_research.ground_suggested_links(artifact)
+
+    search.assert_not_called()
+    assert grounded["suggested_links"] == [
+        {"type": "mentions", "target": "companies/cursor"}
+    ]
+    assert grounded["suggested_links_resolved_count"] == 1
+    assert grounded["suggested_links_valid_rate"] == 1.0
+
+
+def test_ground_suggested_links_caches_prefix_variant_slug_checks():
+    artifact = {
+        "suggested_links": [
+            {"type": "mentions", "target": "ai/entities/claude-code"},
+            {"type": "mentions", "target": "ai/entities/claude-code"},
+        ]
+    }
+    calls = []
+
+    def fake_exists(slug):
+        calls.append(slug)
+        return slug == "concepts/claude-code"
+
+    with patch("run_research.slug_exists", side_effect=fake_exists):
+        grounded = run_research.ground_suggested_links(artifact)
+
+    assert [link["target"] for link in grounded["suggested_links"]] == [
+        "concepts/claude-code",
+        "concepts/claude-code",
+    ]
+    assert calls.count("ai/entities/claude-code") == 1
+    assert calls.count("concepts/claude-code") == 1
+
+
 def test_ground_suggested_links_filters_unverified_targets():
     artifact = {
         "suggested_links": [
@@ -171,7 +253,7 @@ def test_ground_suggested_links_rewrites_wrong_path_targets():
     }
 
     with patch("run_research.slug_exists", return_value=False), \
-         patch("run_research.resolve_suggested_link_target", side_effect=lambda s: resolutions[s]):
+         patch("run_research.resolve_suggested_link_target", side_effect=lambda s, exists=None: resolutions[s]):
         grounded = run_research.ground_suggested_links(artifact)
 
     assert grounded["suggested_links"] == [
