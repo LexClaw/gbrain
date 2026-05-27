@@ -415,10 +415,11 @@ def compile_with_prompt_builder(task: str, heartbeat: "Heartbeat | None" = None,
     return prompt, model_payload
 
 
-def _model_to_cli_args(model_payload: dict[str, str] | None) -> tuple[list[str], dict[str, str]]:
+def _model_to_cli_args(
+    model_payload: dict[str, str] | None,
+) -> tuple[list[str], dict[str, str], dict[str, str]]:
     """Convert prompt-builder model payload into hermes -z CLI args and env."""
-    if not model_payload:
-        return [], {}
+    model_payload = model_payload or {}
     args: list[str] = []
     env: dict[str, str] = {}
     provider = os.environ.get("CAL_DISPATCH_PROVIDER_OVERRIDE") or model_payload.get("provider")
@@ -431,7 +432,8 @@ def _model_to_cli_args(model_payload: dict[str, str] | None) -> tuple[list[str],
     base_url = os.environ.get("CAL_DISPATCH_BASE_URL_OVERRIDE") or model_payload.get("base_url")
     if base_url:
         env["CUSTOM_BASE_URL"] = base_url
-    return args, env
+    resolved = {"provider": provider, "model": model, "base_url": base_url}
+    return args, env, {k: v for k, v in resolved.items() if v}
 
 
 def dispatch_cal(prompt: str, skills: list[str] | None = None,
@@ -446,7 +448,7 @@ def dispatch_cal(prompt: str, skills: list[str] | None = None,
     """
     import time as _time
     skills_list = skills if skills is not None else REQUIRED_SKILLS
-    model_args, model_env = _model_to_cli_args(model_payload)
+    model_args, model_env, _resolved_model = _model_to_cli_args(model_payload)
     cmd = ["hermes", "-z", prompt] + model_args + ["--skills", ",".join(skills_list), "--yolo"]
 
     started = _time.monotonic()
@@ -579,7 +581,7 @@ def run(candidate_json_path: str, output_artifact_path: str,
         return 1
 
     if dry_run:
-        model_args, _ = _model_to_cli_args(model_payload)
+        model_args, _, resolved_model = _model_to_cli_args(model_payload)
         print("=== PLANNED CAL PROMPT (dry-run) ===")
         print(f"candidate: {slug}")
         print(f"page_type: {page_type}")
@@ -596,7 +598,7 @@ def run(candidate_json_path: str, output_artifact_path: str,
             "page_type": page_type,
             "queries_planned": len(query_plan),
             "skills": REQUIRED_SKILLS,
-            "model": model_payload,
+            "model": resolved_model or model_payload,
         })
         return 0
 
@@ -626,6 +628,7 @@ def run(candidate_json_path: str, output_artifact_path: str,
     )
     returncode, stdout, stderr = dispatch_cal(prompt, heartbeat=hb, slug=slug,
                                               model_payload=model_payload)
+    _, _, resolved_model = _model_to_cli_args(model_payload)
     if returncode == DISPATCH_ANOMALY_EMPTY_STDOUT:
         # dispatch_cal already emitted a `dispatch_anomaly` event; emit a
         # research_dispatch event with the clearer cal_no_output status so
@@ -669,11 +672,10 @@ def run(candidate_json_path: str, output_artifact_path: str,
     artifact = ground_suggested_links(artifact)
     artifact["researcher"] = "cal-subagent"
     artifact["researched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if model_payload:
-        artifact["model"] = "/".join(
-            part for part in (model_payload.get("provider"), model_payload.get("model")) if part
-        )
-        artifact["model_payload"] = model_payload
+    if resolved_model:
+        artifact["model"] = resolved_model.get("model")
+        artifact["provider"] = resolved_model.get("provider")
+        artifact["model_payload"] = {**model_payload, **resolved_model} if model_payload else resolved_model
 
     # Write artifact
     try:

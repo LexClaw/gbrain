@@ -184,7 +184,12 @@ def process_candidate(
             "sensor": 0, "cal": 0, "gate": 0,
             "synthesize": 0, "write": 0, "total": 0,
         },
-        "cal": {"model": None, "claims_returned": 0, "raw_response_chars": 0},
+        "cal": {
+            "model": None,
+            "claims_returned": 0,
+            "raw_response_chars": 0,
+            "suggested_links_valid_rate": None,
+        },
         "gate": {
             "kept": 0, "dropped": 0,
             "drop_reasons": {"not_verbatim": 0, "not_found": 0,
@@ -208,14 +213,17 @@ def process_candidate(
         )
     except Exception as exc:  # noqa: BLE001
         run_data["outcome"] = "error"
-        run_data["errors"].append(f"pipeline_exception: {exc}")
+        err_text = f"{type(exc).__name__}: {str(exc)[:200]}"
+        if hasattr(exc, "cmd"):
+            err_text += " | stage=hermes_subprocess"
+        run_data["errors"].append(f"pipeline_exception: {err_text}")
         counters["escalations_count"] += 1
         _append_escalation({
             "ts": _now_iso(), "slug": slug, "stage": "pipeline_exception",
-            "error": str(exc),
+            "error": err_text,
         })
         hb.emit("pipeline_step", status="pipeline_exception",
-                details={"slug": slug, "error": str(exc)[:200]})
+                details={"slug": slug, "error": err_text[:200]})
         result = False
     finally:
         run_data["stages_ms"]["total"] = int(
@@ -331,11 +339,22 @@ def _process_candidate_inner(
     raw_text = art_path.read_text(encoding="utf-8")
     run_data["cal"]["raw_response_chars"] = len(raw_text)
     run_data["cal"]["claims_returned"] = len(artifact.get("claims", []) or [])
-    run_data["cal"]["model"] = (
-        artifact.get("model")
-        or artifact.get("cal_model")
-        or os.environ.get("CAL_MODEL")
+    run_data["cal"]["suggested_links_valid_rate"] = artifact.get(
+        "suggested_links_valid_rate"
     )
+    run_data["cal"]["suggested_links_valid_count"] = artifact.get(
+        "suggested_links_valid_count"
+    )
+    run_data["cal"]["suggested_links_original_count"] = artifact.get(
+        "suggested_links_original_count"
+    )
+    run_data["cal"]["suggested_links_resolved_count"] = artifact.get(
+        "suggested_links_resolved_count"
+    )
+    resolved_model = artifact.get("model") or artifact.get("cal_model")
+    if not resolved_model:
+        resolved_model = os.environ.get("CAL_DISPATCH_MODEL_OVERRIDE") or os.environ.get("CAL_MODEL")
+    run_data["cal"]["model"] = resolved_model
 
     # Step 2: pre-synthesize quality check (Iron Law + no-fabrication).
     t_gate = time.perf_counter()

@@ -141,7 +141,7 @@ def test_suggested_link_to_missing_target_logged(good_artifact, stub_page):
     with _patch_page_exists(set()):
         _, issues = synthesize.synthesize(good_artifact, stub_page)
     missing = [i for i in issues if i["rule"] == "missing_link_target"]
-    assert len(missing) == 3, f"expected 3 missing-link issues, got {issues}"
+    assert len(missing) == 1, f"expected 1 missing-link issue, got {issues}"
 
 
 def test_run_missing_target_page_returns_4(good_artifact, tmp_path):

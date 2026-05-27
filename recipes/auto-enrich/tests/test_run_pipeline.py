@@ -60,7 +60,6 @@ def _patch_quality(pre_pass=True, post_pass=True, pre_issues=None, post_issues=N
     """Patch quality_check.check. Two calls per candidate: pre and post."""
     pre_issues = pre_issues or []
     post_issues = post_issues or []
-    seq = []
 
     def fake(artifact, current_page, draft_path):
         if draft_path is None:
@@ -117,6 +116,49 @@ def test_run_log_includes_suggested_links_valid_rate(artifact_file, tmp_path, mo
     assert run_rec["cal"]["suggested_links_valid_rate"] == 1.0
     assert run_rec["cal"]["suggested_links_valid_count"] == 1
     assert run_rec["cal"]["suggested_links_original_count"] == 1
+    assert run_rec["cal"]["suggested_links_resolved_count"] == 0
+
+
+def test_cal_model_populated_when_stages_cal_nonzero(artifact_file, tmp_path, monkeypatch):
+    """When Cal runs, the run row records the artifact's resolved model."""
+    artifact = {**GOOD_ARTIFACT, "model": "moonshotai/kimi-k2-thinking"}
+    artifact_file.write_text(json.dumps(artifact))
+    monkeypatch.setenv("AUTO_ENRICH_WORK", str(tmp_path))
+    monkeypatch.setenv("AUTO_ENRICH_LOG_PATH", str(tmp_path / "runs.jsonl"))
+
+    with _patch_sensor([SAMPLE_CANDIDATE]), \
+         _patch_research_ok(artifact_file), \
+         _patch_fetch_page_empty(), \
+         _patch_quality(pre_pass=True, post_pass=True), \
+         _patch_synth_ok(), \
+         _patch_gbrain_put_ok():
+        rc = run_pipeline.run(limit=1, dry_run=False)
+
+    assert rc == 0
+    run_rec = json.loads((tmp_path / "runs.jsonl").read_text().strip())
+    assert "cal" in run_rec["stages_ms"]
+    assert run_rec["cal"]["model"] == "moonshotai/kimi-k2-thinking"
+
+
+def test_cal_model_falls_back_to_dispatch_override(artifact_file, tmp_path, monkeypatch):
+    """CAL_DISPATCH_MODEL_OVERRIDE is the fallback when an old artifact has no model."""
+    artifact = {k: v for k, v in GOOD_ARTIFACT.items() if k not in {"model", "cal_model"}}
+    artifact_file.write_text(json.dumps(artifact))
+    monkeypatch.setenv("AUTO_ENRICH_WORK", str(tmp_path))
+    monkeypatch.setenv("AUTO_ENRICH_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    monkeypatch.setenv("CAL_DISPATCH_MODEL_OVERRIDE", "moonshotai/kimi-k2-thinking")
+
+    with _patch_sensor([SAMPLE_CANDIDATE]), \
+         _patch_research_ok(artifact_file), \
+         _patch_fetch_page_empty(), \
+         _patch_quality(pre_pass=True, post_pass=True), \
+         _patch_synth_ok(), \
+         _patch_gbrain_put_ok():
+        rc = run_pipeline.run(limit=1, dry_run=False)
+
+    assert rc == 0
+    run_rec = json.loads((tmp_path / "runs.jsonl").read_text().strip())
+    assert run_rec["cal"]["model"] == "moonshotai/kimi-k2-thinking"
 
 
 def test_bad_iron_law_escalates(artifact_file, tmp_path, monkeypatch):
@@ -181,6 +223,9 @@ def test_bad_lint_post_synthesize_escalates(artifact_file, tmp_path, monkeypatch
     assert not put_mock.called
     esc = (tmp_path / "esc.jsonl").read_text().strip().splitlines()
     assert any(json.loads(l)["stage"] == "quality_post" for l in esc)
+    run_rec = json.loads((tmp_path / "runs.jsonl").read_text().strip())
+    assert run_rec["outcome"] == "refused"
+    assert run_rec["refusal_reason"] == "quality_post_blocking_issue"
 
 
 def test_dry_run_skips_put_but_produces_draft(artifact_file, tmp_path, monkeypatch):

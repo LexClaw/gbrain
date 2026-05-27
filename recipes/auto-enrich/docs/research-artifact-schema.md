@@ -46,6 +46,7 @@ This rule is enforced at two layers:
   "suggested_links": [
     {"type": "partner_at", "target": "companies/y-combinator"}
   ],
+  "suggested_links_valid_rate": 1.0,
   "narrative_additions": [
     {
       "section": "## Public Thesis",
@@ -81,6 +82,14 @@ This rule is enforced at two layers:
 - `suggested_links` (optional, array): cross-links Cal proposes adding to the page.
   - `type` (string): edge type (`partner_at`, `founded`, `mentions`, etc.).
   - `target` (string): target slug.
+  - Cal must verify each target with `gbrain search <topic>` followed by
+    `gbrain get <slug>` before emitting it. `run_research.py` filters out any
+    target that does not exist in the local brain.
+- `suggested_links_valid_rate` (number): filled by `run_research.py` after
+  verifying suggested link targets. `1.0` means every emitted target existed
+  or resolved to an existing target; `0.0` means none did.
+- `suggested_links_resolved_count` (number): filled by `run_research.py` with
+  the count of wrong-path targets rewritten to canonical brain slugs.
 - `narrative_additions` (optional, array): prose blocks to insert into existing sections.
   - `section` (string): markdown heading where the prose goes.
   - `text` (string): the prose itself.

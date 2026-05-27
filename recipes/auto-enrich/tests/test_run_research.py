@@ -138,11 +138,12 @@ def test_ground_suggested_links_filters_unverified_targets():
     artifact = {
         "suggested_links": [
             {"type": "mentions", "target": "concepts/claude"},
-            {"type": "mentions", "target": "ai/entities/claude-code"},
+            {"type": "mentions", "target": "ai/entities/not-real"},
         ]
     }
 
-    with patch("run_research.slug_exists", side_effect=lambda s: s == "concepts/claude"):
+    with patch("run_research.slug_exists", side_effect=lambda s: s == "concepts/claude"), \
+         patch("run_research.resolve_suggested_link_target", return_value=(None, 0.0)):
         grounded = run_research.ground_suggested_links(artifact)
 
     assert grounded["suggested_links"] == [
@@ -150,8 +151,57 @@ def test_ground_suggested_links_filters_unverified_targets():
     ]
     assert grounded["suggested_links_original_count"] == 2
     assert grounded["suggested_links_valid_count"] == 1
+    assert grounded["suggested_links_resolved_count"] == 0
     assert grounded["suggested_links_valid_rate"] == 0.5
-    assert grounded["suggested_links_invalid_targets"] == ["ai/entities/claude-code"]
+    assert grounded["suggested_links_invalid_targets"] == ["ai/entities/not-real"]
+
+
+def test_ground_suggested_links_rewrites_wrong_path_targets():
+    artifact = {
+        "suggested_links": [
+            {"type": "mentions", "target": "ai/tools/codex"},
+            {"type": "mentions", "target": "ai/tools/cursor-ide"},
+            {"type": "mentions", "target": "ai/entities/claude-code"},
+        ]
+    }
+    resolutions = {
+        "ai/tools/codex": ("concepts/codex", 1.2),
+        "ai/tools/cursor-ide": ("concepts/cursor", 1.1),
+        "ai/entities/claude-code": ("concepts/claude-code", 1.3),
+    }
+
+    with patch("run_research.slug_exists", return_value=False), \
+         patch("run_research.resolve_suggested_link_target", side_effect=lambda s: resolutions[s]):
+        grounded = run_research.ground_suggested_links(artifact)
+
+    assert grounded["suggested_links"] == [
+        {"type": "mentions", "target": "concepts/codex"},
+        {"type": "mentions", "target": "concepts/cursor"},
+        {"type": "mentions", "target": "concepts/claude-code"},
+    ]
+    assert grounded["suggested_links_valid_count"] == 3
+    assert grounded["suggested_links_resolved_count"] == 3
+    assert grounded["suggested_links_valid_rate"] == 1.0
+    assert "suggested_links_invalid_targets" not in grounded
+
+
+def test_search_slug_resolution_drops_below_threshold():
+    with patch("run_research.auto_enrich_lib.run_gbrain", return_value="[0.9999] concepts/codex -- # Codex\n"), \
+         patch("run_research.slug_exists") as exists:
+        resolved, score = run_research.search_slug_resolution("ai/tools/codex")
+
+    assert resolved is None
+    assert score == 0.9999
+    exists.assert_not_called()
+
+
+def test_search_slug_resolution_accepts_threshold_edge():
+    with patch("run_research.auto_enrich_lib.run_gbrain", return_value="[1.0000] concepts/codex -- # Codex\n"), \
+         patch("run_research.slug_exists", return_value=True):
+        resolved, score = run_research.search_slug_resolution("ai/tools/codex")
+
+    assert resolved == "concepts/codex"
+    assert score == 1.0
 
 
 def test_dispatch_returns_valid_artifact(tmp_path):
@@ -401,20 +451,51 @@ def test_parse_hermes_model_marker_strips_marker_and_returns_payload():
 
 def test_model_to_cli_args_omits_model_when_builder_has_no_payload():
     """--model remains conditional when prompt-builder has no model marker."""
-    args, env = run_research._model_to_cli_args(None)
+    args, env, resolved = run_research._model_to_cli_args(None)
 
     assert args == []
     assert env == {}
+    assert resolved == {}
 
 
 def test_model_to_cli_args_honors_override(monkeypatch):
     """CAL_DISPATCH_MODEL_OVERRIDE can still replace a bad builder model."""
     monkeypatch.setenv("CAL_DISPATCH_MODEL_OVERRIDE", "override-model")
 
-    args, env = run_research._model_to_cli_args({"provider": "anthropic", "model": "bad"})
+    args, env, resolved = run_research._model_to_cli_args({"provider": "anthropic", "model": "bad"})
 
     assert args == ["--provider", "anthropic", "--model", "override-model"]
     assert env["HERMES_INFERENCE_MODEL"] == "override-model"
+    assert resolved["model"] == "override-model"
+
+
+def test_run_writes_resolved_cal_model_to_artifact(tmp_path, monkeypatch):
+    """run() stores the actual dispatched model in the Cal artifact."""
+    monkeypatch.setenv("CAL_DISPATCH_MODEL_OVERRIDE", "moonshotai/kimi-k2-thinking")
+    candidate_path = _make_candidate_json(tmp_path)
+    artifact_path = tmp_path / "artifact.json"
+
+    with patch("run_research.get_page_content", return_value=FAKE_PAGE), \
+         patch("run_research.compile_with_prompt_builder", return_value=("prompt", {
+             "provider": "openrouter",
+             "model": "google/gemma-3-27b-it",
+         })), \
+         patch("run_research.dispatch_cal", return_value=(0, json.dumps({
+             "target_slug": "people/alice-smith",
+             "researched_at": "2026-05-27T00:00:00Z",
+             "researcher": "cal-subagent",
+             "queries_run": [],
+             "claims": [],
+             "structured_facts": [],
+             "suggested_links": [],
+             "narrative_additions": [],
+         }), "")):
+        rc = run_research.run(str(candidate_path), str(artifact_path))
+
+    assert rc == 0
+    artifact = json.loads(artifact_path.read_text())
+    assert artifact["model"] == "moonshotai/kimi-k2-thinking"
+    assert artifact["provider"] == "openrouter"
 
 
 def test_dispatch_cal_empty_stdout_treated_as_error(tmp_path):

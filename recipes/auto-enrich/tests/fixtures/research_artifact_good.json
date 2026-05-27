@@ -41,10 +41,12 @@
     {"key": "prior_role", "value": "CEO", "org": "monzo-bank", "until": "2021"}
   ],
   "suggested_links": [
-    {"type": "partner_at", "target": "companies/y-combinator"},
-    {"type": "founded", "target": "companies/monzo-bank"},
-    {"type": "founded", "target": "companies/gocardless"}
+    {"type": "partner_at", "target": "companies/y-combinator"}
   ],
+  "suggested_links_valid_rate": 1.0,
+  "suggested_links_original_count": 1,
+  "suggested_links_valid_count": 1,
+  "suggested_links_resolved_count": 0,
   "narrative_additions": [
     {
       "section": "## Role",
