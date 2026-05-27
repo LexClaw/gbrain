@@ -151,7 +151,30 @@ and ask: "Does the quote text appear, character-for-character, in the
 source content I actually fetched?" If not, either replace it with a real
 adjacent sentence copied verbatim from the source, OR drop the claim.
 
-Do NOT overwrite existing human prose in sections with >30 words.
+VERBATIM RULE, RESTATED FOR EMPHASIS:
+The citation.quote field is a COPY-PASTE, not a summary.
+- "MCP server with 60+ tools for AI agent integration" is BAD if the page
+  actually says "Provides an MCP server exposing 60+ tools for agents".
+  The exact text on the page wins. Copy what is there, not what you remember.
+- If a page uses smart quotes, em-dashes, or odd capitalization, preserve them.
+- If a page wraps the fact across two sentences, quote ONE of them verbatim
+  rather than smashing them together.
+- When in doubt, drop the claim. A run with 3 verbatim claims passes the gate;
+  a run with 10 paraphrased claims gets refused.
+
+NARRATIVE_ADDITIONS DISCIPLINE (non-destructive merge gate):
+- narrative_additions[].section MUST be a section that does NOT already
+  exist on the page, OR a section that contains <30 words of existing prose.
+- Read the candidate's current page content (provided in the prompt). Note
+  which sections already have substantive prose (>30 words). DO NOT target
+  those sections in narrative_additions.
+- Safe pattern: ADD NEW sections (## Scale, ## Payments, ## Technical
+  Integration, ## Funding, ## Team). The page synthesizer will append them
+  cleanly.
+- Unsafe pattern: targeting "## Overview" or "## Key Insights" or any
+  existing prose section. The non-destructive gate WILL reject the artifact
+  and the entire run will refuse, even if your claims are perfect.
+
 Output ONLY valid JSON. No markdown fence, no preamble, no trailing text.
 """
 
@@ -589,7 +612,17 @@ def run(candidate_json_path: str, output_artifact_path: str,
         "No markdown. No prose. No `## Research Complete` header. No code fences.\n"
         "No \"Here's what I found\" framing. No file-write tool calls. No `## Learnings` section.\n"
         "The JSON object IS the deliverable. Stdout must start with `{` and end with `}`.\n"
-        "If you cannot satisfy the Iron Law for a claim, drop the claim entirely.\n"
+        "\n"
+        "VERBATIM CHECK: For every claim, the citation.quote MUST be a direct copy-paste\n"
+        "from the URL's body. Paraphrasing fails the gate. If you cannot copy-paste a real\n"
+        "sentence that supports the claim, DROP the claim. 3 verbatim claims > 10 paraphrased.\n"
+        "\n"
+        "NARRATIVE_ADDITIONS CHECK: Do NOT target sections that already have substantive\n"
+        "prose (>30 words) on the current page. Add NEW sections only (e.g., ## Scale,\n"
+        "## Payments, ## Technical Integration). The non-destructive gate REJECTS the whole\n"
+        "run if you target an existing prose section like ## Overview or ## Key Insights.\n"
+        "If unsure whether a section is safe, omit narrative_additions entirely; claims alone\n"
+        "are enough to pass the gate.\n"
     )
     returncode, stdout, stderr = dispatch_cal(prompt, heartbeat=hb, slug=slug,
                                               model_payload=model_payload)
