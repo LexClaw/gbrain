@@ -41,6 +41,38 @@ RECIPE_ID = "auto-enrich"
 RECIPE_VERSION_RESEARCH = "0.2.0"
 PROMPT_BUILDER_PATH = Path.home() / "hermes-workspace" / "Lex-Workspace" / "scripts" / "prompt-builder.py"
 MODEL_MARKER_RE = re.compile(r"^<!-- HERMES-MODEL: (.*?) -->\s*$", re.MULTILINE)
+SEARCH_RESULT_RE = re.compile(r"^\[(?P<score>\d+(?:\.\d+)?)\]\s+(?P<slug>\S+)\s+--")
+SLUG_RESOLUTION_MIN_SCORE = 1.0
+
+# gbrain search currently scores exact canonical slugs like concepts/claude-code
+# at 1.0 or higher. Lower scores are noisy for wrong-path rewrites, especially
+# short tool names, so resolution only keeps matches at or above this floor.
+MANUAL_SLUG_RESOLUTIONS = {
+    "ai/tools/codex": "concepts/codex",
+    "ai/tools/cursor-ide": "concepts/cursor",
+    "ai/entities/claude-code": "concepts/claude-code",
+}
+
+
+SLUG_GROUNDING_TEXT = """\
+SUGGESTED_LINKS GROUNDING (HARD REQUIREMENT):
+
+The brain's slug taxonomy is not a generic web ontology. Do NOT invent paths
+like ai/entities/*, companies/*, ai/tools/*, or anything that merely sounds
+right. Before adding any suggested_links entry, run `gbrain search <topic>`
+against the local brain, choose the closest existing result, then verify it
+with `gbrain get <slug>`. Only emit a suggested_links target after `gbrain get`
+succeeds for that exact slug.
+
+Observed common prefixes in this brain include concepts/, people/,
+ai/concepts/, crypto/concepts/, companies/, sessions/, and sources/. Prefer the
+actual slug returned by `gbrain search`, even if its prefix is less specific
+than the slug you expected. Examples from this brain: Claude maps to
+concepts/claude, Codex or computer-use topics map to concepts/computer-use.
+
+If search finds no verified target, omit the suggested_links entry entirely.
+Quality beats quantity. Never fabricate a target to fill the array.
+"""
 
 # Seven-skill anchor set for Cal research dispatch
 REQUIRED_SKILLS = [
@@ -72,6 +104,8 @@ The candidate's current page content is:
 
 After executing all queries, produce a research artifact JSON that matches this schema:
 {schema_text}
+
+{slug_grounding_text}
 
 IRON LAW (HARD REQUIREMENT, READ TWICE):
 
@@ -182,6 +216,7 @@ def compile_cal_prompt(slug: str, query_plan: list[dict], page_content: str,
         query_plan_json=qp_json,
         page_content=page_content,
         schema_text=schema_text,
+        slug_grounding_text=SLUG_GROUNDING_TEXT,
         skills_csv=skills_csv,
     )
 
@@ -205,9 +240,108 @@ def load_schema_text() -> str:
 - claims (array of {text, citation: {url, fetched_at, quote}, section_hint})
 - structured_facts (array of {key, value, ...})
 - suggested_links (array of {type, target})
+- suggested_links_valid_rate (number, filled by run_research)
 - narrative_additions (array of {section, text, citation_indexes})
 
 IRON LAW: every claim's citation must have non-empty url AND quote."""
+
+
+def slug_exists(slug: str) -> bool:
+    """Return True if `gbrain get <slug>` succeeds and returns content."""
+    target = str(slug or "").strip()
+    if not target:
+        return False
+    try:
+        return bool(auto_enrich_lib.run_gbrain(["get", target]).strip())
+    except auto_enrich_lib.GBrainCLIError:
+        return False
+
+
+def _slug_search_query(slug: str) -> str:
+    """Turn a wrong-path slug into the shortest useful canonical search query."""
+    return Path(str(slug or "").strip()).name.replace("-", " ").strip()
+
+
+def search_slug_resolution(slug: str) -> tuple[str | None, float]:
+    """Return the top verified search slug and score for a wrong-path target."""
+    query = _slug_search_query(slug)
+    if not query:
+        return None, 0.0
+    try:
+        output = auto_enrich_lib.run_gbrain(["search", query, "--limit", "10"])
+    except auto_enrich_lib.GBrainCLIError:
+        return None, 0.0
+    for line in output.splitlines():
+        match = SEARCH_RESULT_RE.match(line.strip())
+        if not match:
+            continue
+        score = float(match.group("score"))
+        candidate = match.group("slug")
+        if score >= SLUG_RESOLUTION_MIN_SCORE and slug_exists(candidate):
+            return candidate, score
+        return None, score
+    return None, 0.0
+
+
+def resolve_suggested_link_target(slug: str) -> tuple[str | None, float]:
+    """Resolve a non-existent suggested_links target to a canonical brain slug."""
+    target = str(slug or "").strip()
+    if not target:
+        return None, 0.0
+    manual = MANUAL_SLUG_RESOLUTIONS.get(target)
+    if manual and slug_exists(manual):
+        return manual, SLUG_RESOLUTION_MIN_SCORE
+    return search_slug_resolution(target)
+
+
+def ground_suggested_links(artifact: dict[str, Any]) -> dict[str, Any]:
+    """Verify suggested_links, rewrite wrong-path targets, and add metrics."""
+    links = artifact.get("suggested_links", []) or []
+    if not isinstance(links, list):
+        artifact["suggested_links_valid_rate"] = 0.0
+        artifact["suggested_links_original_count"] = 0
+        artifact["suggested_links_valid_count"] = 0
+        artifact["suggested_links_resolved_count"] = 0
+        return artifact
+
+    verified: list[dict[str, Any]] = []
+    invalid: list[str] = []
+    resolved: list[dict[str, Any]] = []
+    for link in links:
+        if not isinstance(link, dict):
+            invalid.append("")
+            continue
+        target = str(link.get("target") or "").strip()
+        if target and slug_exists(target):
+            verified.append(link)
+            continue
+        resolved_target, score = resolve_suggested_link_target(target)
+        if resolved_target:
+            rewritten = dict(link)
+            rewritten["target"] = resolved_target
+            verified.append(rewritten)
+            resolved.append({"from": target, "to": resolved_target, "score": score})
+        else:
+            invalid.append(target)
+
+    original_count = len(links)
+    valid_count = len(verified)
+    artifact["suggested_links"] = verified
+    artifact["suggested_links_original_count"] = original_count
+    artifact["suggested_links_valid_count"] = valid_count
+    artifact["suggested_links_resolved_count"] = len(resolved)
+    artifact["suggested_links_valid_rate"] = (
+        1.0 if original_count == 0 else round(valid_count / original_count, 4)
+    )
+    if invalid:
+        artifact["suggested_links_invalid_targets"] = [s for s in invalid if s]
+    else:
+        artifact.pop("suggested_links_invalid_targets", None)
+    if resolved:
+        artifact["suggested_links_resolved_targets"] = resolved
+    else:
+        artifact.pop("suggested_links_resolved_targets", None)
+    return artifact
 
 
 # Synthetic return code emitted by dispatch_cal() when hermes exits 0 with
@@ -264,14 +398,14 @@ def _model_to_cli_args(model_payload: dict[str, str] | None) -> tuple[list[str],
         return [], {}
     args: list[str] = []
     env: dict[str, str] = {}
-    provider = model_payload.get("provider")
+    provider = os.environ.get("CAL_DISPATCH_PROVIDER_OVERRIDE") or model_payload.get("provider")
     model = os.environ.get("CAL_DISPATCH_MODEL_OVERRIDE") or model_payload.get("model")
     if provider:
         args += ["--provider", provider]
     if model:
         args += ["--model", model]
         env["HERMES_INFERENCE_MODEL"] = model
-    base_url = model_payload.get("base_url")
+    base_url = os.environ.get("CAL_DISPATCH_BASE_URL_OVERRIDE") or model_payload.get("base_url")
     if base_url:
         env["CUSTOM_BASE_URL"] = base_url
     return args, env
@@ -295,7 +429,7 @@ def dispatch_cal(prompt: str, skills: list[str] | None = None,
     started = _time.monotonic()
     env = os.environ.copy()
     env.update(model_env)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False, env=env)
     wall = _time.monotonic() - started
 
     if result.returncode == 0 and not (result.stdout or "").strip():
@@ -382,6 +516,12 @@ def run(candidate_json_path: str, output_artifact_path: str,
         artifact["target_slug"] = slug
         artifact["researched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         artifact["researcher"] = "cal-subagent-mock"
+        # Run the grounding filter even in mock mode so the smoke path
+        # exercises slug_exists/gbrain-get end-to-end and emits real
+        # suggested_links_valid_rate metrics instead of trusting the
+        # fixture's baked-in 1.0. This is the proof point Grant flagged
+        # in the CHANGES_REQUIRED review for card kn73rn3r.
+        artifact = ground_suggested_links(artifact)
         try:
             output = Path(output_artifact_path)
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -438,6 +578,19 @@ def run(candidate_json_path: str, output_artifact_path: str,
         return 0
 
     # Dispatch Cal
+    # Append a final JSON-only reinforcement so the persona/skill prelude
+    # cannot override the contract. Some models (Kimi K2-Thinking observed
+    # 2026-05-27) interpret the long compiled prelude as "write a deliverable
+    # brief" and produce markdown instead of the JSON artifact. This trailing
+    # block sits AFTER all persona text and reasserts the contract last.
+    prompt = prompt.rstrip() + (
+        "\n\n## FINAL CONTRACT (overrides all prior framing)\n"
+        "Output ONLY a single valid JSON object matching the Research Artifact Schema above.\n"
+        "No markdown. No prose. No `## Research Complete` header. No code fences.\n"
+        "No \"Here's what I found\" framing. No file-write tool calls. No `## Learnings` section.\n"
+        "The JSON object IS the deliverable. Stdout must start with `{` and end with `}`.\n"
+        "If you cannot satisfy the Iron Law for a claim, drop the claim entirely.\n"
+    )
     returncode, stdout, stderr = dispatch_cal(prompt, heartbeat=hb, slug=slug,
                                               model_payload=model_payload)
     if returncode == DISPATCH_ANOMALY_EMPTY_STDOUT:
@@ -478,7 +631,9 @@ def run(candidate_json_path: str, output_artifact_path: str,
                 error=" | ".join(errors), details={"slug": slug})
         return 2
 
-    # Enforce researcher tag, timestamp, and prompt-builder model attribution.
+    # Enforce researcher tag, timestamp, prompt-builder model attribution, and
+    # verified suggested_links metrics before the artifact enters the pipeline.
+    artifact = ground_suggested_links(artifact)
     artifact["researcher"] = "cal-subagent"
     artifact["researched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if model_payload:
@@ -501,6 +656,10 @@ def run(candidate_json_path: str, output_artifact_path: str,
         "slug": slug,
         "claims_count": len(artifact.get("claims", [])),
         "queries_run": len(artifact.get("queries_run", [])),
+        "suggested_links_valid_rate": artifact.get("suggested_links_valid_rate"),
+        "suggested_links_valid_count": artifact.get("suggested_links_valid_count"),
+        "suggested_links_original_count": artifact.get("suggested_links_original_count"),
+        "suggested_links_resolved_count": artifact.get("suggested_links_resolved_count"),
         "artifact_path": str(output),
     })
     return 0

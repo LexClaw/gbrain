@@ -182,6 +182,46 @@ requirements. Brief summary:
   `suggested_links`, `narrative_additions`.
 - Iron Law: every claim MUST cite. Empty citation -> artifact rejected.
 
+#### Suggested-links slug grounding (card kn73rn3r)
+
+Cal cannot be trusted to invent target slugs from prose. Earlier runs produced
+`missing_link_target` warnings for paths like `ai/entities/claude-code` or
+`companies/amplitude` that do not exist in the brain. Two layers now keep the
+artifact grounded:
+
+1. **Prompt-side** (`SLUG_GROUNDING_TEXT` in `run_research.py`): instructs Cal
+   to run `gbrain search` + `gbrain get` before emitting any
+   `suggested_links` entry, listing the real prefixes observed in this brain
+   (`concepts/`, `people/`, `ai/concepts/`, `crypto/concepts/`, `companies/`,
+   `sessions/`, `sources/`).
+2. **Python-side** (`ground_suggested_links` in `run_research.py`): even when
+   Cal ignores the prompt, every emitted target is verified with
+   `slug_exists` (a `gbrain get <slug>` round-trip). Wrong-path targets are
+   sent through `search_slug_resolution` which queries `gbrain search` and
+   rewrites the target when the top result clears `SLUG_RESOLUTION_MIN_SCORE`
+   (1.0) and itself resolves. Unrecoverable targets are dropped.
+
+The grounded artifact carries these new fields:
+
+- `suggested_links_valid_rate` (float in `[0, 1]`): valid count / original
+  count. `1.0` when every emitted target survived or got rewritten.
+- `suggested_links_original_count` (int): targets Cal originally proposed.
+- `suggested_links_valid_count` (int): targets that survived the filter.
+- `suggested_links_resolved_count` (int): wrong-path targets that were
+  rewritten to canonical brain slugs.
+- `suggested_links_invalid_targets` (string array, optional): targets the
+  filter dropped because neither `gbrain get` nor `gbrain search` could
+  resolve them. Useful for spotting taxonomy gaps in the brain itself.
+- `suggested_links_resolved_targets` (array, optional): `{from, to, score}`
+  entries describing rewrites for downstream auditing.
+
+The same fields are mirrored into the per-run JSONL row at
+`~/.hermes/logs/auto-enrich-runs.jsonl` (under `cal.suggested_links_*`) so
+trends are queryable without re-reading every artifact. Mock-mode smoke
+runs (`CAL_DISPATCH_MODE=mock`) run the grounding filter too, which makes
+`bash scripts/smoke.sh` a real end-to-end proof of the validity rate, not
+just a fixture replay.
+
 #### X (Twitter) URL handling in the Iron Law gate
 
 The Iron Law gate detects `x.com` and `twitter.com` status URLs (pattern
