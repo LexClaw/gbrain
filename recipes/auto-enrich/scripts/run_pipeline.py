@@ -50,6 +50,14 @@ PIPELINE_VERSION = "0.3.0"
 ESCALATIONS_PATH = (
     Path.home() / ".gbrain" / "integrations" / "auto-enrich" / "escalations.jsonl"
 )
+ERROR_CLASS_VALUES = (
+    "pipeline_exception",
+    "timeout",
+    "broken_pipe",
+    "refused_no_reason",
+    "subprocess_nonzero_exit",
+    "unknown",
+)
 
 
 def _now_iso() -> str:
@@ -60,6 +68,22 @@ def _append_escalation(record: dict[str, Any]) -> None:
     ESCALATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with ESCALATIONS_PATH.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
+
+
+def _error_class_for_exception(exc: Exception, default: str = "unknown") -> str:
+    """Map an exception to the closed error_class enum."""
+    cls_name = type(exc).__name__
+    if isinstance(exc, TimeoutError) or cls_name == "TimeoutExpired":
+        return "timeout"
+    if isinstance(exc, BrokenPipeError):
+        return "broken_pipe"
+    if isinstance(exc, ConnectionRefusedError):
+        return "refused_no_reason"
+    if cls_name == "CalledProcessError" or hasattr(exc, "returncode"):
+        return "subprocess_nonzero_exit"
+    if default in ERROR_CLASS_VALUES:
+        return default
+    return "unknown"
 
 
 def _gbrain_put(slug: str, draft_path: Path) -> tuple[bool, str]:
@@ -216,6 +240,9 @@ def process_candidate(
         err_text = f"{type(exc).__name__}: {str(exc)[:200]}"
         if hasattr(exc, "cmd"):
             err_text += " | stage=hermes_subprocess"
+        run_data["error_class"] = _error_class_for_exception(
+            exc, default="pipeline_exception",
+        )
         run_data["errors"].append(f"pipeline_exception: {err_text}")
         counters["escalations_count"] += 1
         _append_escalation({
@@ -226,6 +253,8 @@ def process_candidate(
                 details={"slug": slug, "error": err_text[:200]})
         result = False
     finally:
+        if run_data.get("outcome") == "error" and "error_class" not in run_data:
+            run_data["error_class"] = "unknown"
         run_data["stages_ms"]["total"] = int(
             (time.perf_counter() - t_start) * 1000
         )
@@ -324,6 +353,7 @@ def _process_candidate_inner(
     run_data["stages_ms"]["cal"] = int((time.perf_counter() - t_cal) * 1000)
     if rc != 0 or art_path is None:
         run_data["outcome"] = "error"
+        run_data["error_class"] = "subprocess_nonzero_exit"
         run_data["errors"].append(f"run_research exit {rc}")
         counters["escalations_count"] += 1
         _append_escalation({
@@ -455,6 +485,9 @@ def _process_candidate_inner(
             (time.perf_counter() - t_synth) * 1000
         )
         run_data["outcome"] = "error"
+        run_data["error_class"] = _error_class_for_exception(
+            exc, default="pipeline_exception",
+        )
         run_data["errors"].append(f"synthesize: {exc}")
         counters["escalations_count"] += 1
         _append_escalation({
@@ -469,6 +502,7 @@ def _process_candidate_inner(
     )
     if synth_rc != 0:
         run_data["outcome"] = "error"
+        run_data["error_class"] = "subprocess_nonzero_exit"
         run_data["errors"].append(f"synthesize exit {synth_rc}")
         counters["escalations_count"] += 1
         _append_escalation({
