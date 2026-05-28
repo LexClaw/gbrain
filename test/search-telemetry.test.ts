@@ -9,11 +9,15 @@
  *   - Per-bucket isolation: one bad row doesn't lose the others
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { dirname } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
   recordSearchTelemetry,
   readSearchStats,
   getTelemetryWriter,
+  getCallerHint,
+  normalizeSearchQuery,
   _resetTelemetryWriterForTest,
 } from '../src/core/search/telemetry.ts';
 import type { HybridSearchMeta } from '../src/core/types.ts';
@@ -42,6 +46,17 @@ const makeMeta = (overrides: Partial<HybridSearchMeta> = {}): HybridSearchMeta =
   intent: 'general',
   mode: 'balanced',
   ...overrides,
+});
+
+describe('JSONL search telemetry helpers', () => {
+  test('normalizeSearchQuery lowercases, NFC-normalizes, strips punctuation, and collapses whitespace', () => {
+    expect(normalizeSearchQuery('  Cache: Architecture?!\tCafé  ')).toBe('cache architecture café');
+  });
+
+  test('getCallerHint honors GBRAIN_CALLER and falls back to null', () => {
+    expect(getCallerHint({ GBRAIN_CALLER: ' Reid\n' } as NodeJS.ProcessEnv)).toBe('Reid');
+    expect(getCallerHint({} as NodeJS.ProcessEnv)).toBe(null);
+  });
 });
 
 describe('recordSearchTelemetry — in-memory bucket', () => {

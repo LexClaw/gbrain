@@ -195,6 +195,7 @@ def test_partial_credit_re_check_still_fails_does_not_synthesize(
     quote-mismatch we hadn't caught yet). Pipeline must abort with
     partial_credit_attempted=True in the escalation log, NOT synthesize."""
     monkeypatch.setenv("AUTO_ENRICH_WORK", str(tmp_path))
+    monkeypatch.setenv("AUTO_ENRICH_LOG_PATH", str(tmp_path / "runs.jsonl"))
     seen_paths: list = []
     with _patch_sensor([SAMPLE_CANDIDATE]), \
          _patch_research_ok(artifact_file), \
@@ -212,6 +213,9 @@ def test_partial_credit_re_check_still_fails_does_not_synthesize(
     assert seen_paths == [], "synth must not run when re-check fails"
     assert not put_mock.called, "put must not run when re-check fails"
     assert rc != 0, "rc should signal candidate failure"
+    run_rec = json.loads((tmp_path / "runs.jsonl").read_text().strip())
+    assert run_rec["outcome"] == "refused"
+    assert run_rec["refusal_reason"] == "quality_pre_partial_credit_recheck_failed"
 
 
 def test_partial_credit_skipped_when_all_claims_fail(
@@ -221,6 +225,7 @@ def test_partial_credit_skipped_when_all_claims_fail(
     skipped (would leave an empty claims list = nothing to synthesize).
     Standard failure path runs, no synth, no put."""
     monkeypatch.setenv("AUTO_ENRICH_WORK", str(tmp_path))
+    monkeypatch.setenv("AUTO_ENRICH_LOG_PATH", str(tmp_path / "runs.jsonl"))
     seen_paths: list = []
     with _patch_sensor([SAMPLE_CANDIDATE]), \
          _patch_research_ok(artifact_file), \
@@ -235,6 +240,9 @@ def test_partial_credit_skipped_when_all_claims_fail(
     assert seen_paths == [], "synth must not run when all claims fail"
     assert not put_mock.called, "put must not run when all claims fail"
     assert rc != 0, "rc should signal candidate failure"
+    run_rec = json.loads((tmp_path / "runs.jsonl").read_text().strip())
+    assert run_rec["outcome"] == "refused"
+    assert run_rec["refusal_reason"] == "quality_pre_all_claims_dropped"
 
 
 def test_partial_credit_skipped_when_non_iron_blocker_present(

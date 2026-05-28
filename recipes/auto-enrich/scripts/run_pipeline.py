@@ -39,6 +39,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import auto_enrich_lib  # noqa: E402
+import auto_stub  # noqa: E402
 import detect_sparse  # noqa: E402
 import quality_check  # noqa: E402
 import run_research  # noqa: E402
@@ -50,6 +51,14 @@ PIPELINE_VERSION = "0.3.0"
 ESCALATIONS_PATH = (
     Path.home() / ".gbrain" / "integrations" / "auto-enrich" / "escalations.jsonl"
 )
+ERROR_CLASS_VALUES = (
+    "pipeline_exception",
+    "timeout",
+    "broken_pipe",
+    "refused_no_reason",
+    "subprocess_nonzero_exit",
+    "unknown",
+)
 
 
 def _now_iso() -> str:
@@ -60,6 +69,22 @@ def _append_escalation(record: dict[str, Any]) -> None:
     ESCALATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with ESCALATIONS_PATH.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
+
+
+def _error_class_for_exception(exc: Exception, default: str = "unknown") -> str:
+    """Map an exception to the closed error_class enum."""
+    cls_name = type(exc).__name__
+    if isinstance(exc, TimeoutError) or cls_name == "TimeoutExpired":
+        return "timeout"
+    if isinstance(exc, BrokenPipeError):
+        return "broken_pipe"
+    if isinstance(exc, ConnectionRefusedError):
+        return "refused_no_reason"
+    if cls_name == "CalledProcessError" or hasattr(exc, "returncode"):
+        return "subprocess_nonzero_exit"
+    if default in ERROR_CLASS_VALUES:
+        return default
+    return "unknown"
 
 
 def _gbrain_put(slug: str, draft_path: Path) -> tuple[bool, str]:
@@ -86,6 +111,14 @@ _RULE_TO_COUNTER = {
     "fabricated_command": "gated_fabricated",
 }
 
+REFUSAL_REASON_QUALITY_PRE_ALL_CLAIMS_DROPPED = "quality_pre_all_claims_dropped"
+REFUSAL_REASON_QUALITY_PRE_NON_IRON_BLOCKER = "quality_pre_non_iron_blocker"
+REFUSAL_REASON_QUALITY_PRE_BLOCKING_ISSUE = "quality_pre_blocking_issue"
+REFUSAL_REASON_QUALITY_PRE_PARTIAL_CREDIT_RECHECK_FAILED = (
+    "quality_pre_partial_credit_recheck_failed"
+)
+REFUSAL_REASON_QUALITY_POST_BLOCKING_ISSUE = "quality_post_blocking_issue"
+
 
 def _classify_issues(issues: list[dict]) -> dict[str, int]:
     """Bucket blocking issues by counter-key (heartbeat field name)."""
@@ -98,6 +131,27 @@ def _classify_issues(issues: list[dict]) -> dict[str, int]:
         if ckey:
             out[ckey] += 1
     return out
+
+
+def _blocking_non_iron_issues(issues: list[dict]) -> list[dict]:
+    return [
+        i for i in issues
+        if i.get("severity") in quality_check.BLOCKING
+        and i.get("rule") != "iron_law"
+    ]
+
+
+def _quality_pre_refusal_reason(
+    pre_issues: list[dict],
+    drop: set[int],
+    original_claim_count: int,
+) -> str:
+    """Return the refusal reason for a pre-synthesize gate failure."""
+    if drop and len(drop) >= original_claim_count:
+        return REFUSAL_REASON_QUALITY_PRE_ALL_CLAIMS_DROPPED
+    if _blocking_non_iron_issues(pre_issues):
+        return REFUSAL_REASON_QUALITY_PRE_NON_IRON_BLOCKER
+    return REFUSAL_REASON_QUALITY_PRE_BLOCKING_ISSUE
 
 
 def _run_research_for(candidate: dict, work_dir: Path) -> tuple[int, Path | None]:
@@ -134,6 +188,7 @@ def process_candidate(
     counters: dict[str, int],
     pool_rank: int = 0,
     pool_size: int = 0,
+    stub_ctx: "auto_stub.AutoStubContext | None" = None,
 ) -> bool:
     """Process one candidate. Returns True on full success (page enriched).
 
@@ -155,7 +210,12 @@ def process_candidate(
             "sensor": 0, "cal": 0, "gate": 0,
             "synthesize": 0, "write": 0, "total": 0,
         },
-        "cal": {"model": None, "claims_returned": 0, "raw_response_chars": 0},
+        "cal": {
+            "model": None,
+            "claims_returned": 0,
+            "raw_response_chars": 0,
+            "suggested_links_valid_rate": None,
+        },
         "gate": {
             "kept": 0, "dropped": 0,
             "drop_reasons": {"not_verbatim": 0, "not_found": 0,
@@ -176,19 +236,28 @@ def process_candidate(
     try:
         result = _process_candidate_inner(
             candidate, work_dir, dry_run, hb, counters, run_data,
+            stub_ctx=stub_ctx,
         )
     except Exception as exc:  # noqa: BLE001
         run_data["outcome"] = "error"
-        run_data["errors"].append(f"pipeline_exception: {exc}")
+        err_text = f"{type(exc).__name__}: {str(exc)[:200]}"
+        if hasattr(exc, "cmd"):
+            err_text += " | stage=hermes_subprocess"
+        run_data["error_class"] = _error_class_for_exception(
+            exc, default="pipeline_exception",
+        )
+        run_data["errors"].append(f"pipeline_exception: {err_text}")
         counters["escalations_count"] += 1
         _append_escalation({
             "ts": _now_iso(), "slug": slug, "stage": "pipeline_exception",
-            "error": str(exc),
+            "error": err_text,
         })
         hb.emit("pipeline_step", status="pipeline_exception",
-                details={"slug": slug, "error": str(exc)[:200]})
+                details={"slug": slug, "error": err_text[:200]})
         result = False
     finally:
+        if run_data.get("outcome") == "error" and "error_class" not in run_data:
+            run_data["error_class"] = "unknown"
         run_data["stages_ms"]["total"] = int(
             (time.perf_counter() - t_start) * 1000
         )
@@ -278,6 +347,7 @@ def _process_candidate_inner(
     hb: Heartbeat,
     counters: dict[str, int],
     run_data: dict[str, Any],
+    stub_ctx: "auto_stub.AutoStubContext | None" = None,
 ) -> bool:
     slug = candidate.get("slug", "unknown")
 
@@ -287,6 +357,7 @@ def _process_candidate_inner(
     run_data["stages_ms"]["cal"] = int((time.perf_counter() - t_cal) * 1000)
     if rc != 0 or art_path is None:
         run_data["outcome"] = "error"
+        run_data["error_class"] = "subprocess_nonzero_exit"
         run_data["errors"].append(f"run_research exit {rc}")
         counters["escalations_count"] += 1
         _append_escalation({
@@ -302,11 +373,22 @@ def _process_candidate_inner(
     raw_text = art_path.read_text(encoding="utf-8")
     run_data["cal"]["raw_response_chars"] = len(raw_text)
     run_data["cal"]["claims_returned"] = len(artifact.get("claims", []) or [])
-    run_data["cal"]["model"] = (
-        artifact.get("model")
-        or artifact.get("cal_model")
-        or os.environ.get("CAL_MODEL")
+    run_data["cal"]["suggested_links_valid_rate"] = artifact.get(
+        "suggested_links_valid_rate"
     )
+    run_data["cal"]["suggested_links_valid_count"] = artifact.get(
+        "suggested_links_valid_count"
+    )
+    run_data["cal"]["suggested_links_original_count"] = artifact.get(
+        "suggested_links_original_count"
+    )
+    run_data["cal"]["suggested_links_resolved_count"] = artifact.get(
+        "suggested_links_resolved_count"
+    )
+    resolved_model = artifact.get("model") or artifact.get("cal_model")
+    if not resolved_model:
+        resolved_model = os.environ.get("CAL_DISPATCH_MODEL_OVERRIDE") or os.environ.get("CAL_MODEL")
+    run_data["cal"]["model"] = resolved_model
 
     # Step 2: pre-synthesize quality check (Iron Law + no-fabrication).
     t_gate = time.perf_counter()
@@ -314,11 +396,7 @@ def _process_candidate_inner(
     pre_passed, pre_issues = quality_check.check(artifact, current_page, draft_path=None)
     if not pre_passed:
         drop = quality_check.failing_iron_law_indices(pre_issues)
-        non_iron_blocking = [
-            i for i in pre_issues
-            if i.get("severity") in quality_check.BLOCKING
-            and i.get("rule") != "iron_law"
-        ]
+        non_iron_blocking = _blocking_non_iron_issues(pre_issues)
         original_claim_count = len(artifact.get("claims", []) or [])
         if drop and not non_iron_blocking and len(drop) < original_claim_count:
             filtered = quality_check.filter_artifact_drop_claims(artifact, drop)
@@ -358,6 +436,9 @@ def _process_candidate_inner(
                     (time.perf_counter() - t_gate) * 1000
                 )
                 run_data["outcome"] = "refused"
+                run_data["refusal_reason"] = (
+                    REFUSAL_REASON_QUALITY_PRE_PARTIAL_CREDIT_RECHECK_FAILED
+                )
                 buckets = _classify_issues(pre_issues)
                 for k, v in buckets.items():
                     counters[k] += v
@@ -378,6 +459,9 @@ def _process_candidate_inner(
                 (time.perf_counter() - t_gate) * 1000
             )
             run_data["outcome"] = "refused"
+            run_data["refusal_reason"] = _quality_pre_refusal_reason(
+                pre_issues, drop, original_claim_count,
+            )
             buckets = _classify_issues(pre_issues)
             for k, v in buckets.items():
                 counters[k] += v
@@ -393,6 +477,44 @@ def _process_candidate_inner(
         _populate_gate_telemetry(run_data, artifact, pre_issues)
     run_data["stages_ms"]["gate"] = int((time.perf_counter() - t_gate) * 1000)
 
+    # Step 2.5: auto-stub missing people/companies entities (Phase 2, v5).
+    # Runs ONLY after pre-synthesize quality gates have passed (or
+    # partial-credit recovered). Stubs only created when:
+    #   - target matches people/<slug> or companies/<slug>
+    #   - derived title appears in artifact["page_content"] OR a claim quote
+    #   - per-run cap not yet hit
+    #   - not dry_run
+    # On any stub-create success, the rewritten link is appended to
+    # artifact["suggested_links"] and the on-disk artifact JSON at art_path
+    # is rewritten BEFORE synthesize reads it.
+    if stub_ctx is not None:
+        try:
+            unresolved_before = list(artifact.get("suggested_links_unresolved") or [])
+            artifact = auto_stub.process_unresolved_links(artifact, stub_ctx)
+            # Persist mutations: synthesize reads from disk, not from memory.
+            if stub_ctx.events:
+                art_path.write_text(json.dumps(artifact, indent=2) + "\n",
+                                    encoding="utf-8")
+            for ev in stub_ctx.events:
+                # Drain the per-call events into the heartbeat then clear them
+                # so the next candidate's pass starts clean. Keep the cap
+                # counter (ctx.stubs_created) intact.
+                hb.emit("auto_stub", status=ev.get("kind", "auto_stub_event"),
+                        details={k: v for k, v in ev.items() if k != "kind"})
+                _append_escalation({
+                    "ts": _now_iso(), "slug": ev.get("source_slug") or slug,
+                    "stage": "auto_stub",
+                    "kind": ev.get("kind"),
+                    "details": {k: v for k, v in ev.items() if k != "kind"},
+                })
+            stub_ctx.events.clear()
+            _ = unresolved_before  # retained for future per-run telemetry
+        except Exception as exc:  # noqa: BLE001
+            # Auto-stub is best-effort. A failure here must NOT block
+            # synthesize or the rest of the pipeline.
+            hb.emit("auto_stub", status="auto_stub_block_error",
+                    details={"slug": slug, "error": str(exc)[:200]})
+
     # Step 3: synthesize
     t_synth = time.perf_counter()
     draft_path = work_dir / f"draft-{slug.replace('/', '_')}.md"
@@ -405,6 +527,9 @@ def _process_candidate_inner(
             (time.perf_counter() - t_synth) * 1000
         )
         run_data["outcome"] = "error"
+        run_data["error_class"] = _error_class_for_exception(
+            exc, default="pipeline_exception",
+        )
         run_data["errors"].append(f"synthesize: {exc}")
         counters["escalations_count"] += 1
         _append_escalation({
@@ -419,6 +544,7 @@ def _process_candidate_inner(
     )
     if synth_rc != 0:
         run_data["outcome"] = "error"
+        run_data["error_class"] = "subprocess_nonzero_exit"
         run_data["errors"].append(f"synthesize exit {synth_rc}")
         counters["escalations_count"] += 1
         _append_escalation({
@@ -435,6 +561,7 @@ def _process_candidate_inner(
     )
     if not post_passed:
         run_data["outcome"] = "refused"
+        run_data["refusal_reason"] = REFUSAL_REASON_QUALITY_POST_BLOCKING_ISSUE
         buckets = _classify_issues(post_issues)
         for k, v in buckets.items():
             counters[k] += v
@@ -527,11 +654,16 @@ def run(limit: int = 5, dry_run: bool = False, candidate_pool: int | None = None
     work_dir = Path(os.environ.get("AUTO_ENRICH_WORK", "/tmp")) / "auto-enrich-pipeline"
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # One AutoStubContext shared across all candidates in this pipeline run
+    # so the MAX_AUTO_STUBS_PER_RUN cap applies pipeline-wide, not per-candidate.
+    stub_ctx = auto_stub.AutoStubContext(dry_run=dry_run)
+
     pool_size = len(candidates)
     for idx, candidate in enumerate(candidates):
         process_candidate(
             candidate, work_dir, dry_run, hb, counters,
             pool_rank=idx + 1, pool_size=pool_size,
+            stub_ctx=stub_ctx,
         )
         # Inject sensor timing into the first candidate's run line via env so
         # the per-run logger reflects the sensor cost amortized at rank 1.

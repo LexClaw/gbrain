@@ -14,10 +14,12 @@ Schema (see plan 2026-05-22-auto-enrich-structured-logger.md):
       "candidate":  {"slug": ..., "score": ..., "pool_size": ..., "pool_rank": ...},
       "stages_ms":  {"sensor": ..., "cal": ..., "gate": ..., "synthesize": ...,
                      "write": ..., "total": ...},
-      "cal":        {"model": ..., "claims_returned": ..., "raw_response_chars": ...},
+      "cal":        {"model": ..., "claims_returned": ..., "raw_response_chars": ...,
+                     "suggested_links_valid_rate": ...},
       "gate":       {"kept": ..., "dropped": ..., "drop_reasons": {...},
                      "per_claim": [...]},
       "outcome":    "written" | "dry_pass" | "refused" | "error",
+      "refusal_reason": "<reason>",  # present when outcome == "refused"
       "write":      {"slug_written": ..., "facts_added": ..., "sections_added": [...],
                      "existing_preserved": ..., "partial_credit_applied": ...},
       "tools_used": {"gstack_browse": ..., "xurl": ..., "http": ...,

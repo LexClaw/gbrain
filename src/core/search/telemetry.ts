@@ -23,8 +23,15 @@
  * downside is documented in the methodology doc.
  */
 
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'fs';
+import { appendFile } from 'fs/promises';
+import { dirname, join } from 'path';
+import { homedir } from 'os';
 import type { BrainEngine } from '../engine.ts';
 import type { HybridSearchMeta } from '../types.ts';
+
+const JSONL_CAP_BYTES = 10 * 1024 * 1024;
+const JSONL_PATH = join(homedir(), '.local', 'state', 'gbrain', 'search-telemetry.jsonl');
 
 interface Bucket {
   date: string;
@@ -239,6 +246,64 @@ export function recordSearchTelemetry(
   } catch {
     // swallow — telemetry is best-effort.
   }
+}
+
+export function normalizeSearchQuery(query: string): string {
+  return query
+    .toLocaleLowerCase()
+    .normalize('NFC')
+    .replace(/[^\p{Letter}\p{Number}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export interface SearchTelemetryJsonlRow {
+  ts: string;
+  raw_query: string;
+  normalized_query: string;
+  result_count: number;
+  wall_ms: number;
+  caller_hint: string | null;
+}
+
+export function getSearchTelemetryJsonlPath(): string {
+  return JSONL_PATH;
+}
+
+export function getSearchTelemetryJsonlCapBytes(): number {
+  return JSONL_CAP_BYTES;
+}
+
+export function getCallerHint(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.GBRAIN_CALLER ?? '';
+  const cleaned = raw.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  return cleaned ? cleaned.slice(0, 120) : null;
+}
+
+export function writeSearchTelemetryJsonl(row: SearchTelemetryJsonlRow): void {
+  void writeSearchTelemetryJsonlSync(row).catch(() => { /* swallow */ });
+}
+
+async function writeSearchTelemetryJsonlSync(row: SearchTelemetryJsonlRow): Promise<void> {
+  const line = `${JSON.stringify(row)}\n`;
+  const bytes = Buffer.byteLength(line, 'utf8');
+  mkdirSync(dirname(JSONL_PATH), { recursive: true });
+  enforceJsonlCap(bytes);
+  await appendFile(JSONL_PATH, line, 'utf8');
+}
+
+function enforceJsonlCap(incomingBytes: number): void {
+  if (!existsSync(JSONL_PATH)) return;
+  const size = statSync(JSONL_PATH).size;
+  if (size + incomingBytes <= JSONL_CAP_BYTES) return;
+  const keepBytes = Math.max(0, JSONL_CAP_BYTES - incomingBytes);
+  const data = readFileSync(JSONL_PATH);
+  let kept = keepBytes > 0 ? data.subarray(Math.max(0, data.length - keepBytes)) : Buffer.alloc(0);
+  const newline = kept.indexOf(0x0a);
+  if (newline >= 0) kept = kept.subarray(newline + 1);
+  const tmp = `${JSONL_PATH}.tmp`;
+  writeFileSync(tmp, kept);
+  renameSync(tmp, JSONL_PATH);
 }
 
 /**

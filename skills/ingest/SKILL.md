@@ -30,28 +30,12 @@ Ingest meetings, articles, media, documents, and conversations into the brain.
 
 ## Contract
 
-- Every fact written to a brain page carries an inline `[Source: ...]` citation with date and provenance.
-- Every entity mention creates a back-link from the entity's page to the page mentioning them (Iron Law).
+- Follow `skills/conventions/quality.md` for citations and back-linking.
 - Raw sources are preserved for provenance via `gbrain files upload-raw` with automatic size routing.
 - State sections are rewritten with current best understanding, never appended to.
 - Entity detection fires on every inbound message; notable entities get pages or updates.
 
-> **Convention:** See `skills/conventions/quality.md` for Iron Law back-linking.
-
-Every mention of a person or company with a brain page MUST create a back-link
-FROM that entity's page TO the page mentioning them. An unlinked mention is a
-broken brain. See `skills/_brain-filing-rules.md` for format.
-
-## Citation Requirements (MANDATORY)
-
-Every fact written to a brain page must carry an inline `[Source: ...]` citation.
-
-- **User's statements:** `[Source: User, {context}, YYYY-MM-DD]`
-- **Meeting data:** `[Source: Meeting "{title}", YYYY-MM-DD]`
-- **Email/message:** `[Source: email from {name} re: {subject}, YYYY-MM-DD]`
-- **Web content:** `[Source: {publication}, {URL}, YYYY-MM-DD]`
-- **Social media:** `[Source: X/@handle, YYYY-MM-DD](URL)` (include link)
-- **Synthesis:** `[Source: compiled from {sources}]`
+> **Convention:** See `skills/conventions/quality.md` for entity-linking rules.
 
 ## Phases
 
@@ -64,7 +48,7 @@ Every fact written to a brain page must carry an inline `[Source: ...]` citation
    - If new: check notability gate, then store the page in gbrain with the appropriate type and slug
 3. **Append to timeline.** Add a timeline entry in gbrain for each event, with date, summary, and source citation.
 4. **Create cross-reference links.** Link entities in gbrain for every entity pair mentioned together, using the appropriate relationship type.
-5. **Back-link all entities.** Update EVERY mentioned entity's page with a back-link to this page (Iron Law).
+5. **Back-link entities.** Follow the convention above.
 6. **Timeline merge.** The same event appears on ALL mentioned entities' timelines. If Alice met Bob at Acme Corp, the event goes on Alice's page, Bob's page, and Acme Corp's page.
 
 ## Entity Detection on Every Message
@@ -145,14 +129,14 @@ about a company -> `companies/`, reusable framework -> `concepts/`, raw data -> 
 5. **HARD RULE:** every video/podcast brain page MUST link to the raw diarized
    transcript. A page without transcript links is incomplete.
 
-**Write to:** `media/videos/` or `media/podcasts/` with back-links to all entities.
+**Write to:** `media/videos/` or `media/podcasts/` with entity links per the convention above.
 
 **Quality bar:**
 - Compelling headline (not "This video discusses...")
 - Executive summary that makes you want to watch/listen
 - Key Ideas as actual insights, not topic labels
 - Verbatim quotes with real speaker names (not "speaker_0")
-- All entities extracted with context and back-linked
+- All entities extracted with context and linked per the convention above
 
 ### PDFs & Documents
 
@@ -254,7 +238,7 @@ When processing multiple items (batch video ingestion, bulk meeting processing, 
 
 1. **Test on 3-5 items first.** Run in test mode if available.
 2. **Read the actual output.** Is the quality good? Are titles compelling (not
-   "This video discusses...")? Are entities extracted and back-linked? Is the
+   "This video discusses...")? Are entities extracted and linked? Is the
    format clean?
 3. **Fix what's wrong** in the approach/skill, not via one-off patches.
 4. **Only then: bulk execute** with throttling, commits every 5-10 items.
@@ -269,14 +253,14 @@ up 100 bad pages is enormous.
 - Timeline entries are reverse-chronological (newest first)
 - Every person/company mentioned gets a page if notable (see filing rules)
 - Link types: knows, works_at, invested_in, founded, met_at, discussed
-- Source attribution: every timeline entry includes [Source: ...] citation
-- Back-links: every entity mention creates a back-link (Iron Law)
+- Source attribution: follow the convention above
+- Back-links: follow the convention above
 - Filing: file by primary subject, not format or source (see filing rules)
 
 ## Anti-Patterns
 
 - **Appending to State sections.** State is rewritten with the current best understanding on every update. Append-only State sections grow stale and contradictory.
-- **Ingesting without back-links.** An unlinked mention is a broken brain. Every entity mentioned must have a back-link from their page to the page mentioning them.
+- **Ingesting without convention-backed entity links.** Follow the convention above.
 - **Skipping raw source preservation.** Every ingested item must have its raw source preserved. A brain page without provenance is unverifiable.
 - **Bulk processing without sample test.** Test on 3-5 items first. Fix quality issues in the approach, not via one-off patches.
 - **Paraphrasing the user's original thinking.** The user's exact language IS the insight. Capture verbatim phrasing for ideas, theses, and frameworks.

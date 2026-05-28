@@ -89,11 +89,14 @@ Pages where compiled_truth is older than the latest timeline entry. The assessme
 ### Orphan pages
 Pages with zero inbound links. Nobody references them.
 - Review orphans: are they genuinely isolated or just missing links?
+- Use the `graph-link-hygiene` skill for collision-safe orphan detection before trusting counts.
+- Durable lesson: never build a `{basename: path}` or `{slug: record}` dictionary and then scan only its values. Duplicate basenames such as `index.md`, logs, schemas, reused slugs, or repeated card titles silently overwrite earlier nodes and can produce 100x false orphan counts. Keep a full node list and a separate `slug -> [nodes]` map.
 - Add links in gbrain from related pages or flag for deletion
 
 ### Dead links
 Links pointing to pages that don't exist.
-- Remove dead links in gbrain
+- Classify dead links before deleting: safe drift, content gap, or garbage. High-mention missing targets are often a content roadmap, not corruption.
+- Remove dead links in gbrain only after classification confirms they are garbage or obsolete.
 
 ### Missing cross-references
 Pages that mention entity names but don't have formal links.
