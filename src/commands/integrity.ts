@@ -80,7 +80,18 @@ export interface BareTweetHit {
   phrase: string;
 }
 
-export function findBareTweetHits(compiledTruth: string, slug: string): BareTweetHit[] {
+export function findBareTweetHits(
+  compiledTruth: string,
+  slug: string,
+  frontmatter?: Record<string, unknown>,
+): BareTweetHit[] {
+  // Wave-1 historical cleanup: pages explicitly marked as paraphrase
+  // (citation lost, prose stands as authored summary) are excluded from
+  // the bare-tweet scan. The provenance marker is an additive frontmatter
+  // field; removable via `UPDATE pages SET frontmatter = frontmatter - 'provenance'`.
+  if (frontmatter && (frontmatter as Record<string, unknown>).provenance === 'paraphrase') {
+    return [];
+  }
   const hits: BareTweetHit[] = [];
   const lines = compiledTruth.split('\n');
   let insideFence = false;
@@ -335,7 +346,13 @@ export async function scanIntegrity(
     // Skip grandfathered pages (opted out of brain-integrity enforcement)
     if ((page.frontmatter as Record<string, unknown> | undefined)?.validate === false) continue;
     pagesScanned++;
-    bareHits.push(...findBareTweetHits(page.compiled_truth, slug));
+    bareHits.push(
+      ...findBareTweetHits(
+        page.compiled_truth,
+        slug,
+        page.frontmatter as Record<string, unknown> | undefined,
+      ),
+    );
     externalHits.push(...findExternalLinks(page.compiled_truth, slug));
   }
 
@@ -383,7 +400,8 @@ async function scanIntegrityBatch(
   for (const row of rows) {
     const slug = row.slug as string;
     const compiledTruth = row.compiled_truth as string;
-    bareHits.push(...findBareTweetHits(compiledTruth, slug));
+    const frontmatter = row.frontmatter as Record<string, unknown> | undefined;
+    bareHits.push(...findBareTweetHits(compiledTruth, slug, frontmatter));
     externalHits.push(...findExternalLinks(compiledTruth, slug));
   }
 
@@ -467,7 +485,11 @@ async function cmdAuto(args: string[]): Promise<void> {
 
       // Bare-tweet handling
       if (!skipTweet) {
-        const hits = findBareTweetHits(page.compiled_truth, slug);
+        const hits = findBareTweetHits(
+          page.compiled_truth,
+          slug,
+          page.frontmatter as Record<string, unknown> | undefined,
+        );
         const handle = extractXHandleFromFrontmatter(page.frontmatter);
         if (hits.length > 0 && handle) {
           for (const hit of hits) {
