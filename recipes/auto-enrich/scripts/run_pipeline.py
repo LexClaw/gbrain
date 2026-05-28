@@ -39,6 +39,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import auto_enrich_lib  # noqa: E402
+import auto_stub  # noqa: E402
 import detect_sparse  # noqa: E402
 import quality_check  # noqa: E402
 import run_research  # noqa: E402
@@ -163,6 +164,7 @@ def process_candidate(
     counters: dict[str, int],
     pool_rank: int = 0,
     pool_size: int = 0,
+    stub_ctx: "auto_stub.AutoStubContext | None" = None,
 ) -> bool:
     """Process one candidate. Returns True on full success (page enriched).
 
@@ -210,6 +212,7 @@ def process_candidate(
     try:
         result = _process_candidate_inner(
             candidate, work_dir, dry_run, hb, counters, run_data,
+            stub_ctx=stub_ctx,
         )
     except Exception as exc:  # noqa: BLE001
         run_data["outcome"] = "error"
@@ -315,6 +318,7 @@ def _process_candidate_inner(
     hb: Heartbeat,
     counters: dict[str, int],
     run_data: dict[str, Any],
+    stub_ctx: "auto_stub.AutoStubContext | None" = None,
 ) -> bool:
     slug = candidate.get("slug", "unknown")
 
@@ -442,6 +446,44 @@ def _process_candidate_inner(
     else:
         _populate_gate_telemetry(run_data, artifact, pre_issues)
     run_data["stages_ms"]["gate"] = int((time.perf_counter() - t_gate) * 1000)
+
+    # Step 2.5: auto-stub missing people/companies entities (Phase 2, v5).
+    # Runs ONLY after pre-synthesize quality gates have passed (or
+    # partial-credit recovered). Stubs only created when:
+    #   - target matches people/<slug> or companies/<slug>
+    #   - derived title appears in artifact["page_content"] OR a claim quote
+    #   - per-run cap not yet hit
+    #   - not dry_run
+    # On any stub-create success, the rewritten link is appended to
+    # artifact["suggested_links"] and the on-disk artifact JSON at art_path
+    # is rewritten BEFORE synthesize reads it.
+    if stub_ctx is not None:
+        try:
+            unresolved_before = list(artifact.get("suggested_links_unresolved") or [])
+            artifact = auto_stub.process_unresolved_links(artifact, stub_ctx)
+            # Persist mutations: synthesize reads from disk, not from memory.
+            if stub_ctx.events:
+                art_path.write_text(json.dumps(artifact, indent=2) + "\n",
+                                    encoding="utf-8")
+            for ev in stub_ctx.events:
+                # Drain the per-call events into the heartbeat then clear them
+                # so the next candidate's pass starts clean. Keep the cap
+                # counter (ctx.stubs_created) intact.
+                hb.emit("auto_stub", status=ev.get("kind", "auto_stub_event"),
+                        details={k: v for k, v in ev.items() if k != "kind"})
+                _append_escalation({
+                    "ts": _now_iso(), "slug": ev.get("source_slug") or slug,
+                    "stage": "auto_stub",
+                    "kind": ev.get("kind"),
+                    "details": {k: v for k, v in ev.items() if k != "kind"},
+                })
+            stub_ctx.events.clear()
+            _ = unresolved_before  # retained for future per-run telemetry
+        except Exception as exc:  # noqa: BLE001
+            # Auto-stub is best-effort. A failure here must NOT block
+            # synthesize or the rest of the pipeline.
+            hb.emit("auto_stub", status="auto_stub_block_error",
+                    details={"slug": slug, "error": str(exc)[:200]})
 
     # Step 3: synthesize
     t_synth = time.perf_counter()
@@ -578,11 +620,16 @@ def run(limit: int = 5, dry_run: bool = False, candidate_pool: int | None = None
     work_dir = Path(os.environ.get("AUTO_ENRICH_WORK", "/tmp")) / "auto-enrich-pipeline"
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # One AutoStubContext shared across all candidates in this pipeline run
+    # so the MAX_AUTO_STUBS_PER_RUN cap applies pipeline-wide, not per-candidate.
+    stub_ctx = auto_stub.AutoStubContext(dry_run=dry_run)
+
     pool_size = len(candidates)
     for idx, candidate in enumerate(candidates):
         process_candidate(
             candidate, work_dir, dry_run, hb, counters,
             pool_rank=idx + 1, pool_size=pool_size,
+            stub_ctx=stub_ctx,
         )
         # Inject sensor timing into the first candidate's run line via env so
         # the per-run logger reflects the sensor cost amortized at rank 1.

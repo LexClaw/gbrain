@@ -42,7 +42,25 @@ RECIPE_VERSION_RESEARCH = "0.2.0"
 PROMPT_BUILDER_PATH = Path.home() / "hermes-workspace" / "Lex-Workspace" / "scripts" / "prompt-builder.py"
 MODEL_MARKER_RE = re.compile(r"^<!-- HERMES-MODEL: (.*?) -->\s*$", re.MULTILINE)
 SEARCH_RESULT_RE = re.compile(r"^\[(?P<score>\d+(?:\.\d+)?)\]\s+(?P<slug>\S+)\s+--")
-SLUG_RESOLUTION_MIN_SCORE = 1.0
+
+# Tiered acceptance for gbrain search-based slug resolution.
+# HIGH: any candidate at or above this score is auto-accepted (still must
+# exist + pass type-family guard). MEDIUM: candidate must additionally pass
+# token guards (type-family, version preservation, non-stopword overlap).
+SLUG_RESOLUTION_HIGH = 1.0
+SLUG_RESOLUTION_MEDIUM = 0.5
+# Legacy alias retained for back-compat with tests/external callers.
+SLUG_RESOLUTION_MIN_SCORE = SLUG_RESOLUTION_HIGH
+
+# Basename similarity floor for the basename-fuzzy resolver (Step 4).
+BASENAME_SIM_FLOOR = 0.6
+
+# Stopwords + min-len gate for non-stopword token overlap guard.
+_TOKEN_STOPWORDS = frozenset({
+    "the", "and", "for", "ai", "model", "code", "tool", "api",
+    "of", "a", "an", "on", "in",
+})
+_VERSION_TOKEN_RE = re.compile(r"\b\d+(?:-\d+)*\b")
 
 # gbrain search currently scores exact canonical slugs like concepts/claude-code
 # at 1.0 or higher. Lower scores are noisy for wrong-path rewrites, especially
@@ -304,11 +322,75 @@ def slug_exists(slug: str) -> bool:
         return False
 
 
+def passes_type_family_guard(original: str, candidate: str) -> bool:
+    """HARD invariant: people/ and companies/ cannot cross-resolve.
+
+    - If original starts with people/, candidate MUST start with people/.
+    - If original starts with companies/, candidate MUST start with companies/.
+    - All other prefixes: returns True (no family constraint; concepts/,
+      ai/entities/, etc. can cross-resolve).
+
+    The standalone callable lets both `passes_token_guards` and
+    `resolve_via_prefix_variants` apply the same invariant at every
+    candidate-acceptance point in the resolver chain.
+    """
+    o = str(original or "").strip()
+    c = str(candidate or "").strip()
+    if o.startswith("people/"):
+        return c.startswith("people/")
+    if o.startswith("companies/"):
+        return c.startswith("companies/")
+    return True
+
+
+def _version_tokens(basename: str) -> set[str]:
+    """Extract digit-version tokens from a basename (e.g. {'3', '4-7'})."""
+    return set(_VERSION_TOKEN_RE.findall(basename))
+
+
+def _non_stopword_tokens(basename: str) -> set[str]:
+    """Tokenize a basename on '-', drop stopwords and tokens <3 chars."""
+    tokens = [t for t in basename.split("-") if t]
+    return {t for t in tokens if len(t) >= 3 and t.lower() not in _TOKEN_STOPWORDS}
+
+
+def passes_token_guards(original_slug: str, candidate_slug: str) -> bool:
+    """Compose the three sub-guards for medium-confidence acceptance.
+
+    1. Type-family (HARD: people/ and companies/ cannot cross).
+    2. Version-token preservation: if original has version tokens, candidate
+       must have the SAME set OR no version tokens at all.
+    3. Non-stopword token overlap: at least 1 shared token after dropping
+       stopwords and tokens <3 chars.
+    """
+    if not passes_type_family_guard(original_slug, candidate_slug):
+        return False
+    o_basename = Path(str(original_slug or "").strip()).name
+    c_basename = Path(str(candidate_slug or "").strip()).name
+    if not o_basename or not c_basename:
+        return False
+    o_versions = _version_tokens(o_basename)
+    c_versions = _version_tokens(c_basename)
+    if o_versions:
+        if c_versions and c_versions != o_versions:
+            return False
+    o_tokens = _non_stopword_tokens(o_basename)
+    c_tokens = _non_stopword_tokens(c_basename)
+    if not (o_tokens & c_tokens):
+        return False
+    return True
+
+
 def resolve_via_prefix_variants(
     target: str,
     exists: Callable[[str], bool] = slug_exists,
 ) -> str | None:
-    """Resolve <wrong-prefix>/<basename> by testing canonical exact slugs."""
+    """Resolve <wrong-prefix>/<basename> by testing canonical exact slugs.
+
+    Candidate acceptance is wrapped with passes_type_family_guard so
+    people/ and companies/ cannot cross-resolve here, regardless of the
+    order of CANONICAL_PREFIXES (v5).
+    """
     slug = str(target or "").strip()
     if not slug or "/" not in slug:
         return None
@@ -321,6 +403,8 @@ def resolve_via_prefix_variants(
         candidate = prefix + basename
         if candidate == slug:
             continue
+        if not passes_type_family_guard(slug, candidate):
+            continue
         if exists(candidate):
             return candidate
     return None
@@ -331,49 +415,202 @@ def _slug_search_query(slug: str) -> str:
     return Path(str(slug or "").strip()).name.replace("-", " ").strip()
 
 
+def _parse_search_hits(output: str) -> list[tuple[str, float]]:
+    """Parse gbrain search lines into [(slug, score), ...] sorted by score desc."""
+    hits: list[tuple[str, float]] = []
+    for line in (output or "").splitlines():
+        match = SEARCH_RESULT_RE.match(line.strip())
+        if not match:
+            continue
+        try:
+            score = float(match.group("score"))
+        except (TypeError, ValueError):
+            continue
+        hits.append((match.group("slug"), score))
+    hits.sort(key=lambda h: h[1], reverse=True)
+    return hits
+
+
 def search_slug_resolution(
     slug: str,
     exists: Callable[[str], bool] = slug_exists,
 ) -> tuple[str | None, float]:
-    """Return the top verified search slug and score for a wrong-path target."""
-    query = _slug_search_query(slug)
+    """Return the top verified search slug and score for a wrong-path target.
+
+    Walks ALL parseable hits (sorted by score desc):
+    - score >= HIGH: accept if exists() and passes type-family guard.
+    - HIGH > score >= MEDIUM: accept only if passes_token_guards() also holds.
+    - score < MEDIUM: skip.
+    Returns (resolved_slug or None, top_score_seen).
+    """
+    target = str(slug or "").strip()
+    query = _slug_search_query(target)
     if not query:
         return None, 0.0
     try:
         output = auto_enrich_lib.run_gbrain(["search", query, "--limit", "10"])
     except auto_enrich_lib.GBrainCLIError:
         return None, 0.0
-    for line in output.splitlines():
-        match = SEARCH_RESULT_RE.match(line.strip())
-        if not match:
+    hits = _parse_search_hits(output)
+    if not hits:
+        return None, 0.0
+    top_score = hits[0][1]
+    for candidate, score in hits:
+        if score < SLUG_RESOLUTION_MEDIUM:
+            break
+        if not exists(candidate):
             continue
-        score = float(match.group("score"))
-        candidate = match.group("slug")
-        if score >= SLUG_RESOLUTION_MIN_SCORE and exists(candidate):
+        if score >= SLUG_RESOLUTION_HIGH:
+            if passes_type_family_guard(target, candidate):
+                return candidate, score
+            continue
+        # MEDIUM tier: full token-guard battery.
+        if passes_token_guards(target, candidate):
             return candidate, score
-        return None, score
-    return None, 0.0
+    return None, top_score
+
+
+def resolve_via_basename_similarity(
+    slug: str,
+    exists: Callable[[str], bool] = slug_exists,
+) -> tuple[str | None, float]:
+    """Step 4: fuzzy basename match across up to 20 search candidates.
+
+    Returns (best_slug or None, best_ratio_seen). Applies the full
+    token-guard battery to every candidate before computing similarity.
+    """
+    from difflib import SequenceMatcher
+    target = str(slug or "").strip()
+    query = _slug_search_query(target)
+    if not query:
+        return None, 0.0
+    try:
+        output = auto_enrich_lib.run_gbrain(["search", query, "--limit", "20"])
+    except auto_enrich_lib.GBrainCLIError:
+        return None, 0.0
+    hits = _parse_search_hits(output)
+    if not hits:
+        return None, 0.0
+    target_basename = Path(target).name
+    best_slug: str | None = None
+    best_ratio = 0.0
+    for candidate, _score in hits:
+        if not exists(candidate):
+            continue
+        if not passes_token_guards(target, candidate):
+            continue
+        cand_basename = Path(candidate).name
+        ratio = SequenceMatcher(None, target_basename, cand_basename).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            if ratio >= BASENAME_SIM_FLOOR:
+                best_slug = candidate
+    if best_slug is None:
+        return None, best_ratio
+    return best_slug, best_ratio
 
 
 def resolve_suggested_link_target(
     slug: str,
     exists: Callable[[str], bool] = slug_exists,
 ) -> tuple[str | None, float]:
-    """Resolve a non-existent suggested_links target to a canonical brain slug."""
+    """Resolve a non-existent suggested_links target to a canonical brain slug.
+
+    Chain: manual lookup -> prefix variants -> search (tiered) -> basename
+    similarity. Returns (None, last_top_score) only when all four fail.
+    """
     target = str(slug or "").strip()
     if not target:
         return None, 0.0
     manual = MANUAL_SLUG_RESOLUTIONS.get(target)
-    if manual and exists(manual):
-        return manual, SLUG_RESOLUTION_MIN_SCORE
+    if manual and exists(manual) and passes_type_family_guard(target, manual):
+        return manual, SLUG_RESOLUTION_HIGH
     variant = resolve_via_prefix_variants(target, exists=exists)
     if variant:
-        return variant, SLUG_RESOLUTION_MIN_SCORE
-    return search_slug_resolution(target, exists=exists)
+        return variant, SLUG_RESOLUTION_HIGH
+    search_result, search_score = search_slug_resolution(target, exists=exists)
+    if search_result:
+        return search_result, search_score
+    basename_result, basename_ratio = resolve_via_basename_similarity(target, exists=exists)
+    if basename_result:
+        return basename_result, basename_ratio
+    # All failed. Return the highest "informative" score seen for telemetry.
+    return None, max(search_score, basename_ratio)
+
+
+def resolve_suggested_link_target_detailed(
+    slug: str,
+    exists: Callable[[str], bool] = slug_exists,
+) -> dict[str, Any]:
+    """Like resolve_suggested_link_target but returns per-stage diagnostics.
+
+    Used by ground_suggested_links to populate suggested_links_unresolved
+    with full payloads for downstream auto-stub and audit.
+
+    Returns a dict:
+      {
+        "resolved": <slug or None>,
+        "score": <float, the score used at resolution time>,
+        "search_top_score": <float or None>,
+        "search_top_candidate": <slug or None>,
+        "basename_top_score": <float or None>,
+        "basename_top_candidate": <slug or None>,
+      }
+    """
+    target = str(slug or "").strip()
+    out: dict[str, Any] = {
+        "resolved": None,
+        "score": 0.0,
+        "search_top_score": None,
+        "search_top_candidate": None,
+        "basename_top_score": None,
+        "basename_top_candidate": None,
+    }
+    if not target:
+        return out
+    manual = MANUAL_SLUG_RESOLUTIONS.get(target)
+    if manual and exists(manual) and passes_type_family_guard(target, manual):
+        out["resolved"] = manual
+        out["score"] = SLUG_RESOLUTION_HIGH
+        return out
+    variant = resolve_via_prefix_variants(target, exists=exists)
+    if variant:
+        out["resolved"] = variant
+        out["score"] = SLUG_RESOLUTION_HIGH
+        return out
+    search_result, search_score = search_slug_resolution(target, exists=exists)
+    out["search_top_score"] = search_score
+    # Best-effort: peek at the top parsed hit for diagnostics even if unused.
+    try:
+        peek_output = auto_enrich_lib.run_gbrain(
+            ["search", _slug_search_query(target), "--limit", "1"]
+        )
+        peek_hits = _parse_search_hits(peek_output)
+        if peek_hits:
+            out["search_top_candidate"] = peek_hits[0][0]
+    except auto_enrich_lib.GBrainCLIError:
+        pass
+    if search_result:
+        out["resolved"] = search_result
+        out["score"] = search_score
+        return out
+    basename_result, basename_ratio = resolve_via_basename_similarity(target, exists=exists)
+    out["basename_top_score"] = basename_ratio
+    out["basename_top_candidate"] = basename_result
+    if basename_result:
+        out["resolved"] = basename_result
+        out["score"] = basename_ratio
+    return out
 
 
 def ground_suggested_links(artifact: dict[str, Any]) -> dict[str, Any]:
-    """Verify suggested_links, rewrite wrong-path targets, and add metrics."""
+    """Verify suggested_links, rewrite wrong-path targets, and add metrics.
+
+    On full chain failure, append a full-payload entry to
+    artifact["suggested_links_unresolved"] preserving the original link dict
+    plus per-stage diagnostics (search_top_*, basename_top_*). Downstream
+    Phase 2 auto-stub reads this field.
+    """
     links = artifact.get("suggested_links", []) or []
     if not isinstance(links, list):
         artifact["suggested_links_valid_rate"] = 0.0
@@ -384,6 +621,7 @@ def ground_suggested_links(artifact: dict[str, Any]) -> dict[str, Any]:
 
     verified: list[dict[str, Any]] = []
     invalid: list[str] = []
+    unresolved: list[dict[str, Any]] = []
     resolved: list[dict[str, Any]] = []
     exists_cache: dict[str, bool] = {}
 
@@ -403,14 +641,27 @@ def ground_suggested_links(artifact: dict[str, Any]) -> dict[str, Any]:
         if target and cached_slug_exists(target):
             verified.append(link)
             continue
-        resolved_target, score = resolve_suggested_link_target(target, exists=cached_slug_exists)
+        detail = resolve_suggested_link_target_detailed(target, exists=cached_slug_exists)
+        resolved_target = detail.get("resolved")
         if resolved_target:
             rewritten = dict(link)
             rewritten["target"] = resolved_target
             verified.append(rewritten)
-            resolved.append({"from": target, "to": resolved_target, "score": score})
+            resolved.append({
+                "from": target,
+                "to": resolved_target,
+                "score": detail.get("score", 0.0),
+            })
         else:
             invalid.append(target)
+            unresolved.append({
+                "original_link": dict(link) if isinstance(link, dict) else {},
+                "target": target,
+                "search_top_score": detail.get("search_top_score"),
+                "search_top_candidate": detail.get("search_top_candidate"),
+                "basename_top_score": detail.get("basename_top_score"),
+                "basename_top_candidate": detail.get("basename_top_candidate"),
+            })
 
     original_count = len(links)
     valid_count = len(verified)
@@ -429,6 +680,10 @@ def ground_suggested_links(artifact: dict[str, Any]) -> dict[str, Any]:
         artifact["suggested_links_resolved_targets"] = resolved
     else:
         artifact.pop("suggested_links_resolved_targets", None)
+    if unresolved:
+        artifact["suggested_links_unresolved"] = unresolved
+    else:
+        artifact.pop("suggested_links_unresolved", None)
     return artifact
 
 
@@ -737,6 +992,9 @@ def run(candidate_json_path: str, output_artifact_path: str,
     artifact = ground_suggested_links(artifact)
     artifact["researcher"] = "cal-subagent"
     artifact["researched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # v4 Change D: persist the source page Cal researched so Phase 2's
+    # evidence gate has a haystack to match titles against.
+    artifact["page_content"] = page_content
     if resolved_model:
         artifact["model"] = resolved_model.get("model")
         artifact["provider"] = resolved_model.get("provider")
