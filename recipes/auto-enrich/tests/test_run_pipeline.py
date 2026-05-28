@@ -7,6 +7,7 @@ gbrain put) are mocked. Verifies the orchestration logic only.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -247,6 +248,25 @@ def test_zero_candidates_returns_2(tmp_path, monkeypatch):
     with _patch_sensor([]):
         rc = run_pipeline.run(limit=1)
     assert rc == 2
+
+
+def test_pipeline_exception_logs_closed_enum_error_class(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTO_ENRICH_WORK", str(tmp_path))
+    monkeypatch.setenv("AUTO_ENRICH_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    monkeypatch.setattr(run_pipeline, "ESCALATIONS_PATH", tmp_path / "esc.jsonl")
+
+    with _patch_sensor([SAMPLE_CANDIDATE]), \
+         patch.object(
+             run_pipeline.run_research, "run",
+             side_effect=subprocess.TimeoutExpired(cmd=["hermes"], timeout=1),
+         ):
+        rc = run_pipeline.run(limit=1, dry_run=False)
+
+    assert rc == 1
+    run_rec = json.loads((tmp_path / "runs.jsonl").read_text().strip())
+    assert run_rec["outcome"] == "error"
+    assert "error_class" in run_rec
+    assert run_rec["error_class"] in run_pipeline.ERROR_CLASS_VALUES
 
 
 def test_research_failure_escalates_and_continues(tmp_path, monkeypatch, artifact_file):
