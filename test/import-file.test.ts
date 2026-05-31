@@ -381,6 +381,44 @@ Content to chunk but not embed.
     expect(result.status).toBe('imported');
   });
 
+  test('truncation guard: rejects frontmatter-only content with empty body', async () => {
+    // The put-page body-drop bug (kn7f8tg0): `gbrain put --file <path>` silently
+    // drops the body because the CLI arg parser ignores --file, leaving content
+    // empty. A frontmatter-only stub then clobbers a real page. The guard must
+    // reject this BEFORE any chunk/embed/db work.
+    const frontmatterOnly = '---\ntitle: Stub\ntype: source\n---\n';
+
+    const engine = mockEngine();
+    const result = await importFromContent(engine, 'stub-slug', frontmatterOnly, { noEmbed: true });
+
+    expect(result.status).toBe('skipped');
+    expect(result.error).toContain('body is empty');
+    // No engine work — confirms the guard short-circuits before any db write.
+    expect((engine as any)._calls.length).toBe(0);
+  });
+
+  test('truncation guard: GBRAIN_ALLOW_EMPTY_BODY=1 overrides the guard', async () => {
+    const frontmatterOnly = '---\ntitle: Intentional Empty\ntype: note\n---\n';
+    const engine = mockEngine();
+    const prev = process.env.GBRAIN_ALLOW_EMPTY_BODY;
+    process.env.GBRAIN_ALLOW_EMPTY_BODY = '1';
+    try {
+      const result = await importFromContent(engine, 'intentional-empty', frontmatterOnly, { noEmbed: true });
+      expect(result.status).toBe('imported');
+    } finally {
+      if (prev === undefined) delete process.env.GBRAIN_ALLOW_EMPTY_BODY;
+      else process.env.GBRAIN_ALLOW_EMPTY_BODY = prev;
+    }
+  });
+
+  test('truncation guard: content WITH a real body still imports', async () => {
+    // The guard must not regress legitimate writes: frontmatter + body imports.
+    const full = '---\ntitle: Real Page\ntype: source\n---\n\nThis is a real body with substantive content.\n';
+    const engine = mockEngine();
+    const result = await importFromContent(engine, 'real-page', full, { noEmbed: true });
+    expect(result.status).toBe('imported');
+  });
+
   test('assigns sequential chunk_index values', async () => {
     const filePath = join(TMP, 'indexed.md');
     const longText = Array(50).fill('This is a sentence that adds length to the content.').join(' ');

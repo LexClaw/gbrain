@@ -237,6 +237,35 @@ export async function importFromContent(
 
   const parsed = parseMarkdown(content, slug + '.md');
 
+  // Truncation guard (kn7f8tg0 / put-page body-drop): a write that parses to a
+  // real page header (title/type present) but an empty body is almost always a
+  // caller bug, not intent. The canonical trigger is `gbrain put <slug> --file
+  // <path>`: the CLI arg parser silently ignores the unrecognized `--file`
+  // flag, `content` stays empty, and a frontmatter-only stub clobbers a real
+  // page. parseMarkdown lifts frontmatter into dedicated fields (title/type)
+  // and leaves `frontmatter` as the residual map, so the body-drop signal is
+  // "we have a header but no body". Reject it so the bad write never lands
+  // silently. A caller that genuinely wants a body-less page can pass
+  // GBRAIN_ALLOW_EMPTY_BODY=1.
+  const hasHeader =
+    (parsed.title != null && String(parsed.title).trim().length > 0) ||
+    (parsed.type != null && String(parsed.type).trim().length > 0) ||
+    Object.keys(parsed.frontmatter ?? {}).length > 0;
+  const bodyIsEmpty = !parsed.compiled_truth || parsed.compiled_truth.trim().length === 0;
+  const timelineIsEmpty = !parsed.timeline || String(parsed.timeline).trim().length === 0;
+  if (hasHeader && bodyIsEmpty && timelineIsEmpty && process.env.GBRAIN_ALLOW_EMPTY_BODY !== '1') {
+    return {
+      slug,
+      status: 'skipped',
+      chunks: 0,
+      error:
+        `Refusing to write '${slug}': page header present but body is empty. ` +
+        `This is the put-page truncation bug — typically 'gbrain put --file <path>' ` +
+        `(use '--content "$(cat file.md)"' or pipe via stdin instead). ` +
+        `Set GBRAIN_ALLOW_EMPTY_BODY=1 to override if a body-less page is intended.`,
+    };
+  }
+
   // Hash includes ALL fields for idempotency (not just compiled_truth + timeline)
   const hash = createHash('sha256')
     .update(JSON.stringify({
