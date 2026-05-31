@@ -2,8 +2,11 @@
 name: reports
 version: 1.0.0
 description: |
-  Save and load timestamped reports. Keyword routing for fast lookup. Cron jobs
-  save output as reports; the agent or user queries them by keyword.
+  Save and load timestamped reports with keyword routing for fast lookup. Iron
+  Law: every report carries a machine-parseable timestamp and keyword tag. Use
+  when asked to "save report", "load latest report", "what is the latest
+  briefing", or "show me the pulse". Proactively invoke after any cron job or
+  batch operation completes to preserve its output.
 triggers:
   - "save report"
   - "load latest report"

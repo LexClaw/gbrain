@@ -2,10 +2,11 @@
 name: frontmatter-guard
 version: 1.0.0
 description: |
-  Validate and auto-repair YAML frontmatter on brain pages. Catches malformed
-  pages before they enter the brain (missing closing ---, nested quotes, slug
-  mismatches, null bytes, empty frontmatter, YAML parse failures). Wraps the
-  `gbrain frontmatter` CLI for agent-driven workflows.
+  Validate and auto-repair YAML frontmatter on brain pages, catching malformed
+  pages before they enter the knowledge base. Iron Law: no page enters the brain
+  without valid frontmatter. Use when asked to "validate frontmatter", "check
+  frontmatter", "fix frontmatter", "frontmatter audit", or "brain lint".
+  Proactively invoke before committing any batch of new or edited brain pages.
 triggers:
   - "validate frontmatter"
   - "check frontmatter"

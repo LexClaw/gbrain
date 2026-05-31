@@ -1,9 +1,12 @@
 ---
 name: smoke-test
 description: |
-  Post-restart smoke tests + auto-fix for gbrain and OpenClaw environments.
-  Tests critical services, auto-fixes known issues, extensible via user-defined
-  test scripts in ~/.gbrain/smoke-tests.d/*.sh.
+  Post-restart smoke tests and auto-fix for critical services with extensible
+  test scripts. Iron Law: verify core functionality before declaring a restart
+  successful. Use when asked to "smoke test", "run smoke tests", "container
+  restart check", "health check", or "did the restart break anything".
+  Proactively invoke after any service restart, container reboot, or deployment
+  to catch regressions early.
 triggers:
   - "smoke test"
   - "run smoke tests"

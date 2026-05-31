@@ -1,6 +1,10 @@
 ---
 name: publish
-description: Share brain pages as beautiful password-protected HTML with zero LLM calls
+description: Convert brain pages to beautiful password-protected HTML with zero
+  LLM calls. Iron Law: every published page links back to its source page for
+  provenance. Use when asked to "share this page", "publish page", or "create
+  shareable link". Proactively invoke when the user wants to share knowledge-base
+  content externally.
 triggers:
   - "share this page"
   - "publish page"

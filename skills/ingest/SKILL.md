@@ -1,6 +1,10 @@
 ---
 name: ingest
-description: Route content to specialized ingestion skills. Detects input type and delegates.
+description: Route content to specialized ingestion pipelines based on input type.
+  Iron Law: every ingested item preserves its raw source for provenance and
+  creates back-links to all mentioned entities. Use when asked to "ingest this",
+  "save this to brain", or "process this meeting". Proactively invoke when the
+  user shares any content that should be captured in the knowledge base.
 triggers:
   - "ingest this"
   - "save this to brain"

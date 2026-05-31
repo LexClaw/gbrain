@@ -2,9 +2,12 @@
 name: query
 version: 1.0.0
 description: |
-  Answer questions using the brain's knowledge with 3-layer search, synthesis,
-  and citation propagation. Use when the user asks a question, wants a lookup,
-  or needs information from the brain.
+  Answer questions using the brain knowledge base with three-layer search,
+  synthesis, and citation propagation. Iron Law: every answer carries an inline
+  [Source: ...] citation. Use when the user asks a question, wants a lookup, or
+  says "what do we know about", "tell me about", "who is", or "look up".
+  Proactively invoke when a query requires knowledge-base context to answer
+  accurately.
 triggers:
   - "what do we know about"
   - "tell me about"

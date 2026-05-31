@@ -2,9 +2,12 @@
 name: enrich
 version: 1.0.0
 description: |
-  Enrich brain pages with tiered enrichment protocol. Creates and updates
-  person/company pages with compiled truth, timeline, and cross-links.
-  Use when a new entity is mentioned or an existing page needs updating.
+  Enrich brain pages with a tiered protocol for creating and updating person and
+  company pages with compiled truth, timeline, and cross-links. Iron Law: every
+  entity mention creates a back-link from the entity page to the mentioning page.
+  Use when asked to "enrich", "create person page", "update company page",
+  "who is this person", or "look up this company". Proactively invoke whenever a
+  new entity is mentioned in conversation.
 triggers:
   - "enrich"
   - "create person page"
