@@ -128,3 +128,22 @@ gbrain eval --qrels labels.tsv --config balanced.json
 ```
 
 Methodology + metric glossary in [`docs/eval/SEARCH_MODE_METHODOLOGY.md`](../eval/SEARCH_MODE_METHODOLOGY.md).
+
+## Quarq Retrieval (v0.37)
+
+Three new capabilities extend the hybrid stack:
+
+1. **Hypothesis expansion** — decomposes queries into entity/action/temporal/topical
+   hypotheses before search. Each hypothesis runs through hybrid search; results
+   merge via RRF. CLI: `gbrain query "..." --hypothesis`
+
+2. **Memory-type filtering** — maps 22 `PageType` values to three categories
+   (semantic, episodic, procedural) for pre-retrieval SQL filtering and
+   post-retrieval classification. CLI: `gbrain query "..." --memory-type semantic`
+
+3. **Reasoning constraints** — post-retrieval diagnostics for temporal ambiguity,
+   numerical mismatch, entity conflation, and insufficient evidence. CLI:
+   `gbrain query "..." --quarq`
+
+Full pipeline: see [`docs/memory-types.md`](../memory-types.md) and
+[`docs/concepts/memory-architecture/`](../concepts/memory-architecture/).
