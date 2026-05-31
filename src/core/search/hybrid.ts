@@ -11,7 +11,8 @@
 
 import type { BrainEngine } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
-import type { SearchResult, SearchOpts, HybridSearchMeta } from '../types.ts';
+import type { SearchResult, SearchOpts, HybridSearchMeta, MemoryType } from '../types.ts';
+import { pageTypesForMemoryType } from './memory-type.ts';
 import { embed, embedQuery } from '../embedding.ts';
 import { resolveEmbeddingColumn, isCacheSafe } from './embedding-column.ts';
 import { loadConfigWithEngine } from '../config.ts';
@@ -312,6 +313,8 @@ export interface HybridSearchOpts extends SearchOpts {
   expandFn?: (query: string) => Promise<string[]>;
   /** Override default RRF K constant (default: 60). Lower values boost top-ranked results more. */
   rrfK?: number;
+  /** v0.37 — Quarq-style memory-type filter (already on SearchOpts; re-declared here for explicit hybrid usage). */
+  memoryType?: MemoryType;
   /** Override dedup pipeline parameters. */
   dedupOpts?: {
     cosineThreshold?: number;
@@ -401,7 +404,7 @@ export async function hybridSearch(
     // v0.33: multi-type filter for whoknows ('person','company'). Pushes
     // type filter to SQL level so the limit budget goes to candidate-typed
     // pages instead of being eaten by note/transcript/article pages.
-    types: opts?.types,
+    types: opts?.types ?? (opts?.memoryType ? pageTypesForMemoryType(opts.memoryType as MemoryType) : undefined),
     // v0.29.1: since/until take precedence over deprecated afterDate/beforeDate.
     // The engine still consumes the legacy field names; this aliasing keeps
     // PR #618 callers compiling while the new names are the public surface.

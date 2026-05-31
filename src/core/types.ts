@@ -13,6 +13,14 @@
 export type PageType = 'person' | 'company' | 'deal' | 'yc' | 'civic' | 'project' | 'concept' | 'source' | 'media' | 'writing' | 'analysis' | 'guide' | 'hardware' | 'architecture' | 'meeting' | 'note' | 'email' | 'slack' | 'calendar-event' | 'code' | 'image' | 'synthesis';
 
 /**
+ * v0.37 — Quarq-style memory type classification.
+ * Maps the 22 PageType values to three memory categories for retrieval routing.
+ * Semantic = durable facts, Episodic = time-bound events, Procedural = instructions.
+ * 'general' means unclassified / no filter applied.
+ */
+export type MemoryType = 'semantic' | 'episodic' | 'procedural' | 'general';
+
+/**
  * Canonical list of every PageType value. Kept in sync with the union above.
  * Used by the v0.27.1 page-type-exhaustive contract test to walk every value
  * through public surfaces (serialize, slug registry, frontmatter validate)
@@ -729,6 +737,14 @@ export interface SearchOpts {
    * sending them produces garbage scores.
    */
   crossModal?: 'text' | 'image' | 'both' | 'auto';
+  /**
+   * v0.37 — Quarq-style memory-type filter. When set, results are restricted
+   * to pages whose PageType maps to the given MemoryType (semantic, episodic,
+   * or procedural). Pushed to SQL as `AND p.type = ANY($N::text[])` via the
+   * same mechanism as the existing `types` filter. Undefined by default, so
+   * zero behavior change for existing callers.
+   */
+  memoryType?: MemoryType;
 }
 
 /**

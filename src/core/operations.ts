@@ -8,10 +8,12 @@ import { resolve, relative, sep } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
-import type { PageType } from './types.ts';
+import type { PageType, SearchResult } from './types.ts';
 import { importFromContent } from './import-file.ts';
 import { hybridSearch, hybridSearchCached } from './search/hybrid.ts';
 import { expandQuery } from './search/expansion.ts';
+import { quarqRetrieve } from './search/quarq-retrieval.ts';
+import { extractHypotheses, hypothesisQueries } from './search/hypothesis-expansion.ts';
 import { dedupResults } from './search/dedup.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
@@ -1171,10 +1173,23 @@ const query: Operation = {
       description:
         "v0.36: route vector search through a non-default embedding column. Defaults to 'embedding' (OpenAI 1536d) unless `search_embedding_column` config sets a different default. Per-call override for A/B benchmarking across providers (e.g. 'embedding_voyage', 'embedding_zeroentropy'). Column MUST be declared in the `embedding_columns` config registry — unknown names throw with a paste-ready hint listing valid columns.",
     },
+    memory_type: {
+      type: 'string',
+      enum: ['semantic', 'episodic', 'procedural'],
+      description:
+        "v0.37 — Quarq-style memory-type filter. Restricts results to pages whose PageType maps to the given memory category: 'semantic' (durable facts: people, companies, concepts), 'episodic' (time-bound events: meetings, notes, emails), or 'procedural' (instructions, code). Omit for no memory-type restriction.",
+    },
+    // v0.37 — Quarq-style hypothesis expansion. When true, decomposes the query
+    // into entity/action/temporal/topical hypotheses before running hybrid search.
+    hypothesis: { type: 'boolean', description: 'v0.37 — Use Quarq-style hypothesis expansion (entity/action/temporal/topical decomposition) instead of synonym expansion. Default false for backward compat.' },
+    // v0.37 — Quarq retrieval orchestrator. Runs hypothesis expansion + memory-type
+    // filtering + hybrid search + RRF fusion + reasoning constraints in one pipeline.
+    quarq: { type: 'boolean', description: 'v0.37 — Use full Quarq retrieval pipeline (hypothesis expansion + memory-type filtering + RRF fusion + reasoning constraints). Overrides --hypothesis and --memory-type.' },
   },
   handler: async (ctx, p) => {
     const startedAt = Date.now();
     const expand = p.expand !== false;
+    const useHypothesis = (p.hypothesis as boolean) === true;
     const detail = (p.detail as 'low' | 'medium' | 'high') || undefined;
     const queryText = p.query as string | undefined;
     const imageData = p.image as string | undefined;
@@ -1218,6 +1233,37 @@ const query: Operation = {
       throw new Error('query requires either `query` (text) or `image` (base64 bytes).');
     }
 
+    // v0.37 — Quarq full pipeline. Runs hypothesis expansion + memory-type
+    // filtering + hybrid search + RRF fusion + reasoning constraints.
+    // Returns extended result shape with constraints report.
+    if ((p.quarq as boolean) === true) {
+      const quarqResult = await quarqRetrieve(ctx.engine, queryText, {
+        limit: (p.limit as number) || 20,
+        detail,
+        language: (p.lang as string) || undefined,
+        symbolKind: (p.symbol_kind as string) || undefined,
+        memoryType: p.memory_type as 'semantic' | 'episodic' | 'procedural' | undefined,
+        since: typeof p.since === 'string' ? p.since : undefined,
+        until: typeof p.until === 'string' ? p.until : undefined,
+        sourceId: querySourceScope.sourceId,
+        sourceIds: querySourceScope.sourceIds,
+        embeddingColumn: embeddingColumnParam,
+        salience: p.salience as 'off' | 'on' | 'strong' | undefined,
+        recency: p.recency as 'off' | 'on' | 'strong' | undefined,
+        hypothesisExpansion: !(p.hypothesis === false),
+        reasoningConstraints: true,
+      });
+      const results2: SearchResult[] = quarqResult.results as SearchResult[];
+      bumpLastRetrievedAt(ctx.engine, results2.map((r) => r.page_id));
+      return {
+        results: results2,
+        constraints: quarqResult.constraints,
+        hypothesisCount: quarqResult.hypothesisCount,
+        memoryType: quarqResult.memoryType,
+        ranQueries: quarqResult.ranQueries,
+      };
+    }
+
     // v0.25.0 — capture meta side-channel. hybridSearch's return contract
     // stays SearchResult[] (Cathedral II callers depend on that); meta
     // arrives via callback so eval capture can record what actually ran.
@@ -1234,8 +1280,12 @@ const query: Operation = {
     const results = await hybridSearchCached(ctx.engine, queryText, {
       limit: (p.limit as number) || 20,
       offset: (p.offset as number) || 0,
-      expansion: expand,
-      expandFn: expand ? expandQuery : undefined,
+      expansion: useHypothesis ? true : expand,
+      expandFn: useHypothesis
+        ? async (q: string) => hypothesisQueries(extractHypotheses(q))
+        : expand
+          ? expandQuery
+          : undefined,
       detail,
       language: (p.lang as string) || undefined,
       symbolKind: (p.symbol_kind as string) || undefined,
@@ -1260,6 +1310,8 @@ const query: Operation = {
       // Source scope is already threaded via ...querySourceScope above
       // (master's #1182 cleanup of the duplicate sourceScopeOpts spread).
       embeddingColumn: embeddingColumnParam,
+      // v0.37 — Quarq-style memory-type filter. Converts to PageType[] at the hybrid level.
+      memoryType: p.memory_type as 'semantic' | 'episodic' | 'procedural' | undefined,
     });
     const latency_ms = Date.now() - startedAt;
 
