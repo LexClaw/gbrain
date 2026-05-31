@@ -4,6 +4,7 @@ import { join } from 'path';
 import { importFile, importFromContent } from '../src/core/import-file.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../src/core/chunkers/recursive.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const TMP = join(import.meta.dir, '.tmp-import-test');
 
@@ -400,15 +401,10 @@ Content to chunk but not embed.
   test('truncation guard: GBRAIN_ALLOW_EMPTY_BODY=1 overrides the guard', async () => {
     const frontmatterOnly = '---\ntitle: Intentional Empty\ntype: note\n---\n';
     const engine = mockEngine();
-    const prev = process.env.GBRAIN_ALLOW_EMPTY_BODY;
-    process.env.GBRAIN_ALLOW_EMPTY_BODY = '1';
-    try {
+    await withEnv({ GBRAIN_ALLOW_EMPTY_BODY: '1' }, async () => {
       const result = await importFromContent(engine, 'intentional-empty', frontmatterOnly, { noEmbed: true });
       expect(result.status).toBe('imported');
-    } finally {
-      if (prev === undefined) delete process.env.GBRAIN_ALLOW_EMPTY_BODY;
-      else process.env.GBRAIN_ALLOW_EMPTY_BODY = prev;
-    }
+    });
   });
 
   test('truncation guard: content WITH a real body still imports', async () => {
