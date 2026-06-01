@@ -1,28 +1,237 @@
 {
-  "version": 1,
+  "version": 2,
   "owner": "Lex",
-  "rationale": "Survival list for Lex-local customizations on top of upstream garrytan/gbrain. Every Lex-local path that must survive upstream upgrades has one row here. The reapply tool reads this file; the check tool fails closed when a Lex-local file on master is missing from this manifest. Born 2026-05-19 after commit b2f1b3b3 silently dropped 22 files during the v0.36.3.0 upgrade.",
-  "upstream_remote": "origin",
+  "rationale": "Survival list for Lex-local customizations on top of upstream garrytan/gbrain. Every Lex-local path that must survive upstream upgrades has one row here. The reapply tool reads this file; the check tool fails closed when a Lex-local file on master is missing from this manifest. Born 2026-05-19 after commit b2f1b3b3 silently dropped 22 files during the v0.36.3.0 upgrade. | v2 2026-05-31: added 34 entries closing the auto-enrich + tooling gap (auto-enrich recipe was 100% unprotected). Fixed remote naming: origin=LexClaw fork, upstream=garrytan. Pre-v0.42.1 upgrade hardening.",
+  "upstream_remote": "upstream",
   "upstream_branch": "master",
-  "fork_remote": "fork",
+  "fork_remote": "origin",
   "fork_branch": "master",
   "audit_seed_commit": "b2f1b3b3",
   "audit_report": "~/hermes-workspace/Lex-Workspace/reviews/2026-05-19-gbrain-v036-upgrade-audit.md",
   "entries": [
     {
-      "path": "src/commands/ingest.ts",
+      "path": "recipes/auto-enrich.md",
       "kind": "new-file",
-      "source_commit": "4f03eb99",
-      "rationale": "web-to-brain CLI dispatcher. Pure Lex addition. Shells into recipes/web-to-brain/scripts/web_fetch.py. Was dropped by b2f1b3b3 reapply; the verb 'gbrain ingest url' goes dead without this file.",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
       "reapply": "checkout-subtree"
     },
     {
-      "path": "src/cli.ts",
-      "kind": "modified-upstream-file",
-      "source_commit": "4f03eb99",
-      "rationale": "Registers 'ingest' verb in upstream's command dispatcher. Three touch points: CLI_ONLY set (add 'ingest'), command-dispatch if-block (add ingest branch), --help text (add ingest line). Was dropped by b2f1b3b3.",
-      "reapply": "hand-merge",
-      "merge_strategy": "Diff 4f03eb99^..4f03eb99 -- src/cli.ts to see the three small additions; apply each by hand against current master. Marker check: grep -q \"command === 'ingest'\" src/cli.ts after merge."
+      "path": "recipes/auto-enrich/.gitignore",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/README.md",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/config.yaml",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/conftest.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/docs/CRON-REGISTRATION.md",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/docs/research-artifact-schema.md",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/requirements.txt",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/__init__.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/auto_enrich_lib.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/detect_sparse.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/quality_check.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/research_strategy.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/run_logger.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/run_pipeline.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/run_research.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/run_sensor.sh",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/smoke.sh",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/scripts/synthesize.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/__init__.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/fixtures/research_artifact_destructive.json",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/fixtures/research_artifact_fabricated.json",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/fixtures/research_artifact_good.json",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/test_detect_sparse.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/test_partial_credit.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/test_partial_credit_pipeline.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/test_quality_check.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/test_research_strategy.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/test_run_logger.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/test_run_pipeline.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/test_run_research.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/auto-enrich/tests/test_synthesize.py",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "auto-enrich recipe (sparse-page detection + research + synthesis pipeline). Pure Lex addition, src a245607d/bce33364. MUST survive upstream merge; entire recipe was unprotected pre-2026-05-31.",
+      "reapply": "checkout-subtree"
     },
     {
       "path": "recipes/web-to-brain/.gitignore",
@@ -57,13 +266,6 @@
       "kind": "new-file",
       "source_commit": "4f03eb99",
       "rationale": "web-to-brain helpers (robots, parsing, fixtures).",
-      "reapply": "checkout-subtree"
-    },
-    {
-      "path": "recipes/web-to-brain/tests/test_lib.py",
-      "kind": "new-file",
-      "source_commit": "4f03eb99",
-      "rationale": "pytest for web-to-brain lib.",
       "reapply": "checkout-subtree"
     },
     {
@@ -144,67 +346,10 @@
       "reapply": "checkout-subtree"
     },
     {
-      "path": "skills/ingest/SKILL.md",
-      "kind": "content-drift",
+      "path": "recipes/web-to-brain/tests/test_lib.py",
+      "kind": "new-file",
       "source_commit": "4f03eb99",
-      "rationale": "Upstream owns this file but Lex added: (a) 'Entry point (v0.1.0): gbrain ingest url <url> (web-to-brain recipe)' section with the --enrich-queue flag, enriched_at idempotency contract, per-host page paths, canonical-subject --slug rule, and 7-step subagent enrichment process. (b) 'Frameworks & Structures (Low-Friction Capture)' section, ~24 lines. Lost by b2f1b3b3 reapply.",
-      "reapply": "hand-merge",
-      "merge_strategy": "3-way merge: master upstream + pre-rollback Lex version + common ancestor. Use git show pre-v036-rollback:skills/ingest/SKILL.md as the source. Marker check after merge: grep -q 'gbrain ingest url' skills/ingest/SKILL.md AND grep -q 'Frameworks & Structures' skills/ingest/SKILL.md."
-    },
-    {
-      "path": "skills/brain-ops/references/engine-mode-capability-check.md",
-      "kind": "new-file",
-      "source_commit": "8c5c26d6",
-      "rationale": "Lex-authored reference. Lower urgency than CLI but still Lex IP. Dropped by b2f1b3b3.",
-      "reapply": "checkout-subtree"
-    },
-    {
-      "path": "skills/brain-ops/references/namespace-fallback-discipline.md",
-      "kind": "new-file",
-      "source_commit": "8c5c26d6",
-      "rationale": "Lex-authored reference. Dropped by b2f1b3b3.",
-      "reapply": "checkout-subtree"
-    },
-    {
-      "path": "skills/brain-ops/references/synthesis-page-writes.md",
-      "kind": "new-file",
-      "source_commit": "8c5c26d6",
-      "rationale": "Lex-authored reference. Dropped by b2f1b3b3.",
-      "reapply": "checkout-subtree"
-    },
-    {
-      "path": "skills/media-ingest/references/github-repo-ingestion.md",
-      "kind": "new-file",
-      "source_commit": "8c5c26d6",
-      "rationale": "Lex-authored reference. Dropped by b2f1b3b3.",
-      "reapply": "checkout-subtree"
-    },
-    {
-      "path": "skills/brain-ops/references/cli-default-limits.md",
-      "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "Lex-authored reference. Survived b2f1b3b3 reapply. Tracked for future upgrades.",
-      "reapply": "checkout-subtree"
-    },
-    {
-      "path": "skills/brain-ops/references/gbrain-put-slug-rules.md",
-      "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "Lex-authored reference. Survived b2f1b3b3 reapply. Tracked for future upgrades.",
-      "reapply": "checkout-subtree"
-    },
-    {
-      "path": "skills/briefing/references/cron-briefing-pattern.md",
-      "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "Lex-authored reference. Survived b2f1b3b3 reapply. Tracked for future upgrades.",
-      "reapply": "checkout-subtree"
-    },
-    {
-      "path": "skills/ingest/references/workspace-cron-ingest-patterns.md",
-      "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "Lex-authored reference (rescued from upstream delete by b2f1b3b3). Tracked for future upgrades.",
+      "rationale": "pytest for web-to-brain lib.",
       "reapply": "checkout-subtree"
     },
     {
@@ -233,13 +378,6 @@
       "kind": "new-file",
       "source_commit": "fa6a1ca0",
       "rationale": "youtube-channel-to-brain polling driver.",
-      "reapply": "checkout-subtree"
-    },
-    {
-      "path": "recipes/youtube-channel-to-brain/tests/test_lib.py",
-      "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "pytest for youtube-channel-to-brain.",
       "reapply": "checkout-subtree"
     },
     {
@@ -296,6 +434,106 @@
       "kind": "new-file",
       "source_commit": "fa6a1ca0",
       "rationale": "youtube VTT fixture: normal.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "recipes/youtube-channel-to-brain/tests/test_lib.py",
+      "kind": "new-file",
+      "source_commit": "fa6a1ca0",
+      "rationale": "pytest for youtube-channel-to-brain.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "scripts/check-customizations.sh",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "Lex fork-integration tooling (manifest-driven reapply/check). Pure Lex addition. The safety net protecting itself.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "scripts/reapply-customizations.sh",
+      "kind": "new-file",
+      "source_commit": "0e2da29f",
+      "rationale": "Lex fork-integration tooling (manifest-driven reapply/check). Pure Lex addition. The safety net protecting itself.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "skills/brain-ops/references/cli-default-limits.md",
+      "kind": "new-file",
+      "source_commit": "fa6a1ca0",
+      "rationale": "Lex-authored reference. Survived b2f1b3b3 reapply. Tracked for future upgrades.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "skills/brain-ops/references/engine-mode-capability-check.md",
+      "kind": "new-file",
+      "source_commit": "8c5c26d6",
+      "rationale": "Lex-authored reference. Lower urgency than CLI but still Lex IP. Dropped by b2f1b3b3.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "skills/brain-ops/references/gbrain-put-slug-rules.md",
+      "kind": "new-file",
+      "source_commit": "fa6a1ca0",
+      "rationale": "Lex-authored reference. Survived b2f1b3b3 reapply. Tracked for future upgrades.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "skills/brain-ops/references/namespace-fallback-discipline.md",
+      "kind": "new-file",
+      "source_commit": "8c5c26d6",
+      "rationale": "Lex-authored reference. Dropped by b2f1b3b3.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "skills/brain-ops/references/synthesis-page-writes.md",
+      "kind": "new-file",
+      "source_commit": "8c5c26d6",
+      "rationale": "Lex-authored reference. Dropped by b2f1b3b3.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "skills/briefing/references/cron-briefing-pattern.md",
+      "kind": "new-file",
+      "source_commit": "fa6a1ca0",
+      "rationale": "Lex-authored reference. Survived b2f1b3b3 reapply. Tracked for future upgrades.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "skills/ingest/SKILL.md",
+      "kind": "content-drift",
+      "source_commit": "4f03eb99",
+      "rationale": "Upstream owns this file but Lex added: (a) 'Entry point (v0.1.0): gbrain ingest url <url> (web-to-brain recipe)' section with the --enrich-queue flag, enriched_at idempotency contract, per-host page paths, canonical-subject --slug rule, and 7-step subagent enrichment process. (b) 'Frameworks & Structures (Low-Friction Capture)' section, ~24 lines. Lost by b2f1b3b3 reapply.",
+      "reapply": "hand-merge",
+      "merge_strategy": "3-way merge: master upstream + pre-rollback Lex version + common ancestor. Use git show pre-v036-rollback:skills/ingest/SKILL.md as the source. Marker check after merge: grep -q 'gbrain ingest url' skills/ingest/SKILL.md AND grep -q 'Frameworks & Structures' skills/ingest/SKILL.md."
+    },
+    {
+      "path": "skills/ingest/references/workspace-cron-ingest-patterns.md",
+      "kind": "new-file",
+      "source_commit": "fa6a1ca0",
+      "rationale": "Lex-authored reference (rescued from upstream delete by b2f1b3b3). Tracked for future upgrades.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "skills/media-ingest/references/github-repo-ingestion.md",
+      "kind": "new-file",
+      "source_commit": "8c5c26d6",
+      "rationale": "Lex-authored reference. Dropped by b2f1b3b3.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "src/cli.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "4f03eb99",
+      "rationale": "Registers 'ingest' verb in upstream's command dispatcher. Three touch points: CLI_ONLY set (add 'ingest'), command-dispatch if-block (add ingest branch), --help text (add ingest line). Was dropped by b2f1b3b3.",
+      "reapply": "hand-merge",
+      "merge_strategy": "Diff 4f03eb99^..4f03eb99 -- src/cli.ts to see the three small additions; apply each by hand against current master. Marker check: grep -q \"command === 'ingest'\" src/cli.ts after merge."
+    },
+    {
+      "path": "src/commands/ingest.ts",
+      "kind": "new-file",
+      "source_commit": "4f03eb99",
+      "rationale": "web-to-brain CLI dispatcher. Pure Lex addition. Shells into recipes/web-to-brain/scripts/web_fetch.py. Was dropped by b2f1b3b3 reapply; the verb 'gbrain ingest url' goes dead without this file.",
       "reapply": "checkout-subtree"
     }
   ]

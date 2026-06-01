@@ -41,3 +41,7 @@ test/fixtures/pglite-snapshot.version
 
 # Private brain reports — never check these in (per CLAUDE.md privacy rule)
 reports/network-intelligence/
+
+# Python bytecode caches (recipes/*) — never track (added 2026-05-31, pre-v0.42.1 hardening)
+__pycache__/
+*.pyc

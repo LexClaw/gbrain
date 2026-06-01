@@ -1,0 +1,7 @@
+# /robots.txt for example test fixture
+User-agent: gbrain-web-to-brain
+Disallow: /private/
+Disallow: /no-bots/
+
+User-agent: *
+Allow: /
