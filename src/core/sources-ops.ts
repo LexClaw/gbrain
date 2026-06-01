@@ -50,6 +50,8 @@ import {
   type RepoState,
 } from './git-remote.ts';
 import { gbrainPath } from './config.ts';
+import { isValidSourceId } from './source-id.ts';
+import { resolveSourceWithTier, type SourceTier } from './source-resolver.ts';
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -79,8 +81,6 @@ export class SourceOpError extends Error {
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-const SOURCE_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
-
 export interface SourceRow {
   id: string;
   name: string;
@@ -89,6 +89,20 @@ export interface SourceRow {
   last_sync_at: Date | null;
   config: Record<string, unknown>;
   created_at: Date;
+  /**
+   * v0.40.3.0: per-source CR mode override. NULL falls through to global
+   * mode bundle. Written only by `gbrain sources set-cr-mode <id> <mode>`
+   * (CLI-write-only per D15 security gate); MCP / OAuth callers cannot
+   * mutate this field.
+   */
+  contextual_retrieval_mode?: string | null;
+  /**
+   * v0.40.3.0: per-source mount-frontmatter trust gate (D15). FALSE for
+   * mounted sources by default. Flipped via
+   * `gbrain mounts trust-frontmatter <id>`. Host source (id='default') is
+   * always trusted in the resolver regardless of this column value.
+   */
+  trust_frontmatter_overrides?: boolean;
 }
 
 export interface SourceListEntry {
@@ -142,8 +156,14 @@ export interface RemoveSourceOpts {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Validate via the canonical regex from `source-id.ts` but rethrow as the
+ * sources-ops-tagged error so `gbrain sources add` keeps its user-facing
+ * SourceOpError shape. The regex itself is in one place; only the error
+ * envelope differs per caller.
+ */
 function validateSourceId(id: string): void {
-  if (!SOURCE_ID_RE.test(id)) {
+  if (!isValidSourceId(id)) {
     throw new SourceOpError(
       'invalid_id',
       `Invalid source id "${id}". Must be 1-32 lowercase alnum chars with optional interior hyphens.`,
@@ -425,6 +445,47 @@ export async function resolveDefaultSource(engine: BrainEngine): Promise<string>
     'multiple_sources_ambiguous',
     ids,
   );
+}
+
+/** Result of `resolveScopedSourceOrThrow`: the resolved source id plus the
+ * tier that won, so callers can nudge (sole_non_default) or surface the
+ * source in their output envelope. */
+export interface ScopedSourceResolution {
+  source_id: string;
+  tier: SourceTier;
+}
+
+/**
+ * Source scope for the structural-retrieval commands (`code-callers` /
+ * `code-callees`) when neither `--source` nor `--all-sources` is given.
+ *
+ * Runs the FULL 7-tier resolution chain via `resolveSourceWithTier`
+ * (flag → env → dotfile → local_path → brain_default → sole_non_default →
+ * seed_default), so a `.gbrain-source` pin (or any real signal) selects the
+ * source. The multi-source ambiguity guard (`resolveDefaultSource`) is
+ * applied ONLY when the chain matched nothing real (tier `seed_default`):
+ * 1 source → returns it, 0 → `no_sources` throw, 2+ → `multiple_sources_ambiguous`.
+ *
+ * Contrast with `resolveSourceId` (silently returns `'default'` and never
+ * throws on ambiguity) — this helper deliberately preserves the loud
+ * multi-source error when there's genuinely no signal.
+ *
+ * @throws SourceResolutionError  on a no-signal 0/2+-source brain (seed_default tier).
+ * @throws Error ("Source \"…\" not found." / "Invalid …")  on a bad pin / env value
+ *         via `assertSourceExists` inside `resolveSourceWithTier` — callers should
+ *         surface these as clean usage errors, not uncaught stacks.
+ */
+export async function resolveScopedSourceOrThrow(
+  engine: BrainEngine,
+  cwd: string = process.cwd(),
+): Promise<ScopedSourceResolution> {
+  const resolved = await resolveSourceWithTier(engine, null, cwd);
+  if (resolved.tier !== 'seed_default') {
+    return { source_id: resolved.source_id, tier: resolved.tier };
+  }
+  // Nothing in the chain matched → apply the ambiguity guard (may throw).
+  const id = await resolveDefaultSource(engine);
+  return { source_id: id, tier: 'seed_default' };
 }
 
 // ── listSources ─────────────────────────────────────────────────────────────
