@@ -32,7 +32,7 @@ import time
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -258,6 +258,209 @@ def parse_rss(xml_text: str) -> list[Video]:
 def fetch_rss(channel_id: str, *, session: Optional[requests.Session] = None) -> list[Video]:
     text = http_get(RSS_URL.format(channel_id=channel_id), session=session)
     return parse_rss(text)
+
+
+def fetch_video_metadata(video_id: str) -> dict:
+    try:
+        proc = subprocess.run(
+            [YT_DLP, "--dump-json", "--skip-download", f"https://www.youtube.com/watch?v={video_id}"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise DownloadError(f"yt-dlp metadata invocation failed for {video_id}: {e}") from e
+    if proc.returncode != 0:
+        raise DownloadError(f"yt-dlp metadata {video_id} exit {proc.returncode}: {proc.stderr.strip()[:500]}")
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line:
+            return json.loads(line)
+    raise DownloadError(f"yt-dlp metadata {video_id} returned no JSON")
+
+
+def fetch_uploads_flat(channel_id: str) -> list[dict]:
+    url = f"https://www.youtube.com/channel/{channel_id}/videos"
+    try:
+        proc = subprocess.run(
+            [YT_DLP, "--flat-playlist", "--dump-json", url],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise DownloadError(f"yt-dlp flat playlist invocation failed: {e}") from e
+    if proc.returncode != 0:
+        raise DownloadError(f"yt-dlp flat playlist exit {proc.returncode}: {proc.stderr.strip()[:500]}")
+
+    out = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        out.append(json.loads(line))
+    return out
+
+
+def video_slug_exists(slug: str, *, bin: str = GBRAIN_BIN) -> bool:
+    try:
+        proc = subprocess.run([bin, "get", slug], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+def _parse_yt_date(value: object) -> Optional[date]:
+    if not value:
+        return None
+    s = str(value)
+    try:
+        return datetime.strptime(s, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _meta_to_video(meta: dict, channel: ChannelConfig) -> Video:
+    video_id = str(meta.get("id") or "")
+    upload_date = _parse_yt_date(meta.get("upload_date"))
+    timestamp = meta.get("timestamp") or meta.get("release_timestamp")
+    if upload_date:
+        published = upload_date.isoformat() + "T00:00:00+00:00"
+    elif timestamp:
+        published = datetime.fromtimestamp(int(timestamp), timezone.utc).isoformat(timespec="seconds")
+    else:
+        published = ""
+    return Video(
+        video_id=video_id,
+        title=str(meta.get("title") or video_id),
+        url=str(meta.get("webpage_url") or meta.get("url") or f"https://www.youtube.com/watch?v={video_id}"),
+        published=published,
+        channel_id=str(meta.get("channel_id") or channel.channel_id),
+        channel_title=str(meta.get("channel") or meta.get("uploader") or ""),
+        description=str(meta.get("description") or ""),
+        duration_seconds=int(meta.get("duration") or 0),
+        is_premiere=str(meta.get("live_status") or "").lower() in ("is_upcoming", "is_premiere"),
+    )
+
+
+def backfill_channel(channel: ChannelConfig, cursors: dict[str, ChannelCursor], *,
+                     since: date, max_videos: Optional[int] = None, dry_run: bool = False) -> dict:
+    summary = {
+        "channel": channel.handle,
+        "channel_id": channel.channel_id,
+        "since": since.isoformat(),
+        "videos_seen": 0,
+        "videos_ingested": 0,
+        "videos_skipped": 0,
+        "cursor_skipped": 0,
+        "existing_skipped": 0,
+        "premiere_skipped": 0,
+        "short_skipped": 0,
+        "transcript_failures": [],
+        "errors": [],
+    }
+    cur = cursors.get(channel.channel_id, ChannelCursor(handle=channel.handle))
+    cur.handle = channel.handle
+    cur.last_polled = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    flat_entries = fetch_uploads_flat(channel.channel_id)
+    selected: list[Video] = []
+    for entry in flat_entries:
+        video_id = str(entry.get("id") or "")
+        if not video_id:
+            continue
+        try:
+            meta = fetch_video_metadata(video_id)
+        except (DownloadError, json.JSONDecodeError) as e:
+            summary["errors"].append(f"metadata:{video_id}:{e}")
+            continue
+
+        upload_date = _parse_yt_date(meta.get("upload_date"))
+        if upload_date and upload_date < since:
+            continue
+
+        v = _meta_to_video(meta, channel)
+        if not v.published:
+            summary["errors"].append(f"metadata:{video_id}:missing upload_date")
+            continue
+        summary["videos_seen"] += 1
+        selected.append(v)
+        if max_videos and len(selected) >= max_videos:
+            break
+
+    if not dry_run and selected:
+        ensure_author_page(channel)
+
+    workdir_base = Path(tempfile.mkdtemp(prefix="yt-backfill-"))
+    try:
+        for v in reversed(selected):
+            if cur.last_video_id and v.video_id == cur.last_video_id:
+                summary["cursor_skipped"] += 1
+                summary["videos_skipped"] += 1
+                log(f"skip cursor baseline: {v.video_id} ({channel.handle})")
+                continue
+            if v.is_premiere:
+                summary["premiere_skipped"] += 1
+                summary["videos_skipped"] += 1
+                log(f"skip premiere: {v.video_id} ({channel.handle})")
+                continue
+            if channel.min_duration_seconds and v.duration_seconds and v.duration_seconds < channel.min_duration_seconds:
+                summary["short_skipped"] += 1
+                summary["videos_skipped"] += 1
+                log(f"skip short ({v.duration_seconds}s): {v.video_id}")
+                continue
+
+            ingested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            slug, _ = build_page(v, channel, None, ingested_at=ingested_at)
+            if video_slug_exists(slug):
+                summary["existing_skipped"] += 1
+                summary["videos_skipped"] += 1
+                log(f"skip existing page: {slug}")
+                continue
+
+            transcript_path = None
+            transcript_text = None
+            if not dry_run:
+                video_workdir = workdir_base / v.video_id
+                try:
+                    transcript_path, transcript_text = fetch_transcript(
+                        v, fallback=channel.transcript_fallback, workdir=video_workdir,
+                    )
+                except (DownloadError, TranscriptUnavailable, OSError) as e:
+                    log(f"transcript fetch failed for {v.video_id}: {e}", level="WARN")
+                    summary["transcript_failures"].append(v.video_id)
+                if transcript_text is None:
+                    summary["transcript_failures"].append(v.video_id)
+
+            slug, content = build_page(v, channel, transcript_text, ingested_at=ingested_at)
+            if dry_run:
+                log(f"[dry-run] would write {slug}")
+                summary["videos_ingested"] += 1
+                continue
+
+            try:
+                gbrain_put(slug, content)
+            except DownloadError as e:
+                log(f"gbrain put failed for {slug}: {e}", level="ERROR")
+                summary["errors"].append(f"put:{v.video_id}:{e}")
+                continue
+
+            if transcript_path is not None:
+                gbrain_upload_raw(transcript_path, slug)
+
+            try:
+                enqueue_enrichment(v, channel, slug, transcript_text)
+            except OSError as e:
+                log(f"enqueue_enrichment failed for {v.video_id}: {e}", level="WARN")
+
+            summary["videos_ingested"] += 1
+            log(f"backfilled {v.video_id} -> {slug}")
+    finally:
+        try:
+            shutil.rmtree(workdir_base, ignore_errors=True)
+        except OSError:
+            pass
+
+    cur.last_success = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    cur.consecutive_failures = 0
+    cursors[channel.channel_id] = cur
+    return summary
 
 
 # ---------- Cursor ----------

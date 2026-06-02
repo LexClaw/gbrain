@@ -5,6 +5,7 @@ Modes:
   --subscribe @Handle [@Handle ...]   Add channels to channels.yaml (resolves UC id)
   --once                              Poll all subscribed channels once
   --once --dry-run                    Smoke-test poll: parse RSS, no writes
+  --backfill CHANNEL_ID               Backfill an existing channel catalog
   --enrich-queue                      Drain enrichment queue files (consumed by second cron)
   --status                            Print cursor + queue summary
 """
@@ -17,7 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # Allow running from the recipe dir directly without install
@@ -71,6 +72,57 @@ def cmd_once(dry_run: bool) -> int:
 
         yl.heartbeat("poll_complete", total_ingested=total_ingested, per_channel=per_channel, dry_run=dry_run)
         print(json.dumps({"total_ingested": total_ingested, "per_channel": per_channel}, indent=2))
+    return 0
+
+
+def _parse_since(value: str | None) -> date:
+    if not value:
+        return datetime.now(timezone.utc).date() - timedelta(days=90)
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def cmd_backfill(channel_id: str, since_arg: str | None, max_videos: int | None, dry_run: bool) -> int:
+    channels = yl.load_channels()
+    channel = next((c for c in channels if c.channel_id == channel_id), None)
+    if channel is None:
+        print(f"channel not found in channels.yaml: {channel_id}", file=sys.stderr)
+        return 2
+
+    try:
+        since = _parse_since(since_arg)
+    except ValueError:
+        print("--since must be YYYY-MM-DD", file=sys.stderr)
+        return 2
+
+    with yl.poll_lock() as acquired:
+        if not acquired:
+            yl.log("concurrent backfill skipped (lock held)")
+            return 0
+
+        try:
+            cursors = yl.load_cursor()
+        except (OSError, json.JSONDecodeError) as e:
+            yl.log(f"cursor.json corrupt: {e}", level="ERROR")
+            yl.heartbeat("cursor_corrupt", error=str(e))
+            return 3
+
+        try:
+            summary = yl.backfill_channel(
+                channel, cursors, since=since, max_videos=max_videos, dry_run=dry_run,
+            )
+        except (yl.DownloadError, json.JSONDecodeError) as e:
+            yl.log(f"backfill failed for {channel.handle}: {e}", level="ERROR")
+            yl.heartbeat("backfill_failed", channel_id=channel_id, error=str(e), dry_run=dry_run)
+            return 4
+
+        if not dry_run:
+            try:
+                yl.save_cursor(cursors)
+            except OSError as e:
+                yl.log(f"cursor save failed: {e}", level="ERROR")
+
+        yl.heartbeat("backfill_complete", summary=summary, dry_run=dry_run)
+        print(json.dumps(summary, indent=2))
     return 0
 
 
@@ -173,6 +225,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--subscribe", nargs="+", metavar="HANDLE")
     p.add_argument("--once", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--backfill", metavar="CHANNEL_ID")
+    p.add_argument("--since", metavar="YYYY-MM-DD")
+    p.add_argument("--max", type=int, dest="max_videos", metavar="N")
     p.add_argument("--enrich-queue", action="store_true")
     p.add_argument("--status", action="store_true")
     args = p.parse_args(argv)
@@ -183,6 +238,8 @@ def main(argv: list[str]) -> int:
         return cmd_enrich_queue()
     if args.once:
         return cmd_once(args.dry_run)
+    if args.backfill:
+        return cmd_backfill(args.backfill, args.since, args.max_videos, args.dry_run)
     if args.status:
         return cmd_status()
     p.print_help()

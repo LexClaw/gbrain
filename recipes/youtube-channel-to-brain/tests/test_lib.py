@@ -133,6 +133,33 @@ def test_parse_rss_malformed_raises(isolate_state):
         yl.parse_rss("<not xml")
 
 
+def test_backfill_channel_reuses_ingest_and_dedups(isolate_state, monkeypatch):
+    yl = isolate_state
+    ch = yl.ChannelConfig(handle="@AlexFinnOfficial", channel_id="UCfinn", author_slug="alexfinnofficial")
+    flat = [{"id": "old"}, {"id": "cursor"}, {"id": "new"}]
+    metadata = {
+        "old": {"id": "old", "title": "Old", "upload_date": "20260201", "duration": 600},
+        "cursor": {"id": "cursor", "title": "Cursor", "upload_date": "20260501", "duration": 600},
+        "new": {"id": "new", "title": "New", "upload_date": "20260502", "duration": 600},
+    }
+    monkeypatch.setattr(yl, "fetch_uploads_flat", lambda channel_id: flat)
+    monkeypatch.setattr(yl, "fetch_video_metadata", lambda video_id: metadata[video_id])
+    monkeypatch.setattr(yl, "fetch_transcript", lambda v, **kw: (None, "transcript"))
+    monkeypatch.setattr(yl, "video_slug_exists", lambda slug: "old" in slug)
+    monkeypatch.setattr(yl, "ensure_author_page", lambda *a, **k: None)
+    monkeypatch.setattr(yl, "gbrain_upload_raw", lambda *a, **k: True)
+    monkeypatch.setattr(yl, "enqueue_enrichment", lambda *a, **k: yl.QUEUE_DIR / "new.json")
+    put_calls = []
+    monkeypatch.setattr(yl, "gbrain_put", lambda slug, content, bin="gbrain": put_calls.append(slug))
+
+    cursors = {ch.channel_id: yl.ChannelCursor(handle=ch.handle, last_video_id="cursor")}
+    summary = yl.backfill_channel(ch, cursors, since=__import__("datetime").date(2026, 4, 1))
+
+    assert summary["videos_ingested"] == 1
+    assert summary["cursor_skipped"] == 1
+    assert put_calls == [s for s in put_calls if "new" in s]
+
+
 # ---------- cursor IO + atomic write ----------
 
 
