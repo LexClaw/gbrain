@@ -196,7 +196,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
     // autopilot are the production paths that opt in.
     childSupervisor = new ChildWorkerSupervisor({
       cliPath,
-      args: ['jobs', 'work', '--max-rss', '2048'],
+      args: ['jobs', 'work', '--max-rss', String(Number(process.env.GBRAIN_AUTOPILOT_MAX_RSS) || 2048)],
       // process.env clone; autopilot doesn't gate shell jobs the way the
       // standalone supervisor does (autopilot is the operator-trust path).
       env: { ...process.env },
