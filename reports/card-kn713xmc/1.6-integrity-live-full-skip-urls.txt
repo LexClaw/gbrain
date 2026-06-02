@@ -1,0 +1,113 @@
+[integrity.auto] start
+[integrity.auto] 496/49556 (1%) 1492333755581333656-20260515060901
+[integrity.auto] 992/49556 (2%) ai-agentic/wiki/ai-agentic-systems-overview
+[integrity.auto] 1488/49556 (3%) ai-agentic/wiki/claude-ai-financial-management-capabilities
+[integrity.auto] 1984/49556 (4%) ai-agentic/wiki/hermes-agent-open-source-ai-agent-framework
+[integrity.auto] 2480/49556 (5%) ai-agentic/wiki/openclaw-security-patch-base64-decoding-path-guard
+[integrity.auto] 2976/49556 (6%) ai-agentic/wiki/tweet-2029956482406772925
+[integrity.auto] 3472/49556 (7%) ai/concepts/ai-content-detection-and-assessment
+[integrity.auto] 3968/49556 (8%) ai/concepts/cursor-project-rules-and-karpathy-guidelines-setup
+[integrity.auto] 4464/49556 (9%) ai/concepts/heygen-ai-voices-api-and-voice-interface
+[integrity.auto] 4960/49556 (10%) ai/concepts/open-harness-architecture-for-agent-memory-ownership
+[integrity.auto] 5456/49556 (11%) ai/concepts/sora-2-prompting-guide-template-and-advanced-techniques
+[integrity.auto] 5952/49556 (12%) ai/entities/agentic-wallets-3554
+[integrity.auto] 6448/49556 (13%) ai/raw/processed/calesthio-openmontage-claude-skills-heygen-references-assetsmd
+[integrity.auto] 6944/49556 (14%) ai/raw/processed/minimax-ai-skills-skills-react-native-dev-references-formsmd
+[integrity.auto] 7440/49556 (15%) ai/raw/tweet-2042215865089970662
+[integrity.auto] 7936/49556 (16%) archive/enrichment-residue-2026-05/ai/raw/processed/1490908824754978909
+[integrity.auto] 8432/49556 (17%) archive/enrichment-residue-2026-05/ai/raw/processed/tweet-2024656026876678498
+[integrity.auto] 8928/49556 (18%) archive/enrichment-residue-2026-05/ai/raw/processed/tweet-2035296641637613793
+[integrity.auto] 9424/49556 (19%) archive/enrichment-residue-2026-05/business/raw/1466811705857413133-20260426060532
+[integrity.auto] 9920/49556 (20%) archive/enrichment-residue-2026-05/business/raw/tweet-1986431521235083764-20260428063945
+[integrity.auto] 10416/49556 (21%) archive/enrichment-residue-2026-05/business/raw/tweet-1998477786902835607
+[integrity.auto] 10912/49556 (22%) archive/enrichment-residue-2026-05/business/raw/tweet-2010939496830030038-20260428065024
+[integrity.auto] 11408/49556 (23%) archive/enrichment-residue-2026-05/business/raw/tweet-2021729530503999612-20260428065527
+[integrity.auto] 11904/49556 (24%) archive/enrichment-residue-2026-05/business/raw/tweet-2037560037317787812-20260426062113
+[integrity.auto] 12400/49556 (25%) archive/enrichment-residue-2026-05/content/raw/1492334436505751632-20260426061432
+[integrity.auto] 12896/49556 (26%) archive/enrichment-residue-2026-05/content/raw/tweet-2031882923394171169
+[integrity.auto] 13392/49556 (27%) archive/enrichment-residue-2026-05/content/raw/tweet-2043061506586349863-20260428070021
+[integrity.auto] 13888/49556 (28%) archive/enrichment-residue-2026-05/crypto/raw/tweet-1991827270093398054-20260428064250
+[integrity.auto] 14384/49556 (29%) archive/enrichment-residue-2026-05/crypto/raw/tweet-2005352825942143136
+[integrity.auto] 14880/49556 (30%) archive/enrichment-residue-2026-05/crypto/raw/tweet-2018263124663525824-20260428065341
+[integrity.auto] 15376/49556 (31%) archive/enrichment-residue-2026-05/finance/raw/articles/tweet-1950621666775589187
+[integrity.auto] 15872/49556 (32%) archive/enrichment-residue-2026-05/finance/raw/tweet-1993225467747357063-20260426063742
+[integrity.auto] 16368/49556 (33%) archive/enrichment-residue-2026-05/finance/raw/tweet-2000245928557752601-20260425064030
+[integrity.auto] 16864/49556 (34%) archive/enrichment-residue-2026-05/finance/raw/tweet-2009019920898732120-20260426064335
+[integrity.auto] 17360/49556 (35%) archive/enrichment-residue-2026-05/finance/raw/tweet-2016337134802591896-20260427064621
+[integrity.auto] 17856/49556 (36%) archive/enrichment-residue-2026-05/finance/raw/tweet-2021877860001042524-20260428065533
+[integrity.auto] 18352/49556 (37%) archive/enrichment-residue-2026-05/fintech/raw/tweet-1986615993813377417
+[integrity.auto] 18848/49556 (38%) archive/enrichment-residue-2026-05/fintech/raw/tweet-2017681952166580362
+[integrity.auto] 19344/49556 (39%) archive/enrichment-residue-2026-05/open-source/raw/processed/1486339936436228220
+[integrity.auto] 19840/49556 (40%) archive/enrichment-residue-2026-05/personal-development/raw/processed/1490456452685369455-20260425063256
+[integrity.auto] 20336/49556 (41%) archive/enrichment-residue-2026-05/politics/raw/tweet-2000655983140286876
+[integrity.auto] 20832/49556 (42%) archive/enrichment-residue-2026-05/politics/raw/tweet-2017262731963818440-20260427064707
+[integrity.auto] 21328/49556 (43%) archive/enrichment-residue-2026-05/productivity-tools/raw/1487990447115735070-20260427061619
+[integrity.auto] 21824/49556 (44%) archive/enrichment-residue-2026-05/productivity-tools/raw/1495549148164915270
+[integrity.auto] 22320/49556 (45%) archive/enrichment-residue-2026-05/productivity-tools/raw/tweet-2032020014413570472-20260427060455
+[integrity.auto] 22816/49556 (46%) archive/enrichment-residue-2026-05/productivity-tools/raw/tweet-2042059926693146789-20260427062750
+[integrity.auto] 23312/49556 (47%) archive/enrichment-residue-2026-05/web-security/raw/tweet-2030773054402609178-20260427064930
+[integrity.auto] 23808/49556 (48%) business/concepts/bipartisan-credit-card-competition-act-amendment-during-clarity-act-senate-markup
+[integrity.auto] 24304/49556 (49%) business/concepts/open-source-ai-coding-agents-with-internal-architecture-released
+[integrity.auto] 24800/49556 (50%) business/raw/processed/1495890386608980029
+[integrity.auto] 25296/49556 (51%) business/wiki/2024-global-economic-volatility-trends
+[integrity.auto] 25792/49556 (52%) business/wiki/ihs-seo-audit-master-research
+[integrity.auto] 26288/49556 (53%) companies/cardano
+[integrity.auto] 26784/49556 (54%) concepts/superpowers
+[integrity.auto] 27280/49556 (55%) content/raw/processed/tweet-2040750605212545530
+[integrity.auto] 27776/49556 (56%) crypto/concepts/binance-liquidating-bitcoin-and-ethereum-ahead-of-trump-speech
+[integrity.auto] 28272/49556 (57%) crypto/concepts/swift-partners-with-bny-mellon-on-blockchain-ledger-for-cross-border-payments
+[integrity.auto] 28768/49556 (58%) crypto/wiki/90-day-rock-tracker
+[integrity.auto] 29264/49556 (59%) crypto/wiki/chainlinks-staking-v2-enhanced-decentralized-oracle-network-participation
+[integrity.auto] 29760/49556 (60%) crypto/wiki/crypto-wallet-security-and-cryptocurrency-market-volatility-social-engineering
+[integrity.auto] 30256/49556 (61%) crypto/wiki/cryptographic-financial-innovation-trends
+[integrity.auto] 30752/49556 (62%) crypto/wiki/using-claude-ai-for-stock-market-analysis-and-trading-strategies
+[integrity.auto] 31248/49556 (63%) domain/ai/concepts/autonomous-agent-phone-integration-via-api-orchestration
+[integrity.auto] 31744/49556 (64%) domain/ai/concepts/prompt-templates
+[integrity.auto] 32240/49556 (65%) domain/ai/physically-based-rendering
+[integrity.auto] 32736/49556 (66%) domain/business/concepts/customer-support
+[integrity.auto] 33232/49556 (67%) domain/crypto/concepts/alt-season-driven-by-business-cycle
+[integrity.auto] 33728/49556 (68%) domain/crypto/real-world-assets-tokenization
+[integrity.auto] 34224/49556 (69%) domain/finance/concepts/bitcoin-reserve-asset-adoption-model
+[integrity.auto] 34720/49556 (70%) domain/personal-development/concepts/continuous-improvement
+[integrity.auto] 35216/49556 (71%) faith/wiki/joshua-leadership-and-conquest-of-canaan
+[integrity.auto] 35712/49556 (72%) finance/concepts/etf-front-running-during-market-manipulation-events
+[integrity.auto] 36208/49556 (73%) finance/concepts/vaneck-bitcoin-reserve-asset-thesis-3m-price-target-by-2050
+[integrity.auto] 36704/49556 (74%) machine-learning/wiki/large-context-window-language-models
+[integrity.auto] 37200/49556 (75%) operations/wiki/decisions-exported-from-memory-graph
+[integrity.auto] 37696/49556 (76%) operations/wiki/seo-skill-absorption-plan
+[integrity.auto] 38192/49556 (77%) people/jeremiah-our-city
+[integrity.auto] 38688/49556 (78%) personal-development/concepts/claude-prompts-for-youtube-channel-growth-strategy-0-to-monetization-in-90-days
+[integrity.auto] 39184/49556 (79%) productivity-tools/concepts/codeium-ai-operating-system-for-product-development
+[integrity.auto] 39680/49556 (80%) sessions/0000-00-00-2b4ce029
+[integrity.auto] 40176/49556 (81%) sessions/0000-00-00-5ebbef2d
+[integrity.auto] 40672/49556 (82%) sessions/0000-00-00-951fb64d
+[integrity.auto] 41168/49556 (83%) sessions/0000-00-00-ce5b9ce9
+[integrity.auto] 41664/49556 (84%) sessions/2026-03-31-1643-85902f5b
+[integrity.auto] 42160/49556 (85%) sessions/2026-04-05-1750-125148
+[integrity.auto] 42656/49556 (86%) sessions/2026-04-10-1410-f08240
+[integrity.auto] 43152/49556 (87%) sessions/2026-04-14-1534-fd94de
+[integrity.auto] 43648/49556 (88%) sessions/2026-04-25-1734-9da0c2
+[integrity.auto] 44144/49556 (89%) sessions/2026-04-30-2134-c91765
+[integrity.auto] 44613/49556 (90%) sessions/2026-05-06-1303-3a1cdf
+[integrity.auto] 45109/49556 (91%) sessions/2026-05-12-2355-ac4c0c
+[integrity.auto] 45605/49556 (92%) sessions/2026-05-17-2310-d4530e
+[integrity.auto] 46101/49556 (93%) sessions/2026-05-20-1333-f3f7f2
+[integrity.auto] 46597/49556 (94%) sessions/2026-05-25-0910-5bcb2a
+[integrity.auto] 47093/49556 (95%) sources/github/rohitg00/agentmemory/src-functions-migrate-ts
+[integrity.auto] 47589/49556 (96%) sources/vox/2026-04-11-telegram-just-opened-bot-to-bot-communication-bots-can-trigg
+[integrity.auto] 48085/49556 (97%) sources/youtube/discovercrypto/2026-03-07-q11brihcb24-trump-triggers-blackrock-panic-bitcoin-in-danger
+[integrity.auto] 48581/49556 (98%) tweet-2030979189906534800-20260515060107
+[integrity.auto] 49077/49556 (99%) web-security/concepts/crucix-open-source-intelligence-terminal-alerts-anomalies-across-27-global-data-feeds
+[integrity.auto] 49556/49556 (100%) workspace/wiki_schema
+[integrity.auto] 49556/49556 (100%) done
+
+=== integrity auto summary ===
+Pages processed: 49556
+Auto-repaired (≥0.8): 0
+Review queue (≥0.5 <0.8): 0
+Skipped (<0.5): 566
+Resolver errors: 17
+
+Review queue: /Users/TJ/.gbrain/integrity-review.md
+Skipped log:  /Users/TJ/.gbrain/integrity.log.jsonl
+Progress:     /Users/TJ/.gbrain/integrity-progress.jsonl

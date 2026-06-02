@@ -1,0 +1,26 @@
+
+--- integrity live fresh limit 5000 ---
+[integrity.auto] start
+[integrity.auto] 496/49556 (1%) 1492333755581333656-20260515060901
+[integrity.auto] 992/49556 (2%) ai-agentic/wiki/ai-agentic-systems-overview
+[integrity.auto] 1488/49556 (3%) ai-agentic/wiki/claude-ai-financial-management-capabilities
+[integrity.auto] 1969/49556 (3%) ai-agentic/wiki/grok-multi-image-to-video-feature
+[integrity.auto] 2465/49556 (4%) ai-agentic/wiki/openclaw-personal-ai-assistant-with-advanced-automation-capabilities
+[integrity.auto] 2543/49556 (5%) ai-agentic/wiki/paperclip-ai-installation-and-initial-setup
+[integrity.auto] 2654/49556 (5%) ai-agentic/wiki/release-openclaw-202647-enriched
+[integrity.auto] 3150/49556 (6%) ai-agentic/wiki/tweet-2040829004111048901
+[integrity.auto] 3633/49556 (7%) ai/concepts/avoid-layout-thrashing-in-javascript
+[integrity.auto] 4129/49556 (8%) ai/concepts/elevenlabs-system-tools-for-conversational-agents
+[integrity.auto] 4625/49556 (9%) ai/concepts/latex-rendering-in-manim
+[integrity.auto] 4877/49556 (9%) ai/concepts/mobile-optimization-and-url-structure-technical-seo-checklist
+[integrity.auto] 5000/49556 (10%) done
+
+=== integrity auto summary ===
+Pages processed: 5000
+Auto-repaired (≥0.8): 0
+Review queue (≥0.5 <0.8): 8
+Skipped (<0.5): 26
+
+Review queue: /Users/TJ/.gbrain/integrity-review.md
+Skipped log:  /Users/TJ/.gbrain/integrity.log.jsonl
+Progress:     /Users/TJ/.gbrain/integrity-progress.jsonl

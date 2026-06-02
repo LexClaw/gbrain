@@ -1,0 +1,31 @@
+
+--- integrity dry-run fresh limit 5000 ---
+[integrity.auto] start
+[integrity.auto] 496/49556 (1%) 1492333755581333656-20260515060901
+[integrity.auto] 992/49556 (2%) ai-agentic/wiki/ai-agentic-systems-overview
+[integrity.auto] 1488/49556 (3%) ai-agentic/wiki/claude-ai-financial-management-capabilities
+[integrity.auto] 1635/49556 (3%) ai-agentic/wiki/content-retrieval-error-on-xcom-platform
+[integrity.auto] 1803/49556 (3%) ai-agentic/wiki/fixgateway-strip-tool_call-and-tool_result-xml-blocks-from-assistant-visible-tex
+[integrity.auto] 2139/49556 (4%) ai-agentic/wiki/llmfit-revolutionary-local-ai-model-compatibility-tool
+[integrity.auto] 2542/49556 (5%) ai-agentic/wiki/paperclip-ai-autonomous-business-orchestration
+[integrity.auto] 2602/49556 (5%) ai-agentic/wiki/prompt-engineering-advanced
+[integrity.auto] 2632/49556 (5%) ai-agentic/wiki/real-time-voice-ai-technologies
+[integrity.auto] 2654/49556 (5%) ai-agentic/wiki/release-openclaw-202647-enriched
+[integrity.auto] 3150/49556 (6%) ai-agentic/wiki/tweet-2040829004111048901
+[integrity.auto] 3268/49556 (6%) ai-agentic/wiki/voice-ai-agent-development-strategies
+[integrity.auto] 3633/49556 (7%) ai/concepts/avoid-layout-thrashing-in-javascript
+[integrity.auto] 3952/49556 (7%) ai/concepts/cross-request-lru-caching-pattern
+[integrity.auto] 4448/49556 (8%) ai/concepts/hermes-first-conversation-memory-and-skill-auto-creation-from-chat
+[integrity.auto] 4865/49556 (9%) ai/concepts/minimax-skills-pr-review-process
+[integrity.auto] 4877/49556 (9%) ai/concepts/mobile-optimization-and-url-structure-technical-seo-checklist
+[integrity.auto] 5000/49556 (10%) done
+
+=== integrity auto summary (DRY RUN) ===
+Pages processed: 5000
+Auto-repaired (≥0.8): 0
+Review queue (≥0.5 <0.8): 7
+Skipped (<0.5): 26
+
+Review queue: /Users/TJ/.gbrain/integrity-review.md
+Skipped log:  /Users/TJ/.gbrain/integrity.log.jsonl
+Progress:     /Users/TJ/.gbrain/integrity-progress.jsonl

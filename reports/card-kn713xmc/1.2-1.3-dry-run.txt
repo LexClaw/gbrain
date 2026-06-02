@@ -1,0 +1,10 @@
+before: {"tweet_total":355,"tweet_missing":92,"author_missing":644,"bad_x_handle":0}
+mode=DRY-RUN; skipApi=false
+X API batch 1: requested=92, resolved=88
+planned mutations by reason:
+88	1.2 tweet: x_handle from X API v2 tweet lookup
+3	1.3 author-chain: propagated people/<slug>.x_handle
+2	1.3 author-chain: x_handle from author field
+127	1.3 author-chain: x_handle from source URL
+planned total=220
+Dry-run only. Re-run with --live to apply.
