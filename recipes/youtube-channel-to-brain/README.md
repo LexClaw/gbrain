@@ -23,6 +23,9 @@ python3 scripts/youtube_poll.py --once --dry-run
 # Real first poll
 python3 scripts/youtube_poll.py --once
 
+# Backfill catalog videos and streams (streams are included by default)
+python3 scripts/youtube_poll.py --backfill UCjemQfjaXAzA-95RKoy9n_g --since 2026-01-01 --include-streams --dry-run --max 5
+
 # Drain the enrichment queue (the 15-min cron does this automatically)
 python3 scripts/youtube_poll.py --enrich-queue
 

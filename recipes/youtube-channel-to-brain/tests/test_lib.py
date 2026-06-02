@@ -142,7 +142,7 @@ def test_backfill_channel_reuses_ingest_and_dedups(isolate_state, monkeypatch):
         "cursor": {"id": "cursor", "title": "Cursor", "upload_date": "20260501", "duration": 600},
         "new": {"id": "new", "title": "New", "upload_date": "20260502", "duration": 600},
     }
-    monkeypatch.setattr(yl, "fetch_uploads_flat", lambda channel_id: flat)
+    monkeypatch.setattr(yl, "fetch_uploads_flat", lambda channel_id, **kw: flat)
     monkeypatch.setattr(yl, "fetch_video_metadata", lambda video_id: metadata[video_id])
     monkeypatch.setattr(yl, "fetch_transcript", lambda v, **kw: (None, "transcript"))
     monkeypatch.setattr(yl, "video_slug_exists", lambda slug: "old" in slug)
@@ -158,6 +158,42 @@ def test_backfill_channel_reuses_ingest_and_dedups(isolate_state, monkeypatch):
     assert summary["videos_ingested"] == 1
     assert summary["cursor_skipped"] == 1
     assert put_calls == [s for s in put_calls if "new" in s]
+
+
+def test_fetch_backfill_flat_includes_streams_and_dedups(isolate_state, monkeypatch):
+    yl = isolate_state
+    calls = []
+
+    def fake_fetch(channel_id, *, tab="videos"):
+        calls.append((channel_id, tab))
+        if tab == "videos":
+            return [{"id": "video"}, {"id": "shared"}]
+        return [{"id": "stream"}, {"id": "shared"}]
+
+    monkeypatch.setattr(yl, "fetch_uploads_flat", fake_fetch)
+
+    entries = yl.fetch_backfill_flat("UCx", include_streams=True)
+
+    assert [e["id"] for e in entries] == ["video", "shared", "stream"]
+    assert calls == [("UCx", "videos"), ("UCx", "streams")]
+
+
+def test_backfill_channel_can_disable_streams(isolate_state, monkeypatch):
+    yl = isolate_state
+    ch = yl.ChannelConfig(handle="@h", channel_id="UCx", author_slug="h")
+    seen = []
+
+    def fake_flat(channel_id, *, include_streams=True):
+        seen.append(include_streams)
+        return []
+
+    monkeypatch.setattr(yl, "fetch_backfill_flat", fake_flat)
+
+    summary = yl.backfill_channel(ch, {}, since=__import__("datetime").date(2026, 4, 1),
+                                  include_streams=False)
+
+    assert summary["videos_seen"] == 0
+    assert seen == [False]
 
 
 # ---------- cursor IO + atomic write ----------

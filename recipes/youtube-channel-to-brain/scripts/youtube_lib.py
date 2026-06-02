@@ -58,6 +58,7 @@ RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 USER_AGENT = "youtube-channel-to-brain/0.1 (+https://github.com/garrytan/gbrain)"
 HTTP_TIMEOUT = 20
 HTTP_RETRIES = 3
+YT_DLP_SUBS_TIMEOUT = 600
 ATOM_NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015",
            "media": "http://search.yahoo.com/mrss/"}
 
@@ -277,8 +278,8 @@ def fetch_video_metadata(video_id: str) -> dict:
     raise DownloadError(f"yt-dlp metadata {video_id} returned no JSON")
 
 
-def fetch_uploads_flat(channel_id: str) -> list[dict]:
-    url = f"https://www.youtube.com/channel/{channel_id}/videos"
+def fetch_uploads_flat(channel_id: str, *, tab: str = "videos") -> list[dict]:
+    url = f"https://www.youtube.com/channel/{channel_id}/{tab}"
     try:
         proc = subprocess.run(
             [YT_DLP, "--flat-playlist", "--dump-json", url],
@@ -296,6 +297,23 @@ def fetch_uploads_flat(channel_id: str) -> list[dict]:
             continue
         out.append(json.loads(line))
     return out
+
+
+def fetch_backfill_flat(channel_id: str, *, include_streams: bool = True) -> list[dict]:
+    entries = fetch_uploads_flat(channel_id, tab="videos")
+    if not include_streams:
+        return entries
+
+    entries.extend(fetch_uploads_flat(channel_id, tab="streams"))
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for entry in entries:
+        video_id = str(entry.get("id") or "")
+        if not video_id or video_id in seen:
+            continue
+        seen.add(video_id)
+        deduped.append(entry)
+    return deduped
 
 
 def video_slug_exists(slug: str, *, bin: str = GBRAIN_BIN) -> bool:
@@ -340,7 +358,8 @@ def _meta_to_video(meta: dict, channel: ChannelConfig) -> Video:
 
 
 def backfill_channel(channel: ChannelConfig, cursors: dict[str, ChannelCursor], *,
-                     since: date, max_videos: Optional[int] = None, dry_run: bool = False) -> dict:
+                     since: date, max_videos: Optional[int] = None, dry_run: bool = False,
+                     include_streams: bool = True) -> dict:
     summary = {
         "channel": channel.handle,
         "channel_id": channel.channel_id,
@@ -359,7 +378,7 @@ def backfill_channel(channel: ChannelConfig, cursors: dict[str, ChannelCursor], 
     cur.handle = channel.handle
     cur.last_polled = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    flat_entries = fetch_uploads_flat(channel.channel_id)
+    flat_entries = fetch_backfill_flat(channel.channel_id, include_streams=include_streams)
     selected: list[Video] = []
     for entry in flat_entries:
         video_id = str(entry.get("id") or "")
@@ -442,7 +461,10 @@ def backfill_channel(channel: ChannelConfig, cursors: dict[str, ChannelCursor], 
                 continue
 
             if transcript_path is not None:
-                gbrain_upload_raw(transcript_path, slug)
+                try:
+                    gbrain_upload_raw(transcript_path, slug)
+                except DownloadError as e:
+                    log(f"gbrain raw upload failed for {slug}: {e}", level="WARN")
 
             try:
                 enqueue_enrichment(v, channel, slug, transcript_text)
@@ -595,7 +617,7 @@ def _run_yt_dlp_subs(video_url: str, *, lang: str = "en", auto: bool, out_dir: P
     else:
         args.insert(2, "--write-sub")
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=YT_DLP_SUBS_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise DownloadError(f"yt-dlp invocation failed: {e}") from e
     if proc.returncode != 0:
