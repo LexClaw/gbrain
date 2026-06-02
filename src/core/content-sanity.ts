@@ -22,10 +22,9 @@
  *     operations.ts put_page, sync.ts:929 catch) fires correctly through
  *     this single throw point. No new status vocabulary required.
  *   - **Oversize alone** (bytes > block_bytes WITHOUT junk-pattern match) →
- *     SOFT-BLOCK. Caller writes the page with `frontmatter.embed_skip` set
- *     via `buildEmbedSkipMarker` from `src/core/embed-skip.ts`. The embedder
- *     skips on next sweep at all 5 wiring sites. Page lands so legitimate
- *     large content (2MB conversation transcripts) is preserved.
+ *     WARN/AUDIT ONLY. Page writes and chunks normally. `chunkText` already
+ *     caps individual chunks, so legitimate large content (2MB conversation
+ *     transcripts) remains searchable instead of being silently skipped.
  *
  * Bytes are measured against `compiled_truth + timeline` (the parsed body
  * after `parseMarkdown` splits at the timeline sentinel). Frontmatter is
@@ -120,10 +119,10 @@ export interface ContentSanityResult {
   reason_messages: string[];
   /** True when any junk pattern or operator literal matched. Caller
    *  should throw `ContentSanityBlockError` when this is set. Note that
-   *  oversize alone does NOT trigger this — that's a soft-block. */
+   *  oversize alone does NOT trigger this, it is warn/audit only. */
   shouldHardBlock: boolean;
-  /** True when oversize without hard-block. Caller should write the
-   *  page with `frontmatter.embed_skip` set so the embedder skips. */
+  /** Deprecated compatibility field. Oversize-only pages must NOT be
+   *  embed-skipped; junk still hard-blocks via shouldHardBlock. */
   shouldSkipEmbed: boolean;
 }
 
@@ -330,11 +329,10 @@ export function assessContentSanity(opts: {
     literal_substring_matches,
     reasons,
     reason_messages,
-    // shouldSkipEmbed: oversize past block threshold but NOT also hard-block.
-    // When BOTH fire (the 890K Cloudflare dump case), hard-block wins and
-    // the page never lands. Embed-skip is reserved for the legitimate
-    // large-content case.
+    // Oversize-only is warning/audit signal only. It must not set embed_skip,
+    // otherwise legitimate large pages lose all searchable chunks. When junk
+    // patterns fire, shouldHardBlock still rejects before the page lands.
     shouldHardBlock,
-    shouldSkipEmbed: oversize && !shouldHardBlock,
+    shouldSkipEmbed: false,
   };
 }

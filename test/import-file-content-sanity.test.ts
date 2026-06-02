@@ -7,7 +7,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { importFromContent } from '../src/core/import-file.ts';
 import { ContentSanityBlockError } from '../src/core/content-sanity.ts';
-import { isEmbedSkipped, EMBED_SKIP_KEY } from '../src/core/embed-skip.ts';
+import { isEmbedSkipped } from '../src/core/embed-skip.ts';
 
 let engine: PGLiteEngine;
 let auditDir: string;
@@ -151,8 +151,8 @@ A legitimate essay about handling access-denied errors in your app.`;
   });
 });
 
-describe('importFromContent — soft-block (D9 transition + embed_skip)', () => {
-  test('soft-block writes page with embed_skip frontmatter marker', async () => {
+describe('importFromContent — oversized legitimate pages chunk normally', () => {
+  test('oversized clean page writes without embed_skip frontmatter marker', async () => {
     await withIsolatedHome(async () => {
       // 600K of clean text → soft-block (oversize but no junk pattern).
       const content = FRONTMATTER + 'a'.repeat(600_000);
@@ -161,14 +161,11 @@ describe('importFromContent — soft-block (D9 transition + embed_skip)', () => 
       const page = await engine.getPage('test/big');
       expect(page).not.toBeNull();
       const fm = page!.frontmatter as Record<string, unknown>;
-      expect(isEmbedSkipped(fm)).toBe(true);
-      const marker = fm[EMBED_SKIP_KEY] as Record<string, unknown>;
-      expect(marker.reason).toBe('oversized');
-      expect(marker.bytes).toBeGreaterThan(500_000);
+      expect(isEmbedSkipped(fm)).toBe(false);
     });
   });
 
-  test('soft-block deletes existing chunks (D9 transition invariant)', async () => {
+  test('oversized clean re-import replaces existing chunks instead of deleting them', async () => {
     await withIsolatedHome(async () => {
       // First write a normal page to seed some chunks.
       const small = FRONTMATTER + 'Short content with multiple sentences. Plenty of words here. Enough to chunk.';
@@ -180,17 +177,16 @@ describe('importFromContent — soft-block (D9 transition + embed_skip)', () => 
       const big = FRONTMATTER + 'a'.repeat(600_000);
       await importFromContent(engine, 'test/grow', big, { noEmbed: true });
       const afterChunks = await engine.getChunks('test/grow');
-      // D9: transition to embed_skip should delete chunks.
-      expect(afterChunks.length).toBe(0);
+      expect(afterChunks.length).toBeGreaterThan(0);
     });
   });
 
-  test('soft-block skips chunking entirely (no new chunks created)', async () => {
+  test('oversized clean page creates chunks', async () => {
     await withIsolatedHome(async () => {
       const content = FRONTMATTER + 'a'.repeat(600_000);
       await importFromContent(engine, 'test/big2', content, { noEmbed: true });
       const chunks = await engine.getChunks('test/big2');
-      expect(chunks.length).toBe(0);
+      expect(chunks.length).toBeGreaterThan(0);
     });
   });
 });
