@@ -13,7 +13,8 @@
  * static-shape regressions read the source file and pin the load-bearing
  * constants:
  *
- *   - `--max-rss 2048` is passed to the worker (incident-driving default)
+ *   - `--max-rss <value>` is passed to the worker: GBRAIN_AUTOPILOT_MAX_RSS
+ *     when set to a positive number, otherwise the 2048 MB default
  *   - `maxCrashes: 5` matches the prior `crashCount >= 5` give-up rule
  *   - The autopilot composes ChildWorkerSupervisor (not the legacy
  *     inline `child.on('exit')` loop)
@@ -50,11 +51,11 @@ describe('autopilot.ts ↔ ChildWorkerSupervisor wiring', () => {
     expect(AUTOPILOT_SRC).not.toContain('STABLE_RUN_RESET_MS');
   });
 
-  it("constructs ChildWorkerSupervisor with --max-rss 2048", () => {
+  it("constructs ChildWorkerSupervisor with env-overridable --max-rss", () => {
     // The worker spawn args must include both flag tokens in argv order.
-    // This is the incident-driving default; changing it without a deliberate
-    // decision would regress the workaround for VmRSS inflation.
-    expect(AUTOPILOT_SRC).toContain("'--max-rss', '2048'");
+    // Default remains 2048 MB, but operators can raise/lower it via
+    // GBRAIN_AUTOPILOT_MAX_RSS without patching the installed CLI wrapper.
+    expect(AUTOPILOT_SRC).toContain("'--max-rss', String(Number(process.env.GBRAIN_AUTOPILOT_MAX_RSS) || 2048)");
     expect(AUTOPILOT_SRC).toContain("'jobs', 'work'");
   });
 
