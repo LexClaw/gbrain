@@ -1480,11 +1480,15 @@ const query: Operation = {
       // (config default applies). hybridSearchCached skips the cache when on.
       adaptiveReturn: typeof p.adaptive_return === 'boolean' ? (p.adaptive_return as boolean) : undefined,
     });
+    const { appendTypedEdgeNeighborResults } = await import('./search/typed-edge-context.ts');
+    const resultsWithTypedEdges = await appendTypedEdgeNeighborResults(ctx.engine, results, {
+      ...querySourceScope,
+    });
     const latency_ms = Date.now() - startedAt;
 
     // v0.37.0 (D11): op-layer last_retrieved_at write-back. Same shape as the
     // search handler — fire-and-forget, internal callers bypass this path.
-    bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
+    bumpLastRetrievedAt(ctx.engine, resultsWithTypedEdges.map((r) => r.page_id));
 
     // Op-layer capture (v0.25.0). Fire-and-forget. meta tells gbrain-evals
     // what hybridSearch *actually* did so replay can distinguish "with API
@@ -1499,7 +1503,7 @@ const query: Operation = {
         {
           tool_name: 'query',
           query: queryText,
-          results,
+          results: resultsWithTypedEdges,
           meta,
           latency_ms,
           remote: ctx.remote ?? false,
@@ -1512,7 +1516,7 @@ const query: Operation = {
       );
     }
 
-    return results;
+    return resultsWithTypedEdges;
   },
   scope: 'read',
   cliHints: { name: 'query', positional: ['query'] },

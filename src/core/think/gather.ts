@@ -19,6 +19,7 @@ import type { BrainEngine, TakeHit, Take } from '../engine.ts';
 import { hybridSearch } from '../search/hybrid.ts';
 import type { SearchResult } from '../types.ts';
 import { sanitizeQueryForPrompt } from '../search/expansion.ts';
+import { appendTypedEdgeNeighborResults, gatherTypedEdgeNeighborSlugs } from '../search/typed-edge-context.ts';
 
 export interface ThinkGatherOpts {
   question: string;
@@ -138,8 +139,11 @@ export async function runGather(
   // Stream 4: graph walk (anchor only).
   const graphPromise: Promise<string[]> = opts.anchor
     ? engine.traversePaths(opts.anchor, { depth: graphDepth, direction: 'both' })
-        .then(paths => {
-          const slugs = new Set<string>([opts.anchor!]);
+        .then(async paths => {
+          const typedNeighbors = await gatherTypedEdgeNeighborSlugs(engine, [opts.anchor!], {
+            depth: graphDepth,
+          });
+          const slugs = new Set<string>([opts.anchor!, ...typedNeighbors]);
           for (const p of paths) {
             slugs.add(p.from_slug);
             slugs.add(p.to_slug);
@@ -152,9 +156,13 @@ export async function runGather(
         })
     : Promise.resolve([] as string[]);
 
-  const [pages, takesKw, takesVec, graphSlugs] = await Promise.all([
+  const [pagesRaw, takesKw, takesVec, graphSlugs] = await Promise.all([
     pagesPromise, takesKwPromise, takesVecPromise, graphPromise,
   ]);
+
+  const pages = await appendTypedEdgeNeighborResults(engine, pagesRaw, {
+    depth: graphDepth,
+  });
 
   // Fuse takes streams (keyword + vector). Key by (page_slug, row_num).
   const fusedTakes = fuseRanked(
