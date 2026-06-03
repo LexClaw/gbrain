@@ -886,16 +886,37 @@ def enqueue_enrichment(video: Video, channel: ChannelConfig, page_slug: str, tra
 def list_queue() -> list[Path]:
     if not QUEUE_DIR.exists():
         return []
-    return sorted(p for p in QUEUE_DIR.glob("*.json") if p.parent == QUEUE_DIR)
+    files: list[Path] = []
+    for p in QUEUE_DIR.glob("*.json"):
+        if p.parent != QUEUE_DIR:
+            continue
+        if p.is_file():
+            files.append(p)
+            continue
+        # Purge stale/non-file dirents (for example broken symlinks) so a
+        # phantom queue reference cannot be returned forever.
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return sorted(files)
 
 
 def move_to_failed(queue_file: Path, reason: str) -> Path:
     QUEUE_FAILED_DIR.mkdir(parents=True, exist_ok=True)
     target = QUEUE_FAILED_DIR / queue_file.name
     try:
-        data = json.loads(queue_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = {"raw": queue_file.read_text(encoding="utf-8", errors="replace")}
+        text = queue_file.read_text(encoding="utf-8")
+    except OSError:
+        text = None
+
+    if text is None:
+        data = {"raw": None, "note": "queue file already missing"}
+    else:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = {"raw": text}
     data["_failure_reason"] = reason
     data["_failed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     target.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
