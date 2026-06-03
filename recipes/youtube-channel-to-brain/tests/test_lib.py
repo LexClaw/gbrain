@@ -373,6 +373,17 @@ def test_enqueue_and_move_to_failed(isolate_state):
     assert data["_failure_reason"] == "test reason"
 
 
+def test_move_to_failed_missing_queue_file(isolate_state):
+    yl = isolate_state
+    missing = yl.QUEUE_DIR / "missing.json"
+    failed = yl.move_to_failed(missing, "queue read: missing")
+    assert failed.exists()
+    data = json.loads(failed.read_text())
+    assert data["raw"] is None
+    assert data["note"] == "queue file already missing"
+    assert data["_failure_reason"] == "queue read: missing"
+
+
 # ---------- poll_channel orchestration ----------
 
 
