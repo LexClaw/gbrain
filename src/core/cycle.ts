@@ -998,6 +998,8 @@ async function runPhaseExtractFacts(
         (result.warnings.length > 0 ? ` (${result.warnings.length} warning(s))` : ''),
       details: {
         pagesScanned: result.pagesScanned,
+        batchesProcessed: result.batchesProcessed,
+        batchSize: result.batchSize,
         pagesWithFacts: result.pagesWithFacts,
         factsInserted: result.factsInserted,
         factsDeleted: result.factsDeleted,

@@ -43,6 +43,21 @@ import {
 } from './phantom-redirect.ts';
 import { embed, isAvailable } from '../ai/gateway.ts';
 
+/**
+ * Full-walk page batch size for the autopilot extract_facts phase.
+ *
+ * Pre-fix, the full-walk path called getAllSlugs() and materialized the entire
+ * slug set before fetching pages one-by-one. On the live 69K-page brain that
+ * kept the whole job's page index alive for the duration of extract_facts and
+ * contributed to steady-state RSS above the 10GB watchdog. This cap bounds the
+ * job-level working set to one listPages() batch at a time.
+ */
+export const DEFAULT_EXTRACT_FACTS_BATCH_SIZE = 250;
+export const MIN_EXTRACT_FACTS_BATCH_SIZE = 1;
+export const MAX_EXTRACT_FACTS_BATCH_SIZE = 1000;
+const EXTRACT_FACTS_BATCH_SIZE_CONFIG_KEY = 'cycle.extract_facts.batch_size';
+const EXTRACT_FACTS_BATCH_SIZE_ENV = 'GBRAIN_EXTRACT_FACTS_BATCH_SIZE';
+
 export interface ExtractFactsOpts {
   /** Subset of slugs to reconcile. undefined = walk every page in the brain. */
   slugs?: string[];
@@ -63,6 +78,10 @@ export interface ExtractFactsOpts {
 
 export interface ExtractFactsResult {
   pagesScanned: number;
+  /** Number of listPages batches processed during a full-walk run. */
+  batchesProcessed: number;
+  /** Effective full-walk batch size. Null when a caller supplied explicit slugs. */
+  batchSize: number | null;
   pagesWithFacts: number;
   factsInserted: number;
   factsDeleted: number;
@@ -90,6 +109,8 @@ export async function runExtractFacts(
   const sourceId = opts.sourceId ?? 'default';
   const result: ExtractFactsResult = {
     pagesScanned: 0,
+    batchesProcessed: 0,
+    batchSize: null,
     pagesWithFacts: 0,
     factsInserted: 0,
     factsDeleted: 0,
@@ -164,16 +185,15 @@ export async function runExtractFacts(
   // `opts.slugs && opts.slugs.length > 0` is falsy for both. On a
   // multi-thousand-page brain the unintended full walk exceeds the
   // autopilot-cycle timeout (~600s) and dead-letters the job.
-  let slugs: string[];
+  let slugs: string[] | undefined;
   if (opts.slugs !== undefined) {
     // Caller explicitly passed a list (possibly empty). Empty array is a
     // real incremental no-op; don't escalate to full-brain walk.
     slugs = opts.slugs;
   } else {
-    // Full walk: every page in the brain. Bounded by engine.getAllSlugs
-    // which is already the precedent for full-extract paths.
-    const allSlugs = await engine.getAllSlugs();
-    slugs = Array.from(allSlugs);
+    // Full walk streams below via listPages({limit, offset, sort:'slug'}).
+    // Do NOT materialize every slug in the brain here.
+    slugs = undefined;
   }
   // v0.35.5: union the canonicals touched by the phantom-redirect pass
   // so their DB facts get reconciled from the just-merged disk fence.
@@ -181,21 +201,16 @@ export async function runExtractFacts(
   // in opts.slugs would leave canonical's DB facts stale until next full
   // walk (codex A1 — the round-14 risk specialized to scenario B).
   if (phantomResult.touched_canonicals.length > 0) {
-    const slugSet = new Set(slugs);
+    const slugSet = new Set(slugs ?? []);
     for (const c of phantomResult.touched_canonicals) slugSet.add(c);
     slugs = Array.from(slugSet);
   }
 
   // ── Reconcile each page ───────────────────────────────────────
-  for (const slug of slugs) {
+  const reconcilePage = async (page: Awaited<ReturnType<BrainEngine['getPage']>>): Promise<void> => {
+    if (!page) return;
+    const slug = page.slug;
     result.pagesScanned += 1;
-
-    const page = await engine.getPage(slug, { sourceId });
-    if (!page) {
-      // Slug listed but not in DB — skip silently. The next cycle
-      // will pick it up if it exists.
-      continue;
-    }
 
     const body = page.compiled_truth ?? '';
     const parsed = parseFactsFence(body);
@@ -207,7 +222,7 @@ export async function runExtractFacts(
 
     if (parsed.facts.length > 0) result.pagesWithFacts += 1;
 
-    if (opts.dryRun) continue;
+    if (opts.dryRun) return;
 
     // Wipe-and-reinsert per page. The deleteFactsForPage call targets
     // source_markdown_slug = slug only, so NULL-source_markdown_slug
@@ -215,7 +230,7 @@ export async function runExtractFacts(
     const deleted = await engine.deleteFactsForPage(slug, sourceId);
     result.factsDeleted += deleted.deleted;
 
-    if (parsed.facts.length === 0) continue;
+    if (parsed.facts.length === 0) return;
 
     // v0.35.4 (D-ENG-1) — thread page.effective_date as the fallback
     // valid_from. Without this, fence rows without explicit `validFrom:`
@@ -253,6 +268,38 @@ export async function runExtractFacts(
 
     const inserted = await engine.insertFacts(extracted, { source_id: sourceId }); // gbrain-allow-direct-insert: extract_facts cycle phase reconciles fence → DB
     result.factsInserted += inserted.inserted;
+  };
+
+  if (slugs !== undefined) {
+    for (const slug of slugs) {
+      const page = await engine.getPage(slug, { sourceId });
+      // Slug listed but not in DB — skip silently. The next cycle will pick it
+      // up if it exists.
+      await reconcilePage(page);
+    }
+  } else {
+    const batchSize = await resolveExtractFactsBatchSize(engine);
+    result.batchSize = batchSize;
+    let offset = 0;
+    // Stable slug-order pagination. This is safe because the loop mutates facts
+    // rows, not pages rows; the best-effort receipt page is written after the
+    // walk completes.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const batch = await engine.listPages({
+        sourceId,
+        limit: batchSize,
+        offset,
+        sort: 'slug',
+      });
+      if (batch.length === 0) break;
+      result.batchesProcessed += 1;
+      for (const page of batch) {
+        await reconcilePage(page);
+      }
+      offset += batch.length;
+      if (batch.length < batchSize) break;
+    }
   }
 
   // v0.42 Wave B3: receipt + rollup. extract_facts is deterministic
@@ -288,4 +335,26 @@ export async function runExtractFacts(
   }
 
   return result;
+}
+
+async function resolveExtractFactsBatchSize(engine: BrainEngine): Promise<number> {
+  const fromEnv = parseBatchSize(process.env[EXTRACT_FACTS_BATCH_SIZE_ENV]);
+  if (fromEnv !== null) return fromEnv;
+  try {
+    const fromConfig = parseBatchSize(await engine.getConfig(EXTRACT_FACTS_BATCH_SIZE_CONFIG_KEY));
+    if (fromConfig !== null) return fromConfig;
+  } catch {
+    // Config read is best-effort; default remains bounded.
+  }
+  return DEFAULT_EXTRACT_FACTS_BATCH_SIZE;
+}
+
+function parseBatchSize(raw: string | null | undefined): number | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const whole = Math.floor(n);
+  if (whole < MIN_EXTRACT_FACTS_BATCH_SIZE) return MIN_EXTRACT_FACTS_BATCH_SIZE;
+  if (whole > MAX_EXTRACT_FACTS_BATCH_SIZE) return MAX_EXTRACT_FACTS_BATCH_SIZE;
+  return whole;
 }

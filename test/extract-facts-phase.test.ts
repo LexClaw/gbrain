@@ -11,7 +11,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runExtractFacts } from '../src/core/cycle/extract-facts.ts';
+import { DEFAULT_EXTRACT_FACTS_BATCH_SIZE, runExtractFacts } from '../src/core/cycle/extract-facts.ts';
 
 let engine: PGLiteEngine;
 
@@ -174,6 +174,40 @@ describe('runExtractFacts — happy path', () => {
     const r = await runExtractFacts(engine);  // no slugs filter
     expect(r.pagesScanned).toBe(2);
     expect(r.factsInserted).toBe(2);
+    expect(r.batchSize).toBe(DEFAULT_EXTRACT_FACTS_BATCH_SIZE);
+  });
+
+  test('full walk is bounded by cycle.extract_facts.batch_size batches', async () => {
+    const prior = await engine.getConfig('cycle.extract_facts.batch_size');
+    await engine.setConfig('cycle.extract_facts.batch_size', '2');
+    const originalListPages = engine.listPages.bind(engine);
+    const observedBatchLengths: number[] = [];
+    engine.listPages = (async (filters?: any) => {
+      const pages = await originalListPages(filters);
+      if (filters?.sourceId === 'default' && filters?.sort === 'slug') {
+        expect(filters.limit).toBe(2);
+        observedBatchLengths.push(pages.length);
+      }
+      return pages;
+    }) as typeof engine.listPages;
+
+    try {
+      for (let i = 0; i < 5; i++) {
+        await putPage(`people/batched-${i}`, FACT_FENCE(`| 1 | Batched ${i} | fact | 1.0 | world | high | 2017-01-01 |  | seed |  |`));
+      }
+
+      const r = await runExtractFacts(engine, {});
+      expect(r.pagesScanned).toBe(5);
+      expect(r.factsInserted).toBe(5);
+      expect(r.batchSize).toBe(2);
+      expect(r.batchesProcessed).toBe(3);
+      expect(observedBatchLengths).toEqual([2, 2, 1]);
+      expect(Math.max(...observedBatchLengths)).toBeLessThanOrEqual(2);
+    } finally {
+      engine.listPages = originalListPages as typeof engine.listPages;
+      if (prior === null) await engine.unsetConfig('cycle.extract_facts.batch_size');
+      else await engine.setConfig('cycle.extract_facts.batch_size', prior);
+    }
   });
 });
 
