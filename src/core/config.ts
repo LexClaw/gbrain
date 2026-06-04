@@ -470,6 +470,7 @@ export async function loadConfigWithEngine(
   const dbMultimodalModel = await dbStr('embedding_multimodal_model');
   const dbOcr = await dbBool('embedding_image_ocr');
   const dbOcrModel = await dbStr('embedding_image_ocr_model');
+  const dbZeroEntropyApiKey = await dbStr('zeroentropy_api_key');
   // v0.36 (D7) — embedding-column registry merge. Stored as JSON string in
   // the config table. Parse + shape-check here; full registry validation
   // (regex on keys, type/dim/provider field shapes) runs in the resolver at
@@ -492,6 +493,9 @@ export async function loadConfigWithEngine(
   }
   if (merged.embedding_image_ocr_model === undefined && dbOcrModel !== undefined) {
     merged.embedding_image_ocr_model = dbOcrModel;
+  }
+  if (merged.zeroentropy_api_key === undefined && dbZeroEntropyApiKey !== undefined) {
+    merged.zeroentropy_api_key = dbZeroEntropyApiKey;
   }
   if (merged.embedding_columns === undefined && dbEmbeddingColumns !== undefined) {
     try {
@@ -619,6 +623,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'database_path',
   'openai_api_key',
   'anthropic_api_key',
+  'zeroentropy_api_key',
   'embedding_model',
   'embedding_dimensions',
   'embedding_disabled',

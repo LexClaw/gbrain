@@ -18,7 +18,7 @@ import { resolveContextualRetrievalMode } from './contextual-retrieval-resolver.
 import { assessContentSanity, ContentSanityBlockError } from './content-sanity.ts';
 import { loadOperatorLiterals } from './content-sanity-literals.ts';
 import { logContentSanityAssessment } from './audit/content-sanity-audit.ts';
-import { isEmbedSkipped, buildEmbedSkipMarker, EMBED_SKIP_KEY } from './embed-skip.ts';
+import { isEmbedSkipped } from './embed-skip.ts';
 import { loadConfig, loadConfigWithEngine } from './config.ts';
 import {
   buildContextualPrefix,
@@ -341,11 +341,8 @@ export async function importFromContent(
   //     sync.ts:929 failure record) fires correctly through this single
   //     throw point. classifyErrorCode picks up the PAGE_JUNK_PATTERN
   //     prefix in the error message and groups in sync-failures.jsonl.
-  //   - soft-block (oversize WITHOUT junk-pattern hit) → mutate
-  //     frontmatter to embed `embed_skip` marker. Existing chunking
-  //     block guards on `isEmbedSkipped(frontmatter)` so chunks stays
-  //     empty; the existing `tx.deleteChunks` at the empty-chunks
-  //     branch fires to purge old chunks (D9 transition invariant).
+  //   - oversize WITHOUT junk-pattern hit → warn/audit only. Page lands
+  //     and chunks normally so legitimate large content remains searchable.
   //
   // Effective config: env > file > DB > defaults. The DB-plane lift
   // adds ~4 SQL round-trips per import (one per content_sanity.* key);
@@ -410,17 +407,9 @@ export async function importFromContent(
         //   - sync.ts → existing catch at :929 → records failure with classified code
         throw new ContentSanityBlockError(sanityResult);
       }
-      if (sanityResult.shouldSkipEmbed) {
-        // Soft-block: mutate frontmatter so the embed_skip marker
-        // persists into the page write. The existing chunking block
-        // below guards on isEmbedSkipped → chunks stays empty →
-        // existing tx.deleteChunks fires to purge old chunks
-        // (D9 transition invariant — old chunks were searchable
-        // against stale content; deleting them maintains the
-        // invariant that embed_skip means "no live chunks").
-        parsed.frontmatter[EMBED_SKIP_KEY] = buildEmbedSkipMarker(sanityResult.bytes);
+      if (sanityResult.oversize) {
         process.stderr.write(
-          `[gbrain] content-sanity soft-block: ${slug} (${sanityResult.bytes} bytes) — page lands, embedding skipped\n`,
+          `[gbrain] content-sanity oversize: ${slug} (${sanityResult.bytes} bytes) — page lands, chunking proceeds\n`,
         );
       } else if (sanityResult.reasons.includes('oversize_warn')) {
         // Warn tier: page lands normally; lint surface picks up too.
@@ -540,11 +529,7 @@ export async function importFromContent(
   }
 
   // Chunk compiled_truth and timeline.
-  // v0.41 content-sanity soft-block: if the gate marked this page as
-  // embed-skipped (oversize without junk-pattern), skip chunking
-  // entirely. The empty-chunks branch in the transaction below
-  // triggers tx.deleteChunks(slug) which purges any pre-existing
-  // chunks (D9 transition invariant: embed_skip means no live chunks).
+  // Manual/frontmatter embed_skip remains honored for operator-set skips.
   const chunks: ChunkInput[] = [];
   const embedSkipped = isEmbedSkipped(parsed.frontmatter);
   if (!embedSkipped) {

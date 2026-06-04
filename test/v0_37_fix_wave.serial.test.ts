@@ -240,6 +240,27 @@ describe('v0.37 Lane C.3 — ZE key reaches buildGatewayConfig', () => {
     }
   });
 
+  test('DB-plane zeroentropy_api_key merges into gateway env', async () => {
+    const savedZe = process.env.ZEROENTROPY_API_KEY;
+    delete process.env.ZEROENTROPY_API_KEY;
+    try {
+      const { loadConfigWithEngine } = await import('../src/core/config.ts');
+      const { buildGatewayConfig } = await import('../src/cli.ts');
+      const engine = {
+        async getConfig(key: string) {
+          return key === 'zeroentropy_api_key' ? 'db-ze-key' : null;
+        },
+      };
+      const merged = await loadConfigWithEngine(engine, { engine: 'pglite' });
+      expect(merged?.zeroentropy_api_key).toBe('db-ze-key');
+      const gwCfg = buildGatewayConfig(merged as any);
+      expect(gwCfg.env?.ZEROENTROPY_API_KEY).toBe('db-ze-key');
+    } finally {
+      if (savedZe === undefined) delete process.env.ZEROENTROPY_API_KEY;
+      else process.env.ZEROENTROPY_API_KEY = savedZe;
+    }
+  });
+
   test('GBrainConfig type includes zeroentropy_api_key field (TS compile guard)', async () => {
     const { type } = await import('../src/core/config.ts').then(m => ({ type: undefined }));
     // The type-level assertion happens at compile time. If this file

@@ -62,7 +62,7 @@ describe('assessContentSanity — size boundaries', () => {
     expect(r.shouldSkipEmbed).toBe(false);
   });
 
-  test('above block threshold → oversize_block + shouldSkipEmbed', () => {
+  test('above block threshold → oversize_block but no embed skip', () => {
     const r = assessContentSanity({
       compiled_truth: 'a'.repeat(600_000),
       timeline: '',
@@ -71,18 +71,18 @@ describe('assessContentSanity — size boundaries', () => {
     expect(r.oversize).toBe(true);
     expect(r.reasons).toContain('oversize_block');
     expect(r.reasons).not.toContain('oversize_warn'); // not double-pushed
-    expect(r.shouldSkipEmbed).toBe(true);
+    expect(r.shouldSkipEmbed).toBe(false);
     expect(r.shouldHardBlock).toBe(false);
   });
 
   test('the original 890K reproduction trips block alone (no junk)', () => {
-    // 890K of clean text (no Cloudflare phrases) → soft-block only.
+    // 890K of clean text (no Cloudflare phrases) → warn/audit only.
     const r = assessContentSanity({
       compiled_truth: 'normal prose. '.repeat(70_000), // ~890K bytes
       timeline: '',
       title: 'A Long Article',
     });
-    expect(r.shouldSkipEmbed).toBe(true);
+    expect(r.shouldSkipEmbed).toBe(false);
     expect(r.shouldHardBlock).toBe(false);
   });
 
