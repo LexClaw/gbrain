@@ -119,3 +119,5 @@ Brain page created with summary, highlights, and entity cross-links. Report to u
 - Filing **raw ingest** by format (all videos in `media/videos/`) instead of by subject. Note: format-prefixed paths under `media/<format>/<slug>` ARE sanctioned for **synthesized one-of-one output** like book-mirror's `media/books/<slug>-personalized.md`. The anti-pattern is for raw ingest, not for sui generis synthesis. See `skills/_brain-filing-rules.md` "Sanctioned exception: synthesis output is sui generis."
 - Not preserving raw source files
 - Creating stub pages without meaningful content
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+

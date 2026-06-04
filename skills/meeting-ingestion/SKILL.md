@@ -191,3 +191,5 @@ This means the email is somewhere we don't have a token for (personal Gmail, a B
 4. For person pages tied to this workstream, cite the transcript meeting pages + any prior brain enrichment (`sdw-intelligence-brief-...`), and note that future enrichment is gated on receiving the primary documents.
 
 This is a Hit-Network-specific pattern: SDW correspondence lives outside the Gmail accounts Lex can search. Same probably applies to TJSJ, family-office, and any personal-banking workstream. **Never assume "I have Gmail access" means "I have all of TJ's email."**
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+

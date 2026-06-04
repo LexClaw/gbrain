@@ -103,3 +103,5 @@ captured:
 
 This skill is for the simple "I have a thought, save it" case. Specialized
 ingestion paths handle their own slugging + cross-referencing.
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+
