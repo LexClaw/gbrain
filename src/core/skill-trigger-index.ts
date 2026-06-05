@@ -25,7 +25,7 @@
  * risk codex flagged in #1451 review was consistency, not throughput.
  */
 
-import { existsSync, readFileSync, readdirSync, type Dirent } from 'fs';
+import { existsSync, readFileSync, readdirSync, statSync, type Dirent } from 'fs';
 import { join } from 'path';
 import { parseResolverEntries, type ResolverEntry } from './check-resolvable.ts';
 import { findAllResolverFiles } from './resolver-filenames.ts';
@@ -84,8 +84,13 @@ function loadFrontmatterEntries(skillsDir: string): SkillTriggerEntry[] {
   }
 
   for (const dirent of dirents) {
-    if (!dirent.isDirectory()) continue;
     const name = dirent.name;
+    let isDir = dirent.isDirectory();
+    if (!isDir && dirent.isSymbolicLink()) {
+      try { isDir = statSync(join(skillsDir, name)).isDirectory(); }
+      catch { isDir = false; }
+    }
+    if (!isDir) continue;
     if (name.startsWith('_') || name.startsWith('.')) continue;
     if (FRONTMATTER_SKIP_DIRS.has(name)) continue;
 
