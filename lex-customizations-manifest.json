@@ -535,6 +535,14 @@
       "source_commit": "4f03eb99",
       "rationale": "web-to-brain CLI dispatcher. Pure Lex addition. Shells into recipes/web-to-brain/scripts/web_fetch.py. Was dropped by b2f1b3b3 reapply; the verb 'gbrain ingest url' goes dead without this file.",
       "reapply": "checkout-subtree"
+    },
+    {
+      "path": "src/commands/extract-conversation-facts.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "645353b2",
+      "rationale": "LEX-FORK: add 'session' to ALLOWED_TYPES so the conversation->facts extraction pipeline can mine our 7,537 Hermes session-archive pages (type='session'). Upstream allowlist is ['conversation','meeting','slack','email'] only; our session logs were rejected (exit 1). One-line addition guarded by a 'LEX-FORK:' comment marker.",
+      "reapply": "hand-merge",
+      "merge_strategy": "After upstream merge, find 'export const ALLOWED_TYPES' in src/commands/extract-conversation-facts.ts and ensure 'session' is the last array element. Marker check: grep -q \"'email', 'session'\" src/commands/extract-conversation-facts.ts after merge. If upstream added 'session' themselves, drop this entry."
     }
   ]
 }

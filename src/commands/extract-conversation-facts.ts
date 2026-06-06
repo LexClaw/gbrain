@@ -140,7 +140,10 @@ export const DEFAULT_MAX_COST_USD = 5.0;
  * `--types` flag is an explicit per-run override; cycle config is
  * the single source of truth.
  */
-export const ALLOWED_TYPES = ['conversation', 'meeting', 'slack', 'email'] as const;
+// LEX-FORK: 'session' added to mine Hermes session-archive transcripts
+// (7,537 pages, type='session') into facts. Registered in
+// lex-customizations-manifest.json (modified-upstream-file / hand-merge).
+export const ALLOWED_TYPES = ['conversation', 'meeting', 'slack', 'email', 'session'] as const;
 export type AllowedType = (typeof ALLOWED_TYPES)[number];
 
 /**
