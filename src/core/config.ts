@@ -674,6 +674,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'models.chat',
   'models.eval.longmemeval',
   'facts.extraction_model',
+  'conversation_parser.llm_fallback_enabled',
+  'conversation_parser.llm_fallback_model',
   // Dream cycle config
   'dream.synthesize.session_corpus_dir',
   'dream.synthesize.meeting_transcripts_dir',
@@ -710,6 +712,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
 export const KNOWN_CONFIG_KEY_PREFIXES: readonly string[] = [
   'search.',           // search.* (mode, cache.*, etc.)
   'models.',           // models.* (tier, aliases, per-task)
+  'conversation_parser.', // conversation parser opt-in LLM fallback/polish knobs
   'dream.',            // dream.synthesize.*, dream.patterns.*
   'cycle.',            // cycle.<phase>.*
   'embedding_columns.', // per-column overrides

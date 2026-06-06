@@ -540,9 +540,71 @@
       "path": "src/commands/extract-conversation-facts.ts",
       "kind": "modified-upstream-file",
       "source_commit": "645353b2",
-      "rationale": "LEX-FORK: add 'session' to ALLOWED_TYPES so the conversation->facts extraction pipeline can mine our 7,537 Hermes session-archive pages (type='session'). Upstream allowlist is ['conversation','meeting','slack','email'] only; our session logs were rejected (exit 1). One-line addition guarded by a 'LEX-FORK:' comment marker.",
+      "rationale": "LEX-FORK: (1) add 'session' to ALLOWED_TYPES so the pipeline can mine our Hermes session-archive pages (type='session'); (2) processPage uses parseConversationAsync (not parseConversation) so the LLM fallback runs under the existing budget scope. Card kn7e69h.",
       "reapply": "hand-merge",
-      "merge_strategy": "After upstream merge, find 'export const ALLOWED_TYPES' in src/commands/extract-conversation-facts.ts and ensure 'session' is the last array element. Marker check: grep -q \"'email', 'session'\" src/commands/extract-conversation-facts.ts after merge. If upstream added 'session' themselves, drop this entry."
+      "merge_strategy": "After upstream merge: ensure 'session' is in ALLOWED_TYPES, and processPage calls parseConversationAsync. Marker check: grep -q \"'email', 'session'\" AND grep -q 'parseConversationAsync' src/commands/extract-conversation-facts.ts. If upstream wired T4 + added session themselves, drop this entry."
+    },
+    {
+      "path": "src/core/conversation-parser/parse.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "a2430c27",
+      "rationale": "LEX-FORK (T4 wiring): adds parseConversationAsync() that, on regex no_match + opt-in flag conversation_parser.llm_fallback_enabled + active BudgetTracker, calls Garry's pre-built runLlmFallback and returns phase='llm_fallback'. Synchronous parseConversation stays regex-only. PR-able to upstream (T4 was always intended). Card kn7e69h.",
+      "reapply": "hand-merge",
+      "merge_strategy": "After upstream merge, re-add parseConversationAsync if upstream hasn't wired T4. Marker check: grep -q 'parseConversationAsync' src/core/conversation-parser/parse.ts. If upstream shipped T4 wiring, drop this entry and use theirs."
+    },
+    {
+      "path": "src/core/conversation-parser/types.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "a2430c27",
+      "rationale": "LEX-FORK (T4 wiring): adds engine/signal/chatTransport fields to ParseConversationOpts to plumb the async fallback. Card kn7e69h.",
+      "reapply": "hand-merge",
+      "merge_strategy": "After upstream merge, re-add the 3 optional fields to ParseConversationOpts if absent. Marker check: grep -q 'chatTransport' src/core/conversation-parser/types.ts."
+    },
+    {
+      "path": "src/core/conversation-parser/llm-fallback.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "a2430c27",
+      "rationale": "LEX-FORK (T4 wiring): prompt recognizes Hermes session-archive role markers (**USER**/**ASSISTANT**); adds prepareFallbackBody() to trim to the ## Full Conversation transcript so the adversarial [] contract and the session acceptance bar coexist. Card kn7e69h.",
+      "reapply": "hand-merge",
+      "merge_strategy": "After upstream merge, re-apply the prompt addition + prepareFallbackBody if absent. Marker check: grep -q 'prepareFallbackBody' src/core/conversation-parser/llm-fallback.ts."
+    },
+    {
+      "path": "src/core/conversation-parser/llm-base.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "a2430c27",
+      "rationale": "LEX-FORK (T4 wiring): in runLlmCall, bypass the real-provider availability probe when a chatTransport test seam is injected, so unit tests exercise the fallback path without a live provider key. Production (no chatTransport) still probes. Card kn7e69h.",
+      "reapply": "hand-merge",
+      "merge_strategy": "After upstream merge, re-apply the chatTransport probe-bypass in runLlmCall if absent. Marker check: grep -q 'when a chatTransport is injected' src/core/conversation-parser/llm-base.ts."
+    },
+    {
+      "path": "src/commands/conversation-parser.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "a2430c27",
+      "rationale": "LEX-FORK (T4 wiring): scan path passes noFallback:true so the debug CLI stays regex-only (no surprise LLM spend). Card kn7e69h.",
+      "reapply": "hand-merge",
+      "merge_strategy": "After upstream merge, ensure scan path passes noFallback:true. Marker check: grep -q 'noFallback: true' src/commands/conversation-parser.ts."
+    },
+    {
+      "path": "src/core/config.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "a2430c27",
+      "rationale": "LEX-FORK (T4 wiring): registers conversation_parser.llm_fallback_enabled + conversation_parser.llm_fallback_model + the conversation_parser. prefix as known config keys so 'gbrain config set' stops warning 'nothing reads this'. Card kn7e69h.",
+      "reapply": "hand-merge",
+      "merge_strategy": "After upstream merge, re-add the conversation_parser.llm_fallback_* known keys. Marker check: grep -q 'llm_fallback_enabled' src/core/config.ts."
+    },
+    {
+      "path": "test/conversation-parser-llm-fallback.test.ts",
+      "kind": "new-file",
+      "source_commit": "a2430c27",
+      "rationale": "LEX-FORK (T4 wiring): tests sync parser stays regex-only, async parser uses opt-in fallback to extract >0 messages from a real Hermes session fixture, and non-chat bodies stay no_match. Card kn7e69h.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "test/fixtures/conversation-parser/hermes-session-archive-39d867.md",
+      "kind": "new-file",
+      "source_commit": "a2430c27",
+      "rationale": "LEX-FORK (T4 wiring): real Hermes session-archive fixture for the fallback test. PRIVATE content (session log) — fork-local only, never push to a public upstream PR without redaction. Card kn7e69h.",
+      "reapply": "checkout-subtree"
     }
   ]
 }

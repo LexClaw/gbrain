@@ -173,7 +173,7 @@ async function runScan(
   // Concatenate compiled_truth + timeline (matches the real parser's body shape).
   const body = `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`.trim();
 
-  const result = parseConversation(body, { page, diagnostic: true });
+  const result = parseConversation(body, { page, diagnostic: true, noFallback: true });
 
   if (json) {
     process.stdout.write(

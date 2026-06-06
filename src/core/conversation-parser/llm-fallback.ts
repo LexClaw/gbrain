@@ -24,7 +24,7 @@ import { runLlmCall, parseLlmJson, type ChatTransport } from './llm-base.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { MatchedMessage } from './types.ts';
 
-const FALLBACK_SYSTEM_PROMPT = `You parse messages out of a chat-log body. The body may be from any chat platform (iMessage, Slack, Telegram, Discord, WhatsApp, Signal, IRC, Matrix, Teams, email-thread, etc.).
+const FALLBACK_SYSTEM_PROMPT = `You parse messages out of a chat-log body. The body may be from any chat platform (iMessage, Slack, Telegram, Discord, WhatsApp, Signal, IRC, Matrix, Teams, email-thread, Hermes session archive, etc.).
 
 Return a JSON array of message objects. Each object has these fields:
   - speaker:   The display name of the message author. Strip emoji
@@ -40,6 +40,13 @@ Return a JSON array of message objects. Each object has these fields:
 
 Skip system messages ("Alice joined", "Bob left"), reactions on
 prior messages, and notification footers.
+
+Hermes session archives are chat logs even when they contain markdown
+sections such as "## Corrections / Frustrations", "## Directives / Rules",
+and "## Full Conversation". In those archives, role markers like
+"**USER **" and "**ASSISTANT **" begin messages. Treat USER and
+ASSISTANT as speakers, and parse the text under each marker until the
+next role marker.
 
 IF THE BODY IS NOT A CHAT LOG (e.g. it's a README, code file,
 recipe, song lyrics, log file with no speakers), return [].
@@ -68,7 +75,8 @@ export interface RunLlmFallbackOpts {
 export async function runLlmFallback(
   opts: RunLlmFallbackOpts,
 ): Promise<MatchedMessage[] | null> {
-  const lines = opts.body.split(/\r?\n/);
+  const body = prepareFallbackBody(opts.body);
+  const lines = body.split(/\r?\n/);
   const sampleN = opts.sampleLines ?? 200;
   // For fallback, send up to N non-empty lines (vs polish which gets
   // the full body + the regex output).
@@ -109,4 +117,35 @@ export async function runLlmFallback(
       return out;
     },
   });
+}
+
+/**
+ * Keep fallback privacy/cost bounded by sending only chat-shaped material.
+ * Hermes session archives start with frontmatter, skill dumps, corrections,
+ * and directives before the actual transcript. If we send the first 200
+ * non-empty lines verbatim, Haiku often sees governance markdown instead of
+ * role turns and correctly returns [] under the adversarial contract. For
+ * archive-shaped bodies, trim to the Full Conversation role blocks first.
+ */
+function prepareFallbackBody(body: string): string {
+  if (!body.includes('## Full Conversation')) return body;
+  const start = body.indexOf('## Full Conversation');
+  const transcript = body.slice(start);
+  if (!/^\*\*(USER|ASSISTANT|SYSTEM|TOOL)\b/m.test(transcript)) return body;
+
+  const blocks: string[] = [];
+  const roleRx = /^\*\*(USER|ASSISTANT|SYSTEM|TOOL)\b[^\n]*$/gim;
+  const matches = Array.from(transcript.matchAll(roleRx));
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    const role = (m[1] ?? '').toUpperCase();
+    if (role === 'SYSTEM' || role === 'TOOL') continue;
+    const blockStart = m.index ?? 0;
+    const blockEnd = i + 1 < matches.length ? matches[i + 1].index ?? transcript.length : transcript.length;
+    const raw = transcript.slice(blockStart, blockEnd).trim();
+    if (!raw) continue;
+    blocks.push(raw.slice(0, 4000));
+    if (blocks.length >= 20) break;
+  }
+  return blocks.length > 0 ? blocks.join('\n\n') : body;
 }

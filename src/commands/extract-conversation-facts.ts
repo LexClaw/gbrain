@@ -286,6 +286,7 @@ export interface ExtractConversationFactsResult {
 // ---------------------------------------------------------------------------
 
 import {
+  parseConversationAsync,
   parseConversation,
   type ParseConversationOpts as OrchestratorParseOpts,
 } from '../core/conversation-parser/parse.ts';
@@ -692,7 +693,11 @@ async function processPage(
   // `parseConversationMessages(body)` shape only saw the body, which
   // meant Telegram-bracket pages with frontmatter dates landed at
   // 1970-01-01. Now they pick up the correct date.
-  const parseResult = parseConversation(body, { page });
+  const parseResult = await parseConversationAsync(body, {
+    page,
+    engine: state.engine,
+    signal: state.signal,
+  });
   const messages = parseResult.messages;
   if (parseResult.timezone_warning) {
     process.stderr.write(parseResult.timezone_warning + '\n');

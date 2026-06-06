@@ -28,6 +28,8 @@
  */
 
 import type { Page } from '../types.ts';
+import type { BrainEngine } from '../engine.ts';
+import type { ChatTransport } from './llm-base.ts';
 
 /**
  * Parsed message after orchestrator runs. Matches the existing
@@ -212,6 +214,16 @@ export interface ParseConversationOpts {
   noPolish?: boolean;
   /** When true, skip LLM fallback even if config enables it. */
   noFallback?: boolean;
+  /**
+   * Optional engine used by async LLM fallback for DB-plane config and
+   * content-hash cache. Synchronous callers may omit this and stay
+   * regex-only.
+   */
+  engine?: BrainEngine;
+  /** Abort signal for async LLM fallback. */
+  signal?: AbortSignal;
+  /** Test seam for async LLM fallback. */
+  chatTransport?: ChatTransport;
   /** Caller-supplied patterns to add (e.g. user simple_pattern compiled). */
   userPatterns?: readonly PatternEntry[];
   /** Caller-supplied disabled-builtin id list (config or per-call). */

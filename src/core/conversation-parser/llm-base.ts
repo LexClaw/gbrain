@@ -166,7 +166,14 @@ export interface RunLlmCallOpts<TOutput> {
 export async function runLlmCall<TOutput>(
   opts: RunLlmCallOpts<TOutput>,
 ): Promise<TOutput | null> {
-  const modelStr = probeLlmAvailability(opts.modelStr);
+  // LEX-FORK (card kn7e69h): when a chatTransport is injected (test seam),
+  // bypass the real-provider availability probe. The whole point of the
+  // seam is to exercise the call path WITHOUT a live provider key; otherwise
+  // probeLlmAvailability returns null on a keyless test env and the stubbed
+  // transport is never reached. Production (no chatTransport) still probes.
+  const modelStr = opts.chatTransport
+    ? (opts.modelStr.includes(':') ? opts.modelStr : `anthropic:${opts.modelStr}`)
+    : probeLlmAvailability(opts.modelStr);
   if (modelStr === null) {
     // Once-per-process warn: future calls in this process won't pay
     // the probe cost again because each call's probe is cheap, but

@@ -29,6 +29,10 @@ import {
   BUILTIN_PATTERNS,
   cleanSpeaker,
 } from './builtins.ts';
+import { loadConfig } from '../config.ts';
+import { getCurrentBudgetTracker } from '../ai/gateway.ts';
+import { resolveModel } from '../model-config.ts';
+import { runLlmFallback } from './llm-fallback.ts';
 import type {
   DateContext,
   MatchedMessage,
@@ -38,6 +42,8 @@ import type {
 } from './types.ts';
 
 export type { ParseConversationOpts, ParseResult, MatchedMessage } from './types.ts';
+
+const DEFAULT_LLM_FALLBACK_MODEL = 'anthropic:claude-haiku-4-5-20251001';
 
 /**
  * How many head-of-body lines to score patterns against (D18).
@@ -427,13 +433,92 @@ export function scorePatternFull(body: string, entry: PatternEntry): number {
 /**
  * Parse a conversation body into messages. Tries built-in patterns
  * (minus disabled), then user patterns (D7-validated), then optional
- * LLM fallback (T4; not yet wired).
+ * LLM fallback (T4; wired through `parseConversationAsync`).
  *
  * The shape matches PR #1461's `parseConversationMessages(body, opts)`
  * for back-compat. `extract-conversation-facts.ts` adapts via
  * `parseConversation(body, { page })` in T5.
  */
 export function parseConversation(
+  body: string,
+  opts: ParseConversationOpts = {},
+): ParseResult {
+  return parseConversationRegexOnly(body, opts);
+}
+
+/**
+ * Async parse path for callers that explicitly allow LLM fallback.
+ *
+ * LEX-FORK seam (card kn7e69hxjfn2gre694hzeptf7h88465z): keep the
+ * historical `parseConversation` function synchronous and regex-only,
+ * while async callers with an active BudgetTracker can opt into Garry's
+ * existing T4 fallback parser when regex scoring produces `no_match`.
+ */
+export async function parseConversationAsync(
+  body: string,
+  opts: ParseConversationOpts = {},
+): Promise<ParseResult> {
+  const regexResult = parseConversationRegexOnly(body, opts);
+  if (regexResult.phase !== 'no_match' || !body || opts.noFallback) {
+    return regexResult;
+  }
+
+  const tracker = getCurrentBudgetTracker();
+  if (!tracker) return regexResult;
+
+  const fallbackEnabled = await isLlmFallbackEnabled(opts);
+  if (!fallbackEnabled) return regexResult;
+
+  const model = await resolveModel(opts.engine ?? null, {
+    configKey: 'conversation_parser.llm_fallback_model',
+    tier: 'utility',
+    fallback: DEFAULT_LLM_FALLBACK_MODEL,
+  });
+  const messages = await runLlmFallback({
+    modelStr: model,
+    body,
+    signal: opts.signal,
+    engine: opts.engine,
+    chatTransport: opts.chatTransport,
+  });
+
+  if (messages === null) return regexResult;
+  return {
+    messages,
+    phase: messages.length > 0 ? 'llm_fallback' : 'no_match',
+    patterns_scored: regexResult.patterns_scored,
+    llm_fallback_model: model,
+    unmatched_line_count: opts.diagnostic
+      ? body.split(/\r?\n/).filter((l) => l.trim().length > 0).length - messages.length
+      : regexResult.unmatched_line_count,
+  };
+}
+
+async function isLlmFallbackEnabled(opts: ParseConversationOpts): Promise<boolean> {
+  let enabled = false;
+  try {
+    const cfg = loadConfig() as unknown as {
+      conversation_parser?: { llm_fallback_enabled?: boolean };
+    } | null;
+    enabled = cfg?.conversation_parser?.llm_fallback_enabled === true;
+  } catch {
+    enabled = false;
+  }
+
+  // `gbrain config set conversation_parser.llm_fallback_enabled true`
+  // writes the DB plane, so the async fallback path must read it directly.
+  if (!enabled && opts.engine) {
+    try {
+      const raw = await opts.engine.getConfig('conversation_parser.llm_fallback_enabled');
+      enabled = raw === 'true';
+    } catch {
+      // Missing/pre-migration config table: default false, preserving privacy.
+    }
+  }
+  return enabled;
+}
+
+function parseConversationRegexOnly(
   body: string,
   opts: ParseConversationOpts = {},
 ): ParseResult {
