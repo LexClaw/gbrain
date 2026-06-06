@@ -564,9 +564,9 @@
       "path": "src/core/conversation-parser/llm-fallback.ts",
       "kind": "modified-upstream-file",
       "source_commit": "a2430c27",
-      "rationale": "LEX-FORK (T4 wiring): prompt recognizes Hermes session-archive role markers (**USER**/**ASSISTANT**); adds prepareFallbackBody() to trim to the ## Full Conversation transcript so the adversarial [] contract and the session acceptance bar coexist. Card kn7e69h.",
+      "rationale": "LEX-FORK (T4 wiring + yield tuning): prompt recognizes Hermes session-archive role markers (**USER**/**ASSISTANT**), prepareFallbackBody() trims to ## Full Conversation, and card kn7dyv5ntf9g6bh65mnr3xx4b18851k8 tunes yield by sampling substantive turns instead of skill-doc/context-compaction preambles while keeping the non-chat [] contract and fenced-JSON parser tolerance.",
       "reapply": "hand-merge",
-      "merge_strategy": "After upstream merge, re-apply the prompt addition + prepareFallbackBody if absent. Marker check: grep -q 'prepareFallbackBody' src/core/conversation-parser/llm-fallback.ts."
+      "merge_strategy": "After upstream merge, re-apply the prompt addition + prepareFallbackBody if absent. Marker checks: grep -q 'prepareFallbackBody' src/core/conversation-parser/llm-fallback.ts AND grep -q 'LEX-FORK B-FIX-1' src/core/conversation-parser/llm-fallback.ts."
     },
     {
       "path": "src/core/conversation-parser/llm-base.ts",
@@ -604,7 +604,14 @@
       "path": "test/conversation-parser-llm-fallback.test.ts",
       "kind": "new-file",
       "source_commit": "a2430c27",
-      "rationale": "LEX-FORK (T4 wiring): tests sync parser stays regex-only, async parser uses opt-in fallback to extract >0 messages from a real Hermes session fixture, and non-chat bodies stay no_match. Card kn7e69h.",
+      "rationale": "LEX-FORK (T4 wiring + yield tuning): tests sync parser stays regex-only, async parser uses opt-in fallback to extract >0 messages from real Hermes session fixtures, B-FIX-1 filters skill-doc/context preambles from a known 0-fact session, B-FIX-3 parses fenced JSON, and non-chat bodies stay no_match. Cards kn7e69h, kn7dyv5ntf9g6bh65mnr3xx4b18851k8.",
+      "reapply": "checkout-subtree"
+    },
+    {
+      "path": "test/fixtures/conversation-parser/hermes-session-archive-3d1468.md",
+      "kind": "new-file",
+      "source_commit": "kn7dyv5ntf9g6bh65mnr3xx4b18851k8",
+      "rationale": "LEX-FORK (yield tuning): real prior 0-fact Hermes session fixture used to prove B-FIX-1 filters skill-doc/context-compaction preambles and samples substantive turns. PRIVATE content (session log) — fork-local only, never push to a public upstream PR without redaction.",
       "reapply": "checkout-subtree"
     },
     {

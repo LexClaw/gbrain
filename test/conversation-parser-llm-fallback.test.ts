@@ -14,6 +14,11 @@ const SESSION_FIXTURE = readFileSync(
   'utf8',
 );
 
+const ZERO_FACT_SESSION_FIXTURE = readFileSync(
+  new URL('./fixtures/conversation-parser/hermes-session-archive-3d1468.md', import.meta.url),
+  'utf8',
+);
+
 describe('conversation parser LLM fallback', () => {
   test('synchronous parser remains regex-only for Hermes session archives', () => {
     const result = parseConversation(SESSION_FIXTURE, {
@@ -75,6 +80,81 @@ describe('conversation parser LLM fallback', () => {
     expect(result.llm_fallback_model).toBe('anthropic:claude-haiku-4-5-20251001');
     expect(result.messages.length).toBeGreaterThan(0);
     expect(result.messages[0]?.speaker).toBe('USER');
+  });
+
+  test('fallback samples substantive Hermes turns instead of skill-doc preambles', async () => {
+    const transport: ChatTransport = async (opts) => {
+      const content = opts.messages[0]?.content ?? '';
+      expect(content).not.toContain('[IMPORTANT: The user has invoked the "overnight-wave" skill');
+      expect(content).not.toContain('[CONTEXT COMPACTION');
+      expect(content).toContain('Wave 2 Execution Summary - COMPLETE');
+      expect(content).toContain('Strategic-Consulting Skill Pre-Load Pattern');
+      return {
+        text: JSON.stringify([
+          {
+            speaker: 'ASSISTANT',
+            timestamp: '1970-01-01T00:00:00Z',
+            text: 'Wave 2 Execution Summary - COMPLETE',
+          },
+        ]),
+        blocks: [],
+        stopReason: 'end',
+        usage: {
+          input_tokens: 120,
+          output_tokens: 30,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+        },
+        model: 'anthropic:claude-haiku-4-5-20251001',
+        providerId: 'anthropic',
+      };
+    };
+    const engine = {
+      getConfig: async (key: string) =>
+        key === 'conversation_parser.llm_fallback_enabled' ? 'true' : null,
+    };
+    const tracker = new BudgetTracker({ maxCostUsd: 0.5, label: 'test' });
+    const result = await withBudgetTracker(tracker, () =>
+      parseConversationAsync(ZERO_FACT_SESSION_FIXTURE, {
+        diagnostic: true,
+        engine: engine as never,
+        chatTransport: transport,
+      }),
+    );
+
+    expect(result.phase).toBe('llm_fallback');
+    expect(result.messages).toHaveLength(1);
+  });
+
+  test('fallback parses fenced JSON arrays from model output', async () => {
+    const transport: ChatTransport = async () => ({
+      text: '```json\n[{"speaker":"USER","timestamp":"1970-01-01T00:00:00Z","text":"fenced JSON should parse"}]\n```',
+      blocks: [],
+      stopReason: 'end',
+      usage: {
+        input_tokens: 20,
+        output_tokens: 20,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+      },
+      model: 'anthropic:claude-haiku-4-5-20251001',
+      providerId: 'anthropic',
+    });
+    const engine = {
+      getConfig: async (key: string) =>
+        key === 'conversation_parser.llm_fallback_enabled' ? 'true' : null,
+    };
+    const tracker = new BudgetTracker({ maxCostUsd: 0.5, label: 'test' });
+    const result = await withBudgetTracker(tracker, () =>
+      parseConversationAsync('## Full Conversation\n\n**USER **\nfenced JSON smoke', {
+        diagnostic: true,
+        engine: engine as never,
+        chatTransport: transport,
+      }),
+    );
+
+    expect(result.phase).toBe('llm_fallback');
+    expect(result.messages[0]?.text).toBe('fenced JSON should parse');
   });
 
   test('fallback returns [] for non-chat bodies without producing messages', async () => {

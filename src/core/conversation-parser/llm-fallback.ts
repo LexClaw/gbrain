@@ -48,6 +48,11 @@ and "## Full Conversation". In those archives, role markers like
 ASSISTANT as speakers, and parse the text under each marker until the
 next role marker.
 
+Skill-invocation wrappers and context-compaction summaries embedded in
+USER turns are still conversation content: extract the surrounding
+role-marked turns. Only return [] when there are genuinely NO
+role-marked conversation turns at all.
+
 IF THE BODY IS NOT A CHAT LOG (e.g. it's a README, code file,
 recipe, song lyrics, log file with no speakers), return [].
 
@@ -134,6 +139,7 @@ function prepareFallbackBody(body: string): string {
   if (!/^\*\*(USER|ASSISTANT|SYSTEM|TOOL)\b/m.test(transcript)) return body;
 
   const blocks: string[] = [];
+  const substantiveBlocks: string[] = [];
   const roleRx = /^\*\*(USER|ASSISTANT|SYSTEM|TOOL)\b[^\n]*$/gim;
   const matches = Array.from(transcript.matchAll(roleRx));
   for (let i = 0; i < matches.length; i++) {
@@ -144,8 +150,67 @@ function prepareFallbackBody(body: string): string {
     const blockEnd = i + 1 < matches.length ? matches[i + 1].index ?? transcript.length : transcript.length;
     const raw = transcript.slice(blockStart, blockEnd).trim();
     if (!raw) continue;
-    blocks.push(raw.slice(0, 4000));
-    if (blocks.length >= 20) break;
+    const clipped = raw.slice(0, 4000);
+    blocks.push(clipped);
+    // LEX-FORK B-FIX-1: sample substantive turns, not skill-doc/context preambles.
+    if (!isLowValueHermesPreambleBlock(raw, role)) substantiveBlocks.push(clipped);
   }
-  return blocks.length > 0 ? blocks.join('\n\n') : body;
+
+  const selected = substantiveBlocks.length >= 2 ? substantiveBlocks : blocks;
+  return selected.length > 0 ? selected.slice(0, 20).join('\n\n') : body;
+}
+
+function isLowValueHermesPreambleBlock(block: string, role: string): boolean {
+  if (role !== 'USER') return false;
+  const body = stripRoleMarker(block).trimStart();
+  if (body.startsWith('[IMPORTANT: The user has invoked the "')) return true;
+  if (body.startsWith('[CONTEXT COMPACTION')) return true;
+  return hasMostlyDocumentStructure(body);
+}
+
+function stripRoleMarker(block: string): string {
+  return block.replace(/^\*\*(USER|ASSISTANT)\b[^\n]*\n?/i, '');
+}
+
+function hasMostlyDocumentStructure(body: string): boolean {
+  const lines = body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length < 10) return false;
+
+  let documentLines = 0;
+  let proseLines = 0;
+  let inYamlFrontmatter = lines[0] === '---';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    if (i === 0 && line === '---') {
+      documentLines++;
+      continue;
+    }
+    if (inYamlFrontmatter) {
+      documentLines++;
+      if (line === '---') inYamlFrontmatter = false;
+      continue;
+    }
+    if (/^#{1,6}\s+/.test(line)) {
+      documentLines++;
+      continue;
+    }
+    if (/^[-*+]\s+/.test(line) || /^\d+\.\s+/.test(line)) {
+      documentLines++;
+      continue;
+    }
+    if (/^[A-Za-z0-9_-]+:\s+/.test(line)) {
+      documentLines++;
+      continue;
+    }
+    if (/^```/.test(line) || /^<!--/.test(line) || /^\|/.test(line)) {
+      documentLines++;
+      continue;
+    }
+    if (/[.!?]["')\]]?$/.test(line) && line.split(/\s+/).length >= 6) proseLines++;
+  }
+
+  return documentLines / lines.length > 0.9 && proseLines === 0;
 }
