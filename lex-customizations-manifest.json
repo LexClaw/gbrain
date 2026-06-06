@@ -593,6 +593,14 @@
       "merge_strategy": "After upstream merge, re-add the conversation_parser.llm_fallback_* known keys. Marker check: grep -q 'llm_fallback_enabled' src/core/config.ts."
     },
     {
+      "path": "src/commands/orphans.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "kn7cb8y",
+      "rationale": "LEX-FORK (card kn7cb8y): adds 'sessions' to FIRST_SEGMENT_EXCLUSIONS so archival Hermes transcripts do not inflate orphan_ratio while preserving genuine content orphan reporting.",
+      "reapply": "hand-merge",
+      "merge_strategy": "After upstream merge, re-add the sessions first-segment exclusion if absent. Marker check: grep -q \"'sessions'\" src/commands/orphans.ts AND grep -q 'sessions/ are archival Hermes transcripts' src/commands/orphans.ts. Do NOT add tweet/tweets first-segment exclusions; tweets are /raw/-nested and covered by RAW_SEGMENT."
+    },
+    {
       "path": "test/conversation-parser-llm-fallback.test.ts",
       "kind": "new-file",
       "source_commit": "a2430c27",

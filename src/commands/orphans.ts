@@ -53,7 +53,8 @@ const DENY_PREFIXES = [
 ];
 
 /** First slug segments where no inbound links is expected */
-const FIRST_SEGMENT_EXCLUSIONS = new Set(['scratch', 'thoughts', 'catalog', 'entities']);
+// LEX-FORK (card kn7cb8y): sessions/ are archival Hermes transcripts, never linked-to by design -- excluding them stops the orphan_ratio metric artifact (was 35% of all orphans).
+const FIRST_SEGMENT_EXCLUSIONS = new Set(['scratch', 'thoughts', 'catalog', 'entities', 'sessions']);
 
 // --- Filter logic ---
 

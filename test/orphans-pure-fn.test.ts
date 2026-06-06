@@ -183,6 +183,7 @@ describe('shouldExclude — orphan filter regression (preserve curation)', () =>
     expect(shouldExclude('thoughts/today')).toBe(true);
     expect(shouldExclude('catalog/movies')).toBe(true);
     expect(shouldExclude('entities/anonymous')).toBe(true);
+    expect(shouldExclude('sessions/2026-05-19-2303-39d867')).toBe(true);
   });
 
   test('regular slugs are NOT excluded', () => {
