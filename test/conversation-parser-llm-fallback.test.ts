@@ -6,7 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { parseConversation, parseConversationAsync } from '../src/core/conversation-parser/parse.ts';
 import { withBudgetTracker } from '../src/core/ai/gateway.ts';
-import { BudgetTracker } from '../src/core/budget/budget-tracker.ts';
+import { BudgetTracker, BudgetExhausted } from '../src/core/budget/budget-tracker.ts';
 import type { ChatTransport } from '../src/core/conversation-parser/llm-base.ts';
 
 const SESSION_FIXTURE = readFileSync(
@@ -126,6 +126,32 @@ describe('conversation parser LLM fallback', () => {
 
     expect(result.phase).toBe('llm_fallback');
     expect(result.messages).toHaveLength(1);
+  });
+
+  test('runLlmCall rethrows BudgetExhausted transport failures instead of failing open', async () => {
+    const transport: ChatTransport = async () => {
+      throw new BudgetExhausted('missing pricing for openai:gpt-4.1-mini', {
+        reason: 'no_pricing',
+        spent: 0,
+        cap: 0.3,
+        modelId: 'openai:gpt-4.1-mini',
+      });
+    };
+    const engine = {
+      getConfig: async (key: string) =>
+        key === 'conversation_parser.llm_fallback_enabled' ? 'true' : null,
+    };
+    const tracker = new BudgetTracker({ maxCostUsd: 0.5, label: 'test' });
+
+    await expect(
+      withBudgetTracker(tracker, () =>
+        parseConversationAsync('## Full Conversation\n\n**USER **\nextract this turn', {
+          diagnostic: true,
+          engine: engine as never,
+          chatTransport: transport,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(BudgetExhausted);
   });
 
   test('fallback parses fenced JSON arrays from model output', async () => {

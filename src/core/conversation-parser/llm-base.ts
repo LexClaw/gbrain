@@ -33,6 +33,7 @@ import { createHash } from 'node:crypto';
 import { chat as gatewayChat, type ChatOpts, type ChatResult } from '../ai/gateway.ts';
 import { resolveRecipe } from '../ai/model-resolver.ts';
 import { AIConfigError } from '../ai/errors.ts';
+import { BudgetExhausted } from '../budget/budget-tracker.ts';
 import { loadConfig } from '../config.ts';
 import type { BrainEngine } from '../engine.ts';
 
@@ -136,10 +137,10 @@ export function probeLlmAvailability(modelStr: string): string | null {
  *
  * Fail-open paths (return null):
  *   - Provider unavailable (probeLlmAvailability returned null).
- *   - Transport throws (network, timeout, AIConfigError mid-run).
+ *   - Transport throws (network, timeout, AIConfigError mid-run), except
+ *     BudgetExhausted, which is a hard budget/pricing failure and must
+ *     surface to the caller.
  *   - Parse throws or returns null.
- *
- * NEVER throws.
  */
 export interface RunLlmCallOpts<TOutput> {
   shape: CallShape;
@@ -218,7 +219,8 @@ export async function runLlmCall<TOutput>(
       maxTokens: opts.maxTokens ?? 4000,
       abortSignal: opts.signal,
     });
-  } catch {
+  } catch (err) {
+    if (err instanceof BudgetExhausted) throw err;
     // Transport failure: fail-open.
     return null;
   }

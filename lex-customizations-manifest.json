@@ -572,9 +572,9 @@
       "path": "src/core/conversation-parser/llm-base.ts",
       "kind": "modified-upstream-file",
       "source_commit": "a2430c27",
-      "rationale": "LEX-FORK (T4 wiring): in runLlmCall, bypass the real-provider availability probe when a chatTransport test seam is injected, so unit tests exercise the fallback path without a live provider key. Production (no chatTransport) still probes. Card kn7e69h.",
+      "rationale": "LEX-FORK (T4 wiring + budget safety): in runLlmCall, bypass the real-provider availability probe when a chatTransport test seam is injected, so unit tests exercise the fallback path without a live provider key; also rethrow BudgetExhausted so cost/pricing failures surface instead of masquerading as zero extracted facts. Production (no chatTransport) still probes. Card kn7e69h.",
       "reapply": "hand-merge",
-      "merge_strategy": "After upstream merge, re-apply the chatTransport probe-bypass in runLlmCall if absent. Marker check: grep -q 'when a chatTransport is injected' src/core/conversation-parser/llm-base.ts."
+      "merge_strategy": "After upstream merge, re-apply the chatTransport probe-bypass and BudgetExhausted rethrow in runLlmCall if absent. Marker checks: grep -q 'when a chatTransport is injected' src/core/conversation-parser/llm-base.ts AND grep -q 'BudgetExhausted' src/core/conversation-parser/llm-base.ts."
     },
     {
       "path": "src/commands/conversation-parser.ts",
@@ -604,7 +604,7 @@
       "path": "test/conversation-parser-llm-fallback.test.ts",
       "kind": "new-file",
       "source_commit": "a2430c27",
-      "rationale": "LEX-FORK (T4 wiring + yield tuning): tests sync parser stays regex-only, async parser uses opt-in fallback to extract >0 messages from real Hermes session fixtures, B-FIX-1 filters skill-doc/context preambles from a known 0-fact session, B-FIX-3 parses fenced JSON, and non-chat bodies stay no_match. Cards kn7e69h, kn7dyv5ntf9g6bh65mnr3xx4b18851k8.",
+      "rationale": "LEX-FORK (T4 wiring + yield tuning + budget safety): tests sync parser stays regex-only, async parser uses opt-in fallback to extract >0 messages from real Hermes session fixtures, B-FIX-1 filters skill-doc/context preambles from a known 0-fact session, B-FIX-3 parses fenced JSON, non-chat bodies stay no_match, and BudgetExhausted rethrows instead of failing open. Cards kn7e69h, kn7dyv5ntf9g6bh65mnr3xx4b18851k8.",
       "reapply": "checkout-subtree"
     },
     {
