@@ -89,6 +89,8 @@ describe('conversation parser LLM fallback', () => {
       expect(content).not.toContain('[CONTEXT COMPACTION');
       expect(content).toContain('Wave 2 Execution Summary - COMPLETE');
       expect(content).toContain('Strategic-Consulting Skill Pre-Load Pattern');
+      expect(opts.system).toContain('Skill-invocation wrappers and context-compaction summaries embedded in');
+      expect(opts.system).toContain('Only return [] when there are genuinely NO');
       return {
         text: JSON.stringify([
           {
