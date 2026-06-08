@@ -34,6 +34,7 @@ import { gbrainPath } from '../config.ts';
 import { ANTHROPIC_PRICING, type ModelPricing } from '../anthropic-pricing.ts';
 import { EMBEDDING_PRICING, lookupEmbeddingPrice } from '../embedding-pricing.ts';
 import { splitProviderModelId } from '../model-id.ts';
+import { getRecipe } from '../ai/recipes/index.ts';
 import { isoWeekFilename, resolveAuditDir } from '../audit-week-file.ts';
 
 export type BudgetKind = 'chat' | 'embed' | 'rerank';
@@ -193,6 +194,24 @@ function lookupPricing(modelId: string, kind: BudgetKind): ModelPricing | null {
   if (modelTail) {
     const tailHit = ANTHROPIC_PRICING[modelTail];
     if (tailHit) return tailHit;
+  }
+  // LEX-FORK (card kn7dyv5ntf9g6bh65mnr3xx4b18851k8): OpenAI and other
+  // recipe-backed chat providers carry pricing on the recipe instead of in
+  // ANTHROPIC_PRICING. Without this bridge, any --max-cost-bounded chat call
+  // routed to a non-Anthropic configured model fails TX2 before the provider
+  // call, so conversation-parser fallback can never run on machines whose
+  // available chat provider is OpenAI.
+  if (kind === 'chat' && providerId) {
+    const chat = getRecipe(providerId)?.touchpoints.chat;
+    if (
+      typeof chat?.cost_per_1m_input_usd === 'number' &&
+      typeof chat?.cost_per_1m_output_usd === 'number'
+    ) {
+      return {
+        input: chat.cost_per_1m_input_usd,
+        output: chat.cost_per_1m_output_usd,
+      };
+    }
   }
   // v0.40.6.1: zero-price local-inference rerank providers so the budget
   // tracker's TX2 hard-fail doesn't trip on `llama-server-reranker:<model>`

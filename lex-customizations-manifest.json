@@ -577,6 +577,14 @@
       "merge_strategy": "After upstream merge, re-apply the chatTransport probe-bypass and BudgetExhausted rethrow in runLlmCall if absent. Marker checks: grep -q 'when a chatTransport is injected' src/core/conversation-parser/llm-base.ts AND grep -q 'BudgetExhausted' src/core/conversation-parser/llm-base.ts."
     },
     {
+      "path": "src/core/budget/budget-tracker.ts",
+      "kind": "modified-upstream-file",
+      "source_commit": "a2430c27",
+      "rationale": "LEX-FORK (card kn7dyv5ntf9g6bh65mnr3xx4b18851k8): bridge recipe-backed chat pricing into lookupPricing(). OpenAI and other recipe providers carry per-1M chat pricing on the recipe, not in ANTHROPIC_PRICING. Without this, any --max-cost-bounded chat call routed to a non-Anthropic configured model fails TX2 no_pricing before the provider call, so conversation-parser LLM fallback can never run on hosts whose only available chat provider is OpenAI (e.g. no ANTHROPIC_API_KEY). This unblocked Phase C yield measurement.",
+      "reapply": "hand-merge",
+      "merge_strategy": "After upstream merge, re-apply the recipe-pricing bridge in lookupPricing() if absent. Marker check: grep -q 'kn7dyv5ntf9g6bh65mnr3xx4b18851k8' src/core/budget/budget-tracker.ts AND grep -q 'getRecipe' src/core/budget/budget-tracker.ts."
+    },
+    {
       "path": "src/commands/conversation-parser.ts",
       "kind": "modified-upstream-file",
       "source_commit": "a2430c27",
