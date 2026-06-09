@@ -13,11 +13,10 @@ writes_pages: true
 writes_to:
   - concepts/
   - projects/
-# Brain-first analyzer matches `web_fetch` in a diagram on line 106
-# (illustrating fetch shape, not an API call) and `perplexity` in a
-# cross-reference to perplexity-research. The skill itself works on
-# uploaded source text + writes brain pages; it doesn't call external
-# APIs. Declarative opt-out.
+# Brain-first analyzer matches `web_fetch` in a process diagram (illustrating
+# fetch shape, not an API call) and `perplexity` in a cross-reference to
+# perplexity-research. The skill itself works on uploaded source text and
+# writes brain pages; it does not call external APIs. Declarative opt-out.
 brain_first: exempt
 ---
 
