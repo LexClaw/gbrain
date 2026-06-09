@@ -36,7 +36,7 @@
  *   cycle.conversation_facts_backfill.max_total_cost_usd   (5.00)
  *   cycle.conversation_facts_backfill.max_walltime_min     (20)
  *   cycle.conversation_facts_backfill.max_total_walltime_min (30)
- *   cycle.conversation_facts_backfill.types                (["conversation","meeting","slack","email"])
+ *   cycle.conversation_facts_backfill.types                (["conversation","meeting","slack","email","session"])
  *
  * `.types` is the single source of truth for "enabled types" — the CLI
  * default reads from the same key (Eng-v2 A2).

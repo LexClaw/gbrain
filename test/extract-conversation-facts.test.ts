@@ -20,6 +20,7 @@ import {
   type ChatResult,
 } from '../src/core/ai/gateway.ts';
 import {
+  ALLOWED_TYPES,
   parseConversationMessages,
   splitIntoSegments,
   renderSegmentForExtraction,
@@ -300,7 +301,7 @@ describe('runExtractConversationFactsCore', () => {
     // truncation semantics than the canonical reset helper.
     await engine.executeRaw(`DELETE FROM facts WHERE source LIKE 'cli:extract-conversation-facts%'`);
     await engine.executeRaw(`DELETE FROM op_checkpoints WHERE op = 'extract-conversation-facts'`);
-    await engine.executeRaw(`DELETE FROM pages WHERE slug LIKE 'conversations/%' OR slug LIKE 'people/alice%'`);
+    await engine.executeRaw(`DELETE FROM pages WHERE slug LIKE 'conversations/%' OR slug LIKE 'sessions/%' OR slug LIKE 'people/alice%'`);
     // Set facts.extraction_enabled=true so kill-switch doesn't refuse.
     await engine.setConfig('facts.extraction_enabled', 'true');
     // Seed test pages.
@@ -318,6 +319,29 @@ describe('runExtractConversationFactsCore', () => {
       timeline: '',
       frontmatter: {},
     });
+    await engine.putPage('sessions/2026-05-17-1803-45cd97', {
+      type: 'session',
+      title: 'Session: Alice Example',
+      compiled_truth: SAMPLE_BODY,
+      timeline: '',
+      frontmatter: {},
+    });
+  });
+
+  test('--types session is allowed and processes a session page', async () => {
+    expect(ALLOWED_TYPES).toContain('session');
+
+    const result = await runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      types: ['session'],
+      slug: 'sessions/2026-05-17-1803-45cd97',
+      dryRun: true,
+      sleepMs: 0,
+    });
+
+    expect(result.pages_considered).toBe(1);
+    expect(result.pages_processed).toBe(1);
+    expect(result.segments_processed).toBeGreaterThanOrEqual(1);
   });
 
   test('dry-run reports segmentation without writing facts', async () => {

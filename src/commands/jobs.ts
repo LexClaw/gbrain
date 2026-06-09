@@ -1228,12 +1228,12 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     }
     const types = Array.isArray(job.data.types)
       ? (job.data.types as string[]).filter((t) =>
-          ['conversation', 'meeting', 'slack', 'email'].includes(t),
+          ['conversation', 'meeting', 'slack', 'email', 'session'].includes(t),
         )
       : undefined;
     const result = await runExtractConversationFactsCore(engine, {
       sourceId,
-      types: types as ('conversation' | 'meeting' | 'slack' | 'email')[] | undefined,
+      types: types as ('conversation' | 'meeting' | 'slack' | 'email' | 'session')[] | undefined,
       slug: typeof job.data.slug === 'string' ? job.data.slug : undefined,
       dryRun: !!job.data.dryRun,
       limit: typeof job.data.limit === 'number' ? job.data.limit : undefined,
