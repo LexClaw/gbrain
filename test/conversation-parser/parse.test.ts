@@ -693,6 +693,46 @@ describe('bold-name-colon-outside pattern (voice-call/browser, no timestamp)', (
 });
 
 
+// ---------------------------------------------------------------------------
+// hermes-session-role-heading pattern (Hermes session archives with role
+// headings like `**USER **` / `**ASSISTANT**`; body follows on later lines).
+// ---------------------------------------------------------------------------
+
+describe('hermes-session-role-heading pattern (Hermes session archives)', () => {
+  test('parses real session archive role headings with trailing-space and bracket variants', () => {
+    const body = [
+      '# Session Archive: 2026-05-17 18:03',
+      '**Session ID:** session_20260517_180332_45cd97',
+      '---',
+      '## Full Conversation',
+      '',
+      '**USER **',
+      '[TJ] Wire hermes-message-hook.py into prompt_builder.py.',
+      'Keep it feature-flagged.',
+      '',
+      '---',
+      '',
+      '**ASSISTANT**',
+      'Implemented the feature flag and added tests.',
+      '',
+      '---',
+      '',
+      '**USER [2026-04-12T05:10:48]**',
+      'Run the verification now.',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-05-17' });
+    expect(r.phase).toBe('regex_match');
+    expect(r.matched_pattern_id).toBe('hermes-session-role-heading');
+    expect(r.messages).toHaveLength(3);
+    expect(r.messages[0].speaker).toBe('USER');
+    expect(r.messages[0].text).toContain('[TJ] Wire hermes-message-hook.py');
+    expect(r.messages[1].speaker).toBe('ASSISTANT');
+    expect(r.messages[1].text).toBe('Implemented the feature flag and added tests.');
+    expect(r.messages[2].speaker).toBe('USER');
+    expect(r.messages[2].text).toBe('Run the verification now.');
+  });
+});
+
 
 describe('parseConversation — full-body fallback', () => {
   // T3 #1: IRON-RULE regression pin for #1533. Pre-fix this returns

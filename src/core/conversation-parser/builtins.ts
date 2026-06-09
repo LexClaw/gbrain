@@ -179,6 +179,43 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
   },
 
   {
+    // Hermes session archives render turns as bold role headings on their
+    // own line, followed by the body until the next role heading:
+    //   **USER **
+    //   ...body...
+    //   **ASSISTANT**
+    //   ...body...
+    // The role label sometimes carries bracket metadata, e.g.
+    // `**USER [2026-04-12T05:10:48]**`. This is a sparse delimiter
+    // format, so anchors can be far below the parser's generic 5% line
+    // density floor on long sessions.
+    id: 'hermes-session-role-heading',
+    origin: 'builtin',
+    regex: /^\*\*\s*(USER|ASSISTANT|SYSTEM|TOOL|DEVELOPER)(?:\s+\[[^\]]+\])?\s*\*\*\s*$/i,
+    captures: {
+      speaker_group: 1,
+      text_group: 0,
+    },
+    date_source: 'frontmatter',
+    time_format: '24h',
+    timezone_policy: 'utc_assumed_with_warn',
+    multi_line: true,
+    quick_reject: /^\*\*\s*(?:USER|ASSISTANT|SYSTEM|TOOL|DEVELOPER)\b/i,
+    min_acceptance_score: 0.01,
+    test_positive: [
+      '**USER **',
+      '**ASSISTANT**',
+      '**USER [2026-04-12T05:10:48]**',
+    ],
+    test_negative: [
+      '**Session ID:** session_20260517_180332_45cd97',
+      '**Alice Example:** message',
+      'USER: plain role label',
+    ],
+    source_doc: 'Hermes session archive markdown: bold uppercase role heading on its own line, body follows on subsequent lines',
+  },
+
+  {
     // Modern meeting-transcription tools (Circleback, Granola, Zoom)
     // emit `**Speaker Name:** message text` with NO per-line
     // timestamp. Every other built-in requires a time anchor, so this

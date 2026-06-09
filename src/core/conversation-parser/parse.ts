@@ -331,6 +331,7 @@ export function applyPattern(
     const rawLine = lines[i];
     const line = rawLine.trim();
     if (!line) continue;
+    if (entry.id === 'hermes-session-role-heading' && line === '---') continue;
 
     // Quick-reject fast path.
     if (entry.quick_reject && !entry.quick_reject.test(line)) {
@@ -591,11 +592,27 @@ function parseConversationRegexOnly(
   // the page mis-parses as a conversation. When the winner is flagged
   // `score_full_body` and we have NOT already scored full-body, recompute
   // its score over the whole document so the floor judges true density.
-  // We do NOT re-pick the winner: the head pick is already the best
-  // candidate; this only tightens its acceptance (a real transcript
-  // stays ~1.0; a 3/200-label notes page drops to ~0.015 → no_match).
+  // The normal case does NOT re-pick the winner: it only tightens the
+  // broad head winner's acceptance. One exception: sparse delimiter
+  // formats with a pattern-specific lower acceptance floor (Hermes
+  // session role headings) can beat that demoted broad pattern on the
+  // same full-body score pass, so allow a re-pick only when the fallback
+  // candidate clears its own floor and exceeds the demoted head winner.
   if (top.entry.score_full_body && !fullBodyScored) {
-    top.score = scoreFromLines(getNonBlankLines(body), top.entry);
+    const allLines = getNonBlankLines(body);
+    top.score = scoreFromLines(allLines, top.entry);
+    const rescored = candidates.map((entry) => ({
+      entry,
+      score: scoreFromLines(allLines, entry),
+      priority: priorityOf(entry.id),
+    }));
+    sortScored(rescored);
+    const fallbackTop = rescored[0];
+    const fallbackMin = fallbackTop.entry.min_acceptance_score ?? SCORING_MIN_ACCEPTANCE;
+    if (fallbackTop.score >= fallbackMin && fallbackTop.score > top.score) {
+      top.entry = fallbackTop.entry;
+      top.score = fallbackTop.score;
+    }
   }
 
   // Minimum acceptance floor (closes Codex P1 #2): an essay with
@@ -603,7 +620,8 @@ function parseConversationRegexOnly(
   // below the 5% floor we stay no_match instead of returning a
   // 1-message false positive. Real transcript pages typically score
   // 0.5+ and sail through.
-  if (top.score < SCORING_MIN_ACCEPTANCE) {
+  const minAcceptance = top.entry.min_acceptance_score ?? SCORING_MIN_ACCEPTANCE;
+  if (top.score < minAcceptance) {
     return {
       messages: [],
       phase: 'no_match',

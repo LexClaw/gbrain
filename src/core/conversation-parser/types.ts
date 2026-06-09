@@ -185,6 +185,9 @@ export interface PatternEntry {
    * real transcript stays ~1.0.
    */
   score_full_body?: boolean;
+  /** Optional acceptance floor for sparse delimiter formats where one
+   *  anchor can own a large multi-line body. Defaults to parser global floor. */
+  min_acceptance_score?: number;
   /** D7: module-load validation — known-positive sample lines. */
   test_positive: string[];
   /** D7: module-load validation — known-negative sample lines. */
