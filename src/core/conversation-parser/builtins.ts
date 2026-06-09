@@ -1,7 +1,7 @@
 /**
  * v0.41.16.0 — Built-in conversation parser pattern registry.
  *
- * Fourteen hand-vetted patterns covering the chat-export formats this
+ * Fifteen hand-vetted patterns covering the chat-export formats this
  * codebase is most likely to encounter. Each pattern's regex was
  * derived from a public format reference (source_doc field) so future
  * maintainers can verify against the wild shape.
@@ -50,7 +50,7 @@ export function cleanSpeaker(raw: string, override?: RegExp): string {
   return stripped || raw.trim();
 }
 
-/** The 14 hand-vetted built-in patterns. */
+/** The 15 hand-vetted built-in patterns. */
 export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
   // -------------------------------------------------------------------
   // INLINE-DATE patterns (date in every line; less ambiguous; tried first).
@@ -245,6 +245,80 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     ],
     source_doc:
       'Circleback / Granola / Zoom meeting-transcript export shape: `**Speaker:** text` with no per-line timestamp',
+  },
+
+  {
+    // v0.42+ (card kn78tc8368q2jf826zf6yecban88bspb): voice-call and
+    // browser-chat transcripts render speaker turns as `**Speaker**:
+    // text` — bold markers around the NAME, colon OUTSIDE the bold.
+    // This is the dominant unparsed shape in this corpus (voice-server
+    // call logs, browser /talk sessions): 18 of 41 no_match pages used
+    // it. Every other built-in either requires a time anchor or puts
+    // the colon INSIDE the bold (`**Name:**` → bold-name-no-time), so
+    // these scored 0 and parsed to zero messages, losing all speaker
+    // attribution + fact extraction.
+    //
+    // NON-SHADOW GUARANTEE (the safety is in the REGEX, not declaration
+    // order). parse.ts scores every candidate independently; index is
+    // ONLY the tie-break. This pattern cannot steal:
+    //   - bold-name-no-time's `**Name:**` (colon inside): after the
+    //     closing `**` this regex requires `:`, but `**Name:**` has no
+    //     colon after the closing `**`.
+    //   - bold-paren-time / imessage-slack's `**Name** (time):`: after
+    //     the closing `**` comes ` (`, not `:`.
+    //   - telegram-bracket's `**[18:37] Name:**`: the `[^*\[\]]` speaker
+    //     class excludes `[`, so a bracketed speaker never matches.
+    //
+    // No per-line timestamp: date_source='frontmatter' with hour_group
+    // undefined routes through parse.ts's no-time branch — every message
+    // anchors at 00:00:00 of the frontmatter date (irc-classic / bold-
+    // name-no-time convention). Intra-day ordering preserved by line
+    // order; no wall-clock time fabricated.
+    //
+    // BROAD-REGEX GUARD (score_full_body): `**Word**: text` is a common
+    // prose idiom too (`**Note**: ...`). score_full_body forces full-body
+    // density scoring before the 0.05 acceptance floor so a notes page
+    // with a few such lines clustered in its head falls to no_match,
+    // while a real transcript (most lines anchored) stays well above it.
+    //
+    // Declared AFTER bold-name-no-time so on a rare score tie that
+    // colon-inside sibling wins first.
+    id: 'bold-name-colon-outside',
+    origin: 'builtin',
+    // Matches: **Speaker Name**: message text  (colon OUTSIDE bold;
+    // speaker may not contain `*`, `[`, or `]` — see shadow rationale).
+    regex: /^\*\*([^*\[\]]+?)\*\*\s*:\s*(.*)$/,
+    captures: {
+      speaker_group: 1,
+      text_group: 2,
+    },
+    date_source: 'frontmatter',
+    time_format: '24h',
+    timezone_policy: 'utc_assumed_with_warn',
+    multi_line: false,
+    quick_reject: /^\*\*/,
+    score_full_body: true,
+    test_positive: [
+      '**Lex**: Hey there! Great to hear from you.',
+      '**Caller**: Hey, I am just calling to test this feature.',
+      '**TJ Shedd**: Let us start the call.',
+    ],
+    test_negative: [
+      // bold-name-no-time shape (colon INSIDE bold) MUST fall through:
+      '**Alice Example:** Okay, start on.',
+      // bold-paren-time shape (colon after parens) MUST fall through:
+      '**Alice** (00:00): text',
+      // imessage-slack shape MUST fall through:
+      '**Alice Example** (2024-03-15 9:00 AM): iMessage shape',
+      // telegram-bracket shape (bracketed speaker) MUST NOT match:
+      '**[18:37] \u{1f464} G T:** hello',
+      // Bold but no colon at all:
+      '**Alice** hello world',
+      // No bold markers:
+      'Alice: plain no bold',
+    ],
+    source_doc:
+      'Hit Network voice-server call logs + browser /talk session transcripts: `**Speaker**: text` (bold name, colon outside bold, no per-line timestamp)',
   },
 
   {

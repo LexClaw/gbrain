@@ -586,8 +586,113 @@ describe('bold-name-no-time pattern (Circleback/Granola/Zoom, no timestamp)', ()
 });
 
 // ---------------------------------------------------------------------------
-// parseConversation — full-body fallback (v0.41.18+ #1533 + Codex P1 #1, #2, #8)
+// bold-name-colon-outside pattern (voice-call / browser transcripts with
+// `**Speaker**: text` — bold name, colon OUTSIDE the bold, NO timestamp).
+// Additive pattern (card kn78tc8368q2jf826zf6yecban88bspb). The colon
+// OUTSIDE the bold markers + the `[^*\[\]]` speaker class are what keep it
+// disjoint from bold-name-no-time / bold-paren-time / telegram-bracket
+// (the safety is the regex, NOT declaration order).
 // ---------------------------------------------------------------------------
+
+describe('bold-name-colon-outside pattern (voice-call/browser, no timestamp)', () => {
+  test('parses **Speaker**: text transcript with frontmatter date anchor', () => {
+    const body = [
+      '**Lex**: Hey there! Great to hear from you. What can I help with?',
+      '**Caller**: Hey, I am just calling to test this feature.',
+      '**Lex**: Got it. Everything sounding good on your end?',
+      '**Caller**: Yeah, so far so good.',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-04-12' });
+    expect(r.phase).toBe('regex_match');
+    expect(r.matched_pattern_id).toBe('bold-name-colon-outside');
+    expect(r.messages).toHaveLength(4);
+    expect(r.messages[0]).toEqual({
+      speaker: 'Lex',
+      timestamp: '2026-04-12T00:00:00Z',
+      text: 'Hey there! Great to hear from you. What can I help with?',
+    });
+    expect(r.messages[1].speaker).toBe('Caller');
+    expect(r.messages[3].text).toBe('Yeah, so far so good.');
+    // No-time pattern anchors at 00:00:00 of the frontmatter date. No
+    // wall-clock time fabricated.
+  });
+
+  test('parses a real voice-call page shape (metadata head + ## Transcript)', () => {
+    // Mirrors the on-disk voice-call page: `# Voice Call` title, a few
+    // `- Date:` metadata lines, `## Transcript`, then the turns. The
+    // metadata dilutes the head-pass score but the turns still parse.
+    const body = [
+      '# Voice Call: +1770XXXXXXX',
+      '- Date: 2026-05-31',
+      '- Caller: +1770XXXXXXX',
+      '- Transport: phone',
+      '- Call SID: CAxxxxxxxx',
+      '## Transcript',
+      '**Lex**: Hey, you have reached Lex Mercer.',
+      '**Caller**: Hi, quick question for you.',
+      '**Lex**: Of course, go ahead.',
+      '**Caller**: What do you remember about our work today?',
+      '**Lex**: Let me check the records on that.',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-05-31' });
+    expect(r.phase).toBe('regex_match');
+    expect(r.matched_pattern_id).toBe('bold-name-colon-outside');
+    // 5 speaker turns; the 5 metadata/header lines do not anchor.
+    expect(r.messages).toHaveLength(5);
+    expect(r.messages[0].speaker).toBe('Lex');
+  });
+
+  // REGRESSION: must NOT shadow bold-name-no-time. A `**Name:**` line has
+  // its colon INSIDE the bold markers, so it must still parse via
+  // bold-name-no-time (the safety is the regex, not declaration order).
+  test('REGRESSION: **Speaker:** text still matches bold-name-no-time', () => {
+    const body = [
+      '**Alice Example:** Okay, start on.',
+      '**Participant 2:** Sounds good, going now.',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-05-28' });
+    expect(r.phase).toBe('regex_match');
+    expect(r.matched_pattern_id).toBe('bold-name-no-time');
+    expect(r.matched_pattern_id).not.toBe('bold-name-colon-outside');
+  });
+
+  // REGRESSION: must NOT shadow bold-paren-time. `**Name** (00:00): text`
+  // has the colon AFTER the parens, not directly after the bold, so it
+  // must still parse via bold-paren-time.
+  test('REGRESSION: **Speaker** (HH:MM): text still matches bold-paren-time', () => {
+    const body = [
+      '**Alice Example** (00:00): Hey, can you hear me?',
+      '**Participant 2** (02:22): Yeah, just joined.',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-03-19' });
+    expect(r.phase).toBe('regex_match');
+    expect(r.matched_pattern_id).toBe('bold-paren-time');
+    expect(r.matched_pattern_id).not.toBe('bold-name-colon-outside');
+  });
+
+  // BROAD-REGEX GUARD (score_full_body): `**Word**: text` is a common prose
+  // idiom. A notes page with a few such lines clustered in its head scores
+  // 0.3 on the head pass, skips the rescore, and clears the 0.05 floor.
+  // score_full_body recomputes over the full body so the page falls to
+  // no_match instead of mis-parsing as a conversation.
+  test('GUARD: prose with stray **Word**: lines clustered in head returns no_match', () => {
+    const lines = [
+      '**Status**: in progress on the vendor migration',
+      '**Owner**: the platform team leads this workstream',
+      '**Next**: schedule the Q3 roadmap review with stakeholders',
+    ];
+    for (let i = 0; i < 80; i++) {
+      lines.push(
+        `This is an ordinary prose sentence number ${i} describing the meeting in detail.`,
+      );
+    }
+    const body = lines.join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-05-28' });
+    expect(r.phase).toBe('no_match');
+  });
+});
+
+
 
 describe('parseConversation — full-body fallback', () => {
   // T3 #1: IRON-RULE regression pin for #1533. Pre-fix this returns

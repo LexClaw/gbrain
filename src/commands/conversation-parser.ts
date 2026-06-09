@@ -5,7 +5,7 @@
  *   - scan <slug>       Dry-run the parser on a page; report which
  *                       pattern matched, message count, polish/fallback
  *                       diagnostics.
- *   - list-builtins     Print the 12 built-in pattern registry rows
+ *   - list-builtins     Print the built-in pattern registry rows
  *                       with id, regex shape, source_doc.
  *   - validate <file>   Validate a user-declared simple_pattern JSON
  *                       spec (v0.42+ — see TODOS.md).
