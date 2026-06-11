@@ -1970,15 +1970,14 @@ export function checkAutopilotLockScope(): Check {
  */
 export async function checkStaleLocks(engine: BrainEngine): Promise<Check> {
   try {
-    const { listStaleLocks } = await import('../core/db-lock.ts');
+    const { listStaleLocks, breakLockHintFor } = await import('../core/db-lock.ts');
     const stale = await listStaleLocks(engine);
     if (stale.length === 0) {
       return { name: 'stale_locks', status: 'ok', message: 'No stale locks (no rows with ttl_expires_at < NOW())' };
     }
     const lines = stale.slice(0, 10).map(s => {
       const ageH = Math.floor(s.age_ms / 3600_000);
-      const source = s.id.startsWith('gbrain-sync:') ? s.id.slice('gbrain-sync:'.length) : null;
-      const breakHint = source ? `gbrain sync --break-lock --source ${source}` : `gbrain sync --break-lock`;
+      const breakHint = breakLockHintFor(s.id);
       return `  ${s.id} (pid ${s.holder_pid} on ${s.holder_host}, age ${ageH}h) → ${breakHint}`;
     });
     const tail = stale.length > 10 ? `  ... and ${stale.length - 10} more.` : null;
@@ -3182,28 +3181,38 @@ export async function buildChecks(
       }
     }
 
-    const report = checkResolvable(skillsDir);
-    if (report.errors.length === 0 && report.warnings.length === 0) {
+    const isHermesSkillsDir = detected.source === 'hermes_home' || detected.source === 'hermes_default';
+    if (isHermesSkillsDir) {
+      const manifest = loadOrDeriveManifest(skillsDir);
+      checks.push({
+        name: 'resolver_health',
+        status: 'ok',
+        message: `${manifest.skills.length} Hermes skills indexed (${detected.source === 'hermes_home' ? '$HERMES_HOME/skills' : '~/.hermes/skills'}); RESOLVER.md trigger reachability is not enforced for Hermes description-routed skills`,
+      });
+    } else {
+      const report = checkResolvable(skillsDir);
+      if (report.errors.length === 0 && report.warnings.length === 0) {
       checks.push({
         name: 'resolver_health',
         status: 'ok',
         message: `${report.summary.total_skills} skills, all reachable`,
       });
-    } else {
-      const status = report.errors.length > 0 ? 'fail' as const : 'warn' as const;
-      const total = report.errors.length + report.warnings.length;
-      const check: Check = {
-        name: 'resolver_health',
-        status,
-        message: `${total} issue(s): ${report.errors.length} error(s), ${report.warnings.length} warning(s)`,
-        issues: [...report.errors, ...report.warnings].map(i => ({
-          type: i.type,
-          skill: i.skill,
-          action: i.action,
-          fix: i.fix,
-        })),
-      };
-      checks.push(check);
+      } else {
+        const status = report.errors.length > 0 ? 'fail' as const : 'warn' as const;
+        const total = report.errors.length + report.warnings.length;
+        const check: Check = {
+          name: 'resolver_health',
+          status,
+          message: `${total} issue(s): ${report.errors.length} error(s), ${report.warnings.length} warning(s)`,
+          issues: [...report.errors, ...report.warnings].map(i => ({
+            type: i.type,
+            skill: i.skill,
+            action: i.action,
+            fix: i.fix,
+          })),
+        };
+        checks.push(check);
+      }
     }
   } else if (scope === 'all') {
     checks.push({ name: 'resolver_health', status: 'warn', message: 'Could not find skills directory' });
@@ -3633,14 +3642,36 @@ export async function buildChecks(
       } else {
         const hitsByPattern: Record<string, number> = {};
         let unmatched = 0;
+        let skippedNonTranscript = 0;
         for (const page of sample) {
           const body = `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`.trim();
+          // Coverage should measure pages that are actually conversation
+          // parser candidates. Meeting prep briefs, Zoom-note summaries, and
+          // session archive index tables are valuable brain pages, but they are
+          // not transcript bodies and should not dilute parser-format health.
+          const lowerSlug = page.slug.toLowerCase();
+          const transcriptLike =
+            /(^|\n)##\s+transcript\b/i.test(body) ||
+            /(^|\n)#{1,3}\s+messages\b/i.test(body) ||
+            /(^|\n)\*\*(USER|ASSISTANT|SYSTEM)\b/i.test(body) ||
+            /^\d{4}-\d{2}-\d{2}T.*\|/m.test(body) ||
+            /^\[\d{1,2}:\d{2}/m.test(body) ||
+            /^\d{1,2}\/\d{1,2}\/\d{2,4},\s+\d{1,2}:\d{2}/m.test(body);
+          const archiveIndex =
+            lowerSlug.endsWith('/index') ||
+            /#\s+session archive index/i.test(body) ||
+            /\|\s*Date\s*\|\s*Time\s*\|\s*Session ID\s*\|/i.test(body);
+          if (!transcriptLike || archiveIndex) {
+            skippedNonTranscript++;
+            continue;
+          }
           const result = parseConversation(body, { page, noPolish: true, noFallback: true });
           const id = result.matched_pattern_id ?? '_no_match';
           hitsByPattern[id] = (hitsByPattern[id] ?? 0) + 1;
           if (result.phase === 'no_match') unmatched++;
         }
-        const unmatchedPct = (unmatched / sample.length) * 100;
+        const denominator = sample.length - skippedNonTranscript;
+        const unmatchedPct = denominator > 0 ? (unmatched / denominator) * 100 : 0;
         const breakdown = Object.entries(hitsByPattern)
           .sort(([, a], [, b]) => b - a)
           .map(([k, v]) => `${k}=${v}`)
@@ -3650,8 +3681,9 @@ export async function buildChecks(
             name: 'conversation_format_coverage',
             status: 'warn',
             message:
-              `${unmatched}/${sample.length} conversation pages (${unmatchedPct.toFixed(1)}%) match NO built-in pattern. ` +
-              `Breakdown: ${breakdown}. ` +
+              `${unmatched}/${denominator} transcript-like conversation pages (${unmatchedPct.toFixed(1)}%) match NO built-in pattern; ` +
+              `${skippedNonTranscript} sampled summary/index page(s) skipped. ` +
+              `Breakdown: ${breakdown || 'none'}. ` +
               `Investigate: gbrain conversation-parser scan <slug> | ` +
               `Enable LLM fallback (opt-in): gbrain config set conversation_parser.llm_fallback_enabled true`,
           });
@@ -3659,7 +3691,7 @@ export async function buildChecks(
           checks.push({
             name: 'conversation_format_coverage',
             status: 'ok',
-            message: `${sample.length} pages: ${breakdown}`,
+            message: `${denominator} transcript-like page(s): ${breakdown || 'none'} (${skippedNonTranscript} sampled summary/index page(s) skipped)`,
           });
         }
       }
@@ -5082,17 +5114,26 @@ export async function buildChecks(
     } else {
       const summary = summarizeContentSanityEvents(events);
       const topPatterns = summary.top_patterns.slice(0, 3).map(p => `${p.name}=${p.count}`).join(', ');
+      const topReasons = summary.top_reasons.slice(0, 3).map(p => `${p.name}=${p.count}`).join(', ');
       const topSources = Object.entries(summary.by_source)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 3)
         .map(([s, n]) => `${s}=${n}`)
         .join(', ');
+      const oversizeOnly = summary.by_type.hard_block === 0 &&
+        summary.top_reasons.length > 0 &&
+        summary.top_reasons.every(r => r.name === 'PAGE_OVERSIZED' || r.name === 'PAGE_OVERSIZE_WARN');
       const status: 'ok' | 'warn' | 'fail' =
-        events.length >= 100 ? 'fail' : events.length >= 10 ? 'warn' : 'ok';
+        summary.by_type.hard_block > 0 ? 'fail' :
+          oversizeOnly ? 'ok' :
+            events.length >= 100 ? 'fail' : events.length >= 10 ? 'warn' : 'ok';
+      const explanation = oversizeOnly
+        ? ' Oversize-only cluster: pages are allowed to land with embedding skipped/warned; split only the recurring raw-doc/session sources that need semantic retrieval.'
+        : '';
       checks.push({
         name: 'content_sanity_audit_recent',
         status,
-        message: `${events.length} events (hard=${summary.by_type.hard_block} soft=${summary.by_type.soft_block} warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
+        message: `${events.length} events (hard=${summary.by_type.hard_block} soft=${summary.by_type.soft_block} warn=${summary.by_type.warn})${topReasons ? ', reasons: ' + topReasons : ''}${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}.${explanation} (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
       });
     }
   } catch (err) {
@@ -6048,13 +6089,8 @@ function printAutoFixReport(report: AutoFixReport, dryRun: boolean, jsonOutput: 
 
 /** Quick skill conformance check — frontmatter + required sections */
 function checkSkillConformance(skillsDir: string): Check {
-  const manifestPath = join(skillsDir, 'manifest.json');
-  if (!existsSync(manifestPath)) {
-    return { name: 'skill_conformance', status: 'warn', message: 'manifest.json not found' };
-  }
-
   try {
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    const manifest = loadOrDeriveManifest(skillsDir);
     const skills = manifest.skills || [];
     let passing = 0;
     const failing: string[] = [];
@@ -6075,15 +6111,16 @@ function checkSkillConformance(skillsDir: string): Check {
     }
 
     if (failing.length === 0) {
-      return { name: 'skill_conformance', status: 'ok', message: `${passing}/${skills.length} skills pass` };
+      const mode = manifest.derived ? 'derived manifest' : 'manifest.json';
+      return { name: 'skill_conformance', status: 'ok', message: `${passing}/${skills.length} skills pass (${mode})` };
     }
     return {
       name: 'skill_conformance',
       status: 'warn',
       message: `${passing}/${skills.length} pass. Failing: ${failing.join(', ')}`,
     };
-  } catch {
-    return { name: 'skill_conformance', status: 'warn', message: 'Could not parse manifest.json' };
+  } catch (e) {
+    return { name: 'skill_conformance', status: 'warn', message: `Could not load skill manifest: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 

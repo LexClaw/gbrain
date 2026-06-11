@@ -14,6 +14,8 @@ writes_pages:
 
 # capture — the single ingestion entrypoint
 
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+
 When the user wants to save a thought, an article snippet, a transcript
 fragment, or any text into their brain, run `gbrain capture`. Don't reach
 for `gbrain put` or commit-then-sync — `capture` is the front door and it
@@ -103,5 +105,3 @@ captured:
 
 This skill is for the simple "I have a thought, save it" case. Specialized
 ingestion paths handle their own slugging + cross-referencing.
-FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
-

@@ -26,7 +26,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync, type Dirent } from 'fs';
-import { join } from 'path';
+import { relative, join } from 'path';
 import { parseResolverEntries, type ResolverEntry } from './check-resolvable.ts';
 import { findAllResolverFiles } from './resolver-filenames.ts';
 import { parseSkillFrontmatter } from './skill-frontmatter.ts';
@@ -76,68 +76,74 @@ function loadFrontmatterEntries(skillsDir: string): SkillTriggerEntry[] {
   const out: SkillTriggerEntry[] = [];
   if (!existsSync(skillsDir)) return out;
 
-  let dirents: Dirent[];
-  try {
-    dirents = readdirSync(skillsDir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
+  const walk = (dirAbs: string) => {
+    let dirents: Dirent[];
+    try { dirents = readdirSync(dirAbs, { withFileTypes: true }); }
+    catch { return; }
 
-  for (const dirent of dirents) {
-    const name = dirent.name;
-    let isDir = dirent.isDirectory();
-    if (!isDir && dirent.isSymbolicLink()) {
-      try { isDir = statSync(join(skillsDir, name)).isDirectory(); }
-      catch { isDir = false; }
-    }
-    if (!isDir) continue;
-    if (name.startsWith('_') || name.startsWith('.')) continue;
-    if (FRONTMATTER_SKIP_DIRS.has(name)) continue;
-
-    const skillMdPath = join(skillsDir, name, 'SKILL.md');
-    if (!existsSync(skillMdPath)) continue;
-
-    let content: string;
-    try {
-      content = readFileSync(skillMdPath, 'utf-8');
-    } catch (err) {
-      if (!_warnedSkills.has(skillMdPath)) {
-        _warnedSkills.add(skillMdPath);
-        console.warn(
-          `[skill-trigger-index] could not read ${skillMdPath}: ${(err as Error).message}`,
-        );
+    for (const dirent of dirents) {
+      const name = dirent.name;
+      let isDir = dirent.isDirectory();
+      const entryAbs = join(dirAbs, name);
+      if (!isDir && dirent.isSymbolicLink()) {
+        try { isDir = statSync(entryAbs).isDirectory(); }
+        catch { isDir = false; }
       }
-      continue;
-    }
+      if (!isDir) continue;
+      if (name.startsWith('_') || name.startsWith('.')) continue;
+      if (FRONTMATTER_SKIP_DIRS.has(name)) continue;
 
-    let parsed: ReturnType<typeof parseSkillFrontmatter> | null = null;
-    try {
-      parsed = parseSkillFrontmatter(content);
-    } catch (err) {
-      if (!_warnedSkills.has(skillMdPath)) {
-        _warnedSkills.add(skillMdPath);
-        console.warn(
-          `[skill-trigger-index] frontmatter parse failed for ${skillMdPath}: ${(err as Error).message}`,
-        );
+      const skillMdPath = join(entryAbs, 'SKILL.md');
+      if (!existsSync(skillMdPath)) {
+        walk(entryAbs);
+        continue;
       }
-      continue;
-    }
 
-    if (!parsed || !parsed.triggers || parsed.triggers.length === 0) continue;
+      let content: string;
+      try {
+        content = readFileSync(skillMdPath, 'utf-8');
+      } catch (err) {
+        if (!_warnedSkills.has(skillMdPath)) {
+          _warnedSkills.add(skillMdPath);
+          console.warn(
+            `[skill-trigger-index] could not read ${skillMdPath}: ${(err as Error).message}`,
+          );
+        }
+        continue;
+      }
 
-    const skillPath = `skills/${name}/SKILL.md`;
-    for (const trigger of parsed.triggers) {
-      const t = trigger.trim();
-      if (t.length === 0) continue;
-      out.push({
-        trigger: t,
-        skillPath,
-        isGStack: false,
-        section: FRONTMATTER_SECTION,
-        source: 'frontmatter',
-      });
+      let parsed: ReturnType<typeof parseSkillFrontmatter> | null = null;
+      try {
+        parsed = parseSkillFrontmatter(content);
+      } catch (err) {
+        if (!_warnedSkills.has(skillMdPath)) {
+          _warnedSkills.add(skillMdPath);
+          console.warn(
+            `[skill-trigger-index] frontmatter parse failed for ${skillMdPath}: ${(err as Error).message}`,
+          );
+        }
+        continue;
+      }
+
+      if (!parsed || !parsed.triggers || parsed.triggers.length === 0) continue;
+
+      const rel = relative(skillsDir, skillMdPath).replace(/\\/g, '/');
+      const skillPath = `skills/${rel}`;
+      for (const trigger of parsed.triggers) {
+        const t = trigger.trim();
+        if (t.length === 0) continue;
+        out.push({
+          trigger: t,
+          skillPath,
+          isGStack: false,
+          section: FRONTMATTER_SECTION,
+          source: 'frontmatter',
+        });
+      }
     }
-  }
+  };
+
+  walk(skillsDir);
 
   return out;
 }

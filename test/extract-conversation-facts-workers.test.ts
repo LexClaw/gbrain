@@ -29,6 +29,7 @@ import { describe, test, expect, beforeEach } from 'bun:test';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import {
+  buildExtractConversationFactsJobParams,
   extractConversationFactsLockId,
   PER_PAGE_LOCK_TTL_MINUTES,
   _resetLockBusyLogCacheForTest,
@@ -43,6 +44,17 @@ beforeEach(() => {
 });
 
 describe('extract-conversation-facts — exported helpers (T5)', () => {
+  test('background job params always include sourceId (default when omitted)', () => {
+    expect(buildExtractConversationFactsJobParams(['--max-cost-usd', '5'])).toMatchObject({
+      sourceId: 'default',
+      maxCostUsd: 5,
+    });
+    expect(buildExtractConversationFactsJobParams(['--source-id', 'team', '--max-cost-usd', '1'])).toMatchObject({
+      sourceId: 'team',
+      maxCostUsd: 1,
+    });
+  });
+
   test('extractConversationFactsLockId composes source + slug', () => {
     expect(extractConversationFactsLockId('default', 'chat/alice')).toBe(
       'extract-conversation-facts:default:chat/alice',
@@ -148,8 +160,13 @@ describe('extract-conversation-facts — structural contracts (T5)', () => {
     expect(SRC).toMatch(/workers:\s*parsed\.workers/);
     // buildJobParams shape — there should be a `workers` field in the
     // returned object literal.
-    const bjpRegion = SRC.slice(SRC.indexOf('function buildJobParams'));
+    const bjpRegion = SRC.slice(SRC.indexOf('function buildExtractConversationFactsJobParams'));
     expect(bjpRegion).toMatch(/workers:\s*parsed\.workers/);
+  });
+
+  test('Minion job envelope defaults sourceId so handler never sees missing data.sourceId', () => {
+    const bjpRegion = SRC.slice(SRC.indexOf('function buildExtractConversationFactsJobParams'));
+    expect(bjpRegion).toMatch(/sourceId:\s*parsed\.sourceId\s*\?\?\s*['"]default['"]/);
   });
 });
 

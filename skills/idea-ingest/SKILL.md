@@ -29,6 +29,8 @@ writes_to:
 
 # Idea Ingest Skill
 
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+
 > **Filing rule:** Read `skills/_brain-filing-rules.md` before creating any new page.
 
 ## Contract
@@ -102,5 +104,3 @@ Format: `- **YYYY-MM-DD** | Referenced in [page title](path) — brief context`
 - Skipping the author people page
 - Not cross-linking to mentioned entities
 - Ingesting without checking brain first for existing coverage
-FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
-

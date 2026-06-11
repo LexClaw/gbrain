@@ -38,6 +38,8 @@ export function findRepoRoot(startDir: string = process.cwd()): string | null {
  */
 export type SkillsDirSource =
   | 'env_explicit'
+  | 'hermes_home'
+  | 'hermes_default'
   | 'openclaw_workspace_env'
   | 'openclaw_workspace_env_root'
   | 'openclaw_workspace_home'
@@ -226,6 +228,24 @@ export function autoDetectSkillsDirReadOnly(
   startDir: string = process.cwd(),
   env: NodeJS.ProcessEnv = process.env,
 ): SkillsDirDetection {
+  // Read-only callers should inspect the operator's live Hermes skill tree
+  // when present. A gbrain checkout also has a small bundled skills/ tree,
+  // so the generic cwd walk would otherwise shadow ~/.hermes/skills and make
+  // doctor report ~50 bundled skills instead of the 300+ skills the agent can
+  // actually route to. Keep this in the read-only variant only: write paths
+  // must not silently target a profile's skills directory.
+  const hermesHome = env.HERMES_HOME
+    ? (isAbsolute(env.HERMES_HOME) ? env.HERMES_HOME : resolvePath(startDir, env.HERMES_HOME))
+    : null;
+  if (hermesHome) {
+    const candidate = join(hermesHome, 'skills');
+    if (hasResolverFile(candidate)) return { dir: candidate, source: 'hermes_home' };
+  }
+  if (env.HOME) {
+    const candidate = join(env.HOME, '.hermes', 'skills');
+    if (hasResolverFile(candidate)) return { dir: candidate, source: 'hermes_default' };
+  }
+
   const primary = autoDetectSkillsDir(startDir, env);
   if (primary.dir) return primary;
 
@@ -270,5 +290,6 @@ export const AUTO_DETECT_HINT = [
  */
 export const AUTO_DETECT_HINT_READ_ONLY = [
   AUTO_DETECT_HINT,
-  `  7. (read-only) walk up from gbrain's install path`,
+  `  7. (read-only) $HERMES_HOME/skills or ~/.hermes/skills`,
+  `  8. (read-only) walk up from gbrain's install path`,
 ].join('\n');

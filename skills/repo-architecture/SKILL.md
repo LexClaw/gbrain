@@ -18,6 +18,8 @@ mutating: false
 
 # Repo Architecture — Filing Rules
 
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+
 > **Full filing rules:** See `skills/_brain-filing-rules.md`
 
 ## Contract
@@ -51,5 +53,3 @@ Advisory: "File this at `{type}/{slug}.md` because the primary subject is {reaso
 - Filing by source ("it came from email so it goes in sources/")
 - Creating pages without checking if one already exists
 - Using `sources/` for anything except raw data dumps
-FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
-

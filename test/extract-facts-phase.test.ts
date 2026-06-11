@@ -81,8 +81,8 @@ describe('runExtractFacts — happy path', () => {
 
   test('idempotent: running twice produces the same final DB state', async () => {
     const body = FACT_FENCE(
-      `| 1 | A | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |
-| 2 | B | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
+      `| 1 | A | fact | 1.0 | world | medium | 2026-01-01 |  |  |  |
+| 2 | B | fact | 1.0 | world | medium | 2026-01-01 |  |  |  |`,
     );
     await putPage('people/alice', body);
 
@@ -107,14 +107,14 @@ describe('runExtractFacts — happy path', () => {
   test('removed-from-fence row is deleted from DB (wipe-and-reinsert pattern)', async () => {
     // Seed: 2 facts.
     await putPage('people/alice', FACT_FENCE(
-      `| 1 | A | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |
-| 2 | B | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
+      `| 1 | A | fact | 1.0 | world | medium | 2026-01-01 |  |  |  |
+| 2 | B | fact | 1.0 | world | medium | 2026-01-01 |  |  |  |`,
     ));
     await runExtractFacts(engine, { slugs: ['people/alice'] });
 
     // Edit the page to remove row 2.
     await putPage('people/alice', FACT_FENCE(
-      `| 1 | A | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
+      `| 1 | A | fact | 1.0 | world | medium | 2026-01-01 |  |  |  |`,
     ));
 
     await runExtractFacts(engine, { slugs: ['people/alice'] });
@@ -127,11 +127,24 @@ describe('runExtractFacts — happy path', () => {
     expect(rows.rows[0].fact).toBe('A');
   });
 
-  test('page with no facts fence → DB facts for that page wiped (empty fence reconciles to empty index)', async () => {
+  test('page with no facts fence deletes fence-origin rows but preserves conversation facts for the same page', async () => {
     await putPage('people/alice', FACT_FENCE(
-      `| 1 | seeded | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
+      `| 1 | seeded | fact | 1.0 | world | medium | 2026-01-01 |  |  |  |`,
     ));
     await runExtractFacts(engine, { slugs: ['people/alice'] });
+
+    // Seed facts produced by the conversation extractor. They share the
+    // same source_markdown_slug but are not owned by the fence reconciler.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, notability,
+                          valid_from, source, confidence, row_num, source_markdown_slug)
+       VALUES
+         ('default', 'people/alice', 'conversation fact', 'fact', 'private', 'medium',
+          now(), 'cli:extract-conversation-facts', 1.0, 10, 'people/alice'),
+         ('default', 'people/alice', 'terminal audit fact', 'fact', 'private', 'medium',
+          now(), 'cli:extract-conversation-facts:terminal', 1.0, 11, 'people/alice')`,
+    );
 
     // Now write a fact-less version of the page.
     await putPage('people/alice', '# Just a page\n\nNo fence.\n');
@@ -143,9 +156,12 @@ describe('runExtractFacts — happy path', () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rows = await (engine as any).db.query(
-      `SELECT COUNT(*) AS n FROM facts WHERE source_markdown_slug = 'people/alice'`,
+      `SELECT fact, source FROM facts WHERE source_markdown_slug = 'people/alice' ORDER BY row_num`,
     );
-    expect(Number(rows.rows[0].n)).toBe(0);
+    expect(rows.rows).toEqual([
+      expect.objectContaining({ fact: 'conversation fact', source: 'cli:extract-conversation-facts' }),
+      expect.objectContaining({ fact: 'terminal audit fact', source: 'cli:extract-conversation-facts:terminal' }),
+    ]);
   });
 
   test('dry-run does not touch DB', async () => {
@@ -266,12 +282,12 @@ describe('runExtractFacts — multi-source isolation', () => {
       `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, notability,
                           valid_from, source, confidence, row_num, source_markdown_slug)
        VALUES ('home', 'people/alice', 'home fact', 'fact', 'private', 'medium',
-               now(), 'mcp:put_page', 1.0, 1, 'people/alice')`,
+               now(), 'fence:reconcile', 1.0, 1, 'people/alice')`,
     );
 
     // Seed default source's fence-only page (the cycle will reconcile this).
     await putPage('people/alice', FACT_FENCE(
-      `| 1 | default fact | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
+      `| 1 | default fact | fact | 1.0 | world | medium | 2026-01-01 |  |  |  |`,
     ));
 
     await runExtractFacts(engine, { slugs: ['people/alice'], sourceId: 'default' });

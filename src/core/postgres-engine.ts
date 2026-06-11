@@ -11,7 +11,7 @@ import type {
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
   FactRow, FactKind, FactVisibility, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
-  SourceRow,
+  SourceRow, DeleteFactsForPageOpts,
 } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
@@ -3474,11 +3474,22 @@ export class PostgresEngine implements BrainEngine {
     return { inserted: ids.length, ids };
   }
 
-  async deleteFactsForPage(slug: string, source_id: string): Promise<{ deleted: number }> {
+  async deleteFactsForPage(
+    slug: string,
+    source_id: string,
+    opts?: DeleteFactsForPageOpts,
+  ): Promise<{ deleted: number }> {
     const sql = this.sql;
-    const result = await sql`
-      DELETE FROM facts WHERE source_id = ${source_id} AND source_markdown_slug = ${slug}
-    `;
+    const result = opts?.sourceScope === 'fence-origin'
+      ? await sql`
+          DELETE FROM facts
+           WHERE source_id = ${source_id}
+             AND source_markdown_slug = ${slug}
+             AND (source IS NULL OR source = '' OR source LIKE 'fence%')
+        `
+      : await sql`
+          DELETE FROM facts WHERE source_id = ${source_id} AND source_markdown_slug = ${slug}
+        `;
     return { deleted: result.count ?? 0 };
   }
 

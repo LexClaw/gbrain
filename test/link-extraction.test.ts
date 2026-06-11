@@ -392,6 +392,39 @@ describe('parseTimelineEntries', () => {
     expect(entries.length).toBe(1);
   });
 
+  test('parses legacy unbolded colon bullet: - YYYY-MM-DD: summary', () => {
+    const entries = parseTimelineEntries('- 2026-05-05: Page created from canonical family roster TJ provided.');
+    expect(entries.length).toBe(1);
+    expect(entries[0]).toEqual({
+      date: '2026-05-05',
+      summary: 'Page created from canonical family roster TJ provided.',
+      detail: '',
+    });
+  });
+
+  test('parses dated wikilink source mention bullet', () => {
+    const entries = parseTimelineEntries('- [[sources/youtube/nateherk/2026-05-29-example-title|Example Title]] — named as a connection.');
+    expect(entries.length).toBe(1);
+    expect(entries[0]).toEqual({
+      date: '2026-05-29',
+      summary: '[[sources/youtube/nateherk/2026-05-29-example-title|Example Title]] — named as a connection.',
+      detail: '',
+    });
+  });
+
+  test('parses dated markdown source mention bullet', () => {
+    const entries = parseTimelineEntries('- [Trump JUST Crashed Bitcoin](sources/youtube/discovercrypto/2026-05-28-n79tiohbse8-trump-just-crashed-bitcoin.md) — mentioned as context.');
+    expect(entries.length).toBe(1);
+    expect(entries[0].date).toBe('2026-05-28');
+  });
+
+  test('truncates overlong dated source mention summaries before DB dedup index insert', () => {
+    const entries = parseTimelineEntries(`- [[sources/youtube/nateherk/2026-05-29-example-title|Example Title]] — ${'x'.repeat(1200)}`);
+    expect(entries.length).toBe(1);
+    expect(entries[0].summary.length).toBe(1000);
+    expect(entries[0].summary.endsWith('...')).toBe(true);
+  });
+
   test('parses multiple entries', () => {
     const content = `## Timeline
 - **2026-01-15** | First event

@@ -1,0 +1,379 @@
+diff --git a/src/core/db-lock.ts b/src/core/db-lock.ts
+index 2be21abd..d7713e0e 100644
+--- a/src/core/db-lock.ts
++++ b/src/core/db-lock.ts
+@@ -484,6 +484,38 @@ export function syncLockId(sourceId: string): string {
+  */
+ export const SYNC_LOCK_ID = syncLockId('default');
+ 
++/**
++ * Canonical recovery-command hint for a stale/busy lock row.
++ *
++ * `gbrain_cycle_locks` holds MANY lock ids, not just sync locks:
++ *   - `gbrain-sync:<source>`      performSync's writer window
++ *   - `gbrain-cycle`              legacy global cycle lock
++ *   - `gbrain-cycle:<source>`     per-source cycle lock (autopilot / `jobs work`)
++ *   - `gbrain-migrate:<db>`       migration lock
++ *   - `gbrain-reindex-multimodal` reindex lock
++ *   - `embed-backfill:<source>`   embed-backfill job lock
++ *
++ * Before this helper, both doctor's `stale_locks` check and performSync's
++ * "another sync is in progress" message hard-coded the `gbrain-sync:<source>`
++ * shape and fell back to a bare `gbrain sync --break-lock` for every other
++ * id. That bare hint resolves to `gbrain-sync:default` — the WRONG lock. An
++ * operator following it to clear a stale `gbrain-cycle:default` lock would be
++ * told "nothing to break" while the real stale row persisted (the 2026-06-10
++ * cycle-lock incident).
++ *
++ * The recovery path is uniform: `gbrain sync --break-lock` runs the same safe
++ * break worker (cross-host refusal + ttl-expired/pid-dead guard, optional
++ * `--max-age`) against ANY lock id. Sync locks keep the familiar
++ * `--source <s>` spelling for back-compat; every other id routes through the
++ * generic `--lock <id>` flag.
++ */
++export function breakLockHintFor(lockId: string): string {
++  if (lockId.startsWith('gbrain-sync:')) {
++    return `gbrain sync --break-lock --source ${lockId.slice('gbrain-sync:'.length)}`;
++  }
++  return `gbrain sync --break-lock --lock ${lockId}`;
++}
++
+ /**
+  * v0.30.1 (T4 + A4): wrap long-running work in a refreshing TTL lock.
+  *
+diff --git a/src/commands/sync.ts b/src/commands/sync.ts
+index b5d887a9..a91f3dff 100644
+--- a/src/commands/sync.ts
++++ b/src/commands/sync.ts
+@@ -700,9 +700,8 @@ async function formatLockBusyMessage(engine: BrainEngine, lockKey: string): Prom
+   }
+ 
+   const ageHuman = formatAgeHuman(snap.age_ms);
+-  const breakHint = lockKey.startsWith('gbrain-sync:')
+-    ? `gbrain sync --break-lock --source ${lockKey.slice('gbrain-sync:'.length)}`
+-    : `gbrain sync --break-lock`;
++  const { breakLockHintFor } = await import('../core/db-lock.ts');
++  const breakHint = breakLockHintFor(lockKey);
+   const ttlNote = snap.ttl_expired ? ' [TTL expired]' : '';
+   return (
+     `Another sync is in progress (lock ${lockKey} held by pid ${snap.holder_pid} on ${snap.holder_host}, ` +
+@@ -2124,6 +2129,21 @@ Options:
+                        Exit codes: 0 = all sources ok, 1 = any error,
+                        2 = cost-prompt-not-confirmed.
+   --yes                Accept any interactive prompts (CI / non-TTY).
++  --break-lock         Clear a stale lock so the next sync/cycle can run.
++                       Safe by default: refuses unless the holder is on
++                       this host AND (TTL expired OR PID dead + lock >60s).
++                       Scope with --source <id> (sync locks) or --lock <id>
++                       (any lock — see below). Add --max-age <s> to break
++                       only wedged-but-alive holders (last refresh older
++                       than <s>). --force-break-lock skips every guard.
++  --lock <id>          (with --break-lock/--force-break-lock) Target ANY
++                       lock id in gbrain_cycle_locks, not just sync locks.
++                       Use this to clear stale cycle locks
++                       (gbrain-cycle:<source>), migrate locks
++                       (gbrain-migrate:<db>), reindex/embed-backfill locks,
++                       etc. 'gbrain doctor' prints the exact --lock command
++                       for each stale row. Mutually exclusive with --source
++                       and --all.
+ 
+ See also:
+   gbrain embed --stale    Re-embed all stale chunks (post --no-embed).
+@@ -2182,6 +2202,38 @@ See also:
+   // source in one call; runBreakLock now widens to iterate sources when
+   // --all is set and accept maxAgeSeconds for age-gated breaks.
+   if (breakLock || forceBreakLock) {
++    // v0.41.x: `--lock <id>` breaks ANY lock id in gbrain_cycle_locks, not
++    // just `gbrain-sync:<source>` rows. `gbrain_cycle_locks` is a shared
++    // table holding cycle locks (`gbrain-cycle`, `gbrain-cycle:<source>`),
++    // migrate locks (`gbrain-migrate:<db>`), reindex/embed-backfill locks,
++    // etc. Before this flag the only recoverable rows were sync locks; a
++    // stale `gbrain-cycle:default` lock had no supported recovery path (the
++    // doctor hint pointed at `--break-lock` which resolved to
++    // `gbrain-sync:default`). `--lock` routes the literal id through the same
++    // safe runBreakLock worker (cross-host refusal + ttl-expired/pid-dead
++    // guard, optional --max-age). The doctor's stale_locks hint now emits
++    // `--lock <id>` for every non-sync row (see breakLockHintFor).
++    const lockArg = args.find((a, i) => args[i - 1] === '--lock');
++    if (lockArg !== undefined) {
++      if (syncAll) {
++        console.error('--lock cannot be combined with --all (--lock targets one explicit lock id).');
++        process.exit(1);
++      }
++      if (args.find((a, i) => args[i - 1] === '--source') !== undefined) {
++        console.error('--lock and --source are mutually exclusive (--source is sugar for --lock gbrain-sync:<source>).');
++        process.exit(1);
++      }
++      // source_id label is best-effort: extract from a `<scope>:<id>` shape
++      // for the JSON envelope; bare ids (e.g. `gbrain-cycle`) have no source.
++      const colon = lockArg.indexOf(':');
++      const sourceLabel = colon >= 0 ? lockArg.slice(colon + 1) : lockArg;
++      const exit = await runBreakLock(engine, lockArg, sourceLabel, {
++        force: forceBreakLock,
++        json: jsonOut,
++        maxAgeSeconds,
++      });
++      process.exit(exit);
++    }
+     if (syncAll) {
+       const { listSources } = await import('../core/sources-ops.ts');
+       const sources = await listSources(engine);
+diff --git a/src/commands/doctor.ts b/src/commands/doctor.ts
+index e9cd5721..c7079852 100644
+--- a/src/commands/doctor.ts
++++ b/src/commands/doctor.ts
+@@ -1970,15 +1970,14 @@ export function checkAutopilotLockScope(): Check {
+  */
+ export async function checkStaleLocks(engine: BrainEngine): Promise<Check> {
+   try {
+-    const { listStaleLocks } = await import('../core/db-lock.ts');
++    const { listStaleLocks, breakLockHintFor } = await import('../core/db-lock.ts');
+     const stale = await listStaleLocks(engine);
+     if (stale.length === 0) {
+       return { name: 'stale_locks', status: 'ok', message: 'No stale locks (no rows with ttl_expires_at < NOW())' };
+     }
+     const lines = stale.slice(0, 10).map(s => {
+       const ageH = Math.floor(s.age_ms / 3600_000);
+-      const source = s.id.startsWith('gbrain-sync:') ? s.id.slice('gbrain-sync:'.length) : null;
+-      const breakHint = source ? `gbrain sync --break-lock --source ${source}` : `gbrain sync --break-lock`;
++      const breakHint = breakLockHintFor(s.id);
+       return `  ${s.id} (pid ${s.holder_pid} on ${s.holder_host}, age ${ageH}h) → ${breakHint}`;
+     });
+     const tail = stale.length > 10 ? `  ... and ${stale.length - 10} more.` : null;
+diff --git a/test/e2e/sync-lock-recovery.test.ts b/test/e2e/sync-lock-recovery.test.ts
+index 13f165ba..12f65859 100644
+--- a/test/e2e/sync-lock-recovery.test.ts
++++ b/test/e2e/sync-lock-recovery.test.ts
+@@ -171,6 +171,82 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
+     expect(snap).toBeNull();
+   });
+ 
++  // ── v0.41.x: generic `--lock <id>` break path (cycle-lock incident fix) ──
++  // gbrain_cycle_locks holds non-sync lock ids too (gbrain-cycle:<source>,
++  // gbrain-migrate:<db>, ...). The 2026-06-10 incident: a stale
++  // gbrain-cycle:default lock had no supported recovery — the doctor hint
++  // pointed at `gbrain sync --break-lock`, which targets gbrain-sync:default,
++  // a different row. `--lock <id>` routes the literal id through the same
++  // safe break worker.
++  test('--break-lock --lock gbrain-cycle:default clears a TTL-expired cycle lock', async () => {
++    const eng = getEngine();
++    await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-cycle:default'`;
++    await (eng as any).sql`
++      INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at)
++      VALUES ('gbrain-cycle:default', 99999, ${hostname()}, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '30 minutes')
++    `;
++
++    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:default']);
++    expect(result.code).toBe(0);
++    expect(result.stdout + result.stderr).toMatch(/broke lock.*ttl_expired/i);
++
++    // The cycle lock row should be gone; the sync lock untouched.
++    const snap = await inspectLock(eng, 'gbrain-cycle:default');
++    expect(snap).toBeNull();
++  });
++
++  test('--break-lock --lock refuses a live local holder (same guard as sync locks)', async () => {
++    const eng = getEngine();
++    await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-cycle:default'`;
++    // Our pid → guaranteed alive on this host, fresh TTL → must refuse.
++    await (eng as any).sql`
++      INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at)
++      VALUES ('gbrain-cycle:default', ${process.pid}, ${hostname()}, NOW(), NOW() + INTERVAL '30 minutes')
++    `;
++
++    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:default']);
++    expect(result.code).toBe(1);
++    expect(result.stderr).toMatch(/Refusing to break lock/);
++
++    const snap = await inspectLock(eng, 'gbrain-cycle:default');
++    expect(snap).not.toBeNull();
++    await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-cycle:default'`;
++  });
++
++  test('--break-lock --lock on an absent row exits 0 (nothing to break)', () => {
++    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:no-such-source']);
++    expect(result.code).toBe(0);
++    expect(result.stdout + result.stderr).toMatch(/not held|nothing to break/i);
++  });
++
++  test('--lock and --source are mutually exclusive', () => {
++    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:default', '--source', 'default']);
++    expect(result.code).toBe(1);
++    expect(result.stderr).toMatch(/mutually exclusive/i);
++  });
++
++  test('--lock cannot be combined with --all', () => {
++    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:default', '--all']);
++    expect(result.code).toBe(1);
++    expect(result.stderr).toMatch(/cannot be combined with --all/i);
++  });
++
++  test('--force-break-lock --lock clears a live cycle lock (force escape hatch)', async () => {
++    const eng = getEngine();
++    await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-cycle:default'`;
++    await (eng as any).sql`
++      INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at)
++      VALUES ('gbrain-cycle:default', ${process.pid}, ${hostname()}, NOW(), NOW() + INTERVAL '30 minutes')
++    `;
++
++    const result = runCli(['sync', '--force-break-lock', '--lock', 'gbrain-cycle:default']);
++    expect(result.code).toBe(0);
++    expect(result.stdout + result.stderr).toMatch(/[Ff]orce-broke lock|WARNING/);
++
++    const snap = await inspectLock(eng, 'gbrain-cycle:default');
++    expect(snap).toBeNull();
++  });
++
+   test('SIGTERM during sync releases the lock within 3s', async () => {
+     // Start a sync subprocess that will hold the lock briefly.
+     // We'd ideally watch for the lock row to appear, then SIGTERM. Since
+diff --git a/test/break-lock-hint.test.ts b/test/break-lock-hint.test.ts
+new file mode 100644
+index 00000000..05abe207
+--- /dev/null
++++ b/test/break-lock-hint.test.ts
+@@ -0,0 +1,62 @@
++/**
++ * breakLockHintFor — recovery-command hint for stale/busy locks.
++ *
++ * Regression guard for the 2026-06-10 cycle-lock incident: doctor's
++ * `stale_locks` check and performSync's "another sync is in progress"
++ * message both used to hard-code the `gbrain-sync:<source>` shape and fall
++ * back to a bare `gbrain sync --break-lock` for every other lock id. That
++ * bare hint resolves to `gbrain-sync:default` — the WRONG lock for a stale
++ * `gbrain-cycle:default` row. The helper now emits a correct, copy-pasteable
++ * recovery command for every lock id shape in `gbrain_cycle_locks`.
++ */
++import { describe, test, expect } from 'bun:test';
++import { breakLockHintFor } from '../src/core/db-lock.ts';
++
++describe('breakLockHintFor', () => {
++  test('sync locks keep the familiar --source spelling (back-compat)', () => {
++    expect(breakLockHintFor('gbrain-sync:default')).toBe(
++      'gbrain sync --break-lock --source default',
++    );
++    expect(breakLockHintFor('gbrain-sync:studiovault')).toBe(
++      'gbrain sync --break-lock --source studiovault',
++    );
++  });
++
++  test('per-source cycle locks route through generic --lock (the incident case)', () => {
++    // This is the exact lock id from the 2026-06-10 forensics. The OLD hint
++    // would have produced `gbrain sync --break-lock` → gbrain-sync:default,
++    // which is NOT this lock. The new hint targets the literal id.
++    expect(breakLockHintFor('gbrain-cycle:default')).toBe(
++      'gbrain sync --break-lock --lock gbrain-cycle:default',
++    );
++  });
++
++  test('legacy global cycle lock routes through --lock', () => {
++    expect(breakLockHintFor('gbrain-cycle')).toBe(
++      'gbrain sync --break-lock --lock gbrain-cycle',
++    );
++  });
++
++  test('migrate / reindex / embed-backfill locks route through --lock', () => {
++    expect(breakLockHintFor('gbrain-migrate:postgres')).toBe(
++      'gbrain sync --break-lock --lock gbrain-migrate:postgres',
++    );
++    expect(breakLockHintFor('gbrain-reindex-multimodal')).toBe(
++      'gbrain sync --break-lock --lock gbrain-reindex-multimodal',
++    );
++    expect(breakLockHintFor('embed-backfill:default')).toBe(
++      'gbrain sync --break-lock --lock embed-backfill:default',
++    );
++  });
++
++  test('the emitted --lock hint round-trips: the argument is the literal lock id', () => {
++    // Whatever lock id goes in, the `--lock <id>` token must carry it
++    // verbatim so `gbrain sync --break-lock --lock <id>` targets the same row.
++    for (const id of ['gbrain-cycle:default', 'gbrain-cycle', 'gbrain-migrate:postgres']) {
++      const hint = breakLockHintFor(id);
++      const m = hint.match(/--lock (\S+)$/);
++      expect(m).not.toBeNull();
++      expect(m![1]).toBe(id);
++    }
++  });
++});
+diff --git a/test/doctor-stale-locks-hint.test.ts b/test/doctor-stale-locks-hint.test.ts
+new file mode 100644
+index 00000000..01226fd0
+--- /dev/null
++++ b/test/doctor-stale-locks-hint.test.ts
+@@ -0,0 +1,76 @@
++/**
++ * doctor `stale_locks` check — emits the CORRECT recovery hint per lock id.
++ *
++ * Regression guard for the 2026-06-10 cycle-lock incident. Before the fix,
++ * checkStaleLocks hard-coded the `gbrain-sync:<source>` shape and fell back
++ * to a bare `gbrain sync --break-lock` for every other id — which targets
++ * `gbrain-sync:default`, the WRONG lock for a stale `gbrain-cycle:default`
++ * row. This test inserts each lock-id shape directly and asserts the hint
++ * line names a recovery command that actually targets THAT lock.
++ *
++ * Runs hermetically against PGLite (no Postgres container / DATABASE_URL).
++ */
++import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
++import { PGLiteEngine } from '../src/core/pglite-engine.ts';
++import { resetPgliteState } from './helpers/reset-pglite.ts';
++import { checkStaleLocks } from '../src/commands/doctor.ts';
++
++let engine: PGLiteEngine;
++
++beforeAll(async () => {
++  engine = new PGLiteEngine();
++  await engine.connect({});
++  await engine.initSchema();
++});
++
++afterAll(async () => {
++  await engine.disconnect();
++});
++
++beforeEach(async () => {
++  await resetPgliteState(engine);
++  await (engine as any).db.query('DELETE FROM gbrain_cycle_locks', []);
++});
++
++async function insertStaleLock(id: string, pid: number): Promise<void> {
++  await (engine as any).db.query(
++    `INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at)
++     VALUES ($1, $2, $3, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '30 minutes')`,
++    [id, pid, 'test-host'],
++  );
++}
++
++describe('checkStaleLocks recovery hints', () => {
++  test('ok when no stale rows', async () => {
++    const check = await checkStaleLocks(engine);
++    expect(check.status).toBe('ok');
++  });
++
++  test('cycle lock → --lock hint (the incident: NOT a bare --break-lock)', async () => {
++    await insertStaleLock('gbrain-cycle:default', 32719);
++    const check = await checkStaleLocks(engine);
++    expect(check.status).toBe('warn');
++    expect(check.message).toContain('gbrain-cycle:default');
++    // The fix: hint must name the literal lock id via --lock.
++    expect(check.message).toContain('gbrain sync --break-lock --lock gbrain-cycle:default');
++    // Regression: the OLD buggy hint (bare --break-lock with no scope, or a
++    // --source pointing at the wrong sync lock) must NOT appear for a cycle row.
++    expect(check.message).not.toMatch(/gbrain-cycle:default.*--source/);
++  });
++
++  test('sync lock → --source hint (back-compat preserved)', async () => {
++    await insertStaleLock('gbrain-sync:studiovault', 12345);
++    const check = await checkStaleLocks(engine);
++    expect(check.status).toBe('warn');
++    expect(check.message).toContain('gbrain sync --break-lock --source studiovault');
++  });
++
++  test('legacy + migrate lock ids both get --lock hints', async () => {
++    await insertStaleLock('gbrain-cycle', 111);
++    await insertStaleLock('gbrain-migrate:postgres', 222);
++    const check = await checkStaleLocks(engine);
++    expect(check.status).toBe('warn');
++    expect(check.message).toContain('gbrain sync --break-lock --lock gbrain-cycle');
++    expect(check.message).toContain('gbrain sync --break-lock --lock gbrain-migrate:postgres');
++  });
++});

@@ -35,6 +35,8 @@ writes_to:
 
 # Media Ingest Skill
 
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+
 Ingest video, audio, PDF, book, screenshot, and GitHub repo content into the brain.
 
 > **Filing rule:** Read `skills/_brain-filing-rules.md` before creating any new page.
@@ -59,6 +61,7 @@ Every mention of a person or company with a brain page MUST create a back-link.
 | Format | Action |
 |--------|--------|
 | YouTube/video URL | Fetch transcript (Whisper, transcription service, or captions) |
+| YouTube **channel** subscription / N-day backfill | Use the subscription pipeline, NOT one-off ingest — see `references/youtube-channel-pipeline.md` (run backfill from the `~/gbrain/recipes` copy; default `--no-include-streams`) |
 | Audio file | Transcribe with available STT service |
 | PDF | Extract text (OCR if needed) |
 | Book PDF | Extract text, identify chapters/sections |
@@ -119,5 +122,3 @@ Brain page created with summary, highlights, and entity cross-links. Report to u
 - Filing **raw ingest** by format (all videos in `media/videos/`) instead of by subject. Note: format-prefixed paths under `media/<format>/<slug>` ARE sanctioned for **synthesized one-of-one output** like book-mirror's `media/books/<slug>-personalized.md`. The anti-pattern is for raw ingest, not for sui generis synthesis. See `skills/_brain-filing-rules.md` "Sanctioned exception: synthesis output is sui generis."
 - Not preserving raw source files
 - Creating stub pages without meaningful content
-FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
-

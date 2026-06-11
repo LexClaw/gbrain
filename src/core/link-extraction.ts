@@ -630,6 +630,48 @@ export const FRONTMATTER_LINK_MAP: FrontmatterFieldMapping[] = [
   { fields: ['related', 'see_also'], type: 'related_to', direction: 'outgoing', dirHint: '' },
 ];
 
+// ─── Pack frontmatter mapping bridge ────────────────────────────
+
+/**
+ * v0.42.1 user-pack bridge: pack frontmatter_links currently declare only
+ * {page_type, fields, link_type}. They do not carry direction or dirHint, so
+ * this runtime bridge maps them to the legacy extractor shape as outgoing
+ * edges with slug-shaped values. That keeps structured frontmatter useful for
+ * user-defined verbs without prose NER or engine schema changes.
+ */
+let packFrontmatterMappingsCache: FrontmatterFieldMapping[] | null = null;
+
+async function frontmatterMappingsWithPackDefaults(): Promise<FrontmatterFieldMapping[]> {
+  if (packFrontmatterMappingsCache) return packFrontmatterMappingsCache;
+  const mappings = [...FRONTMATTER_LINK_MAP];
+  try {
+    const { loadConfig } = await import('./config.ts');
+    const { loadActivePack } = await import('./schema-pack/load-active.ts');
+    const pack = await loadActivePack({ cfg: loadConfig(), remote: false });
+    const legacyKeys = new Set(
+      FRONTMATTER_LINK_MAP.flatMap(m => m.fields.map(field => `${m.pageType ?? ''}\u0000${field}\u0000${m.type}`)),
+    );
+    for (const fl of pack.manifest.frontmatter_links) {
+      const fields = fl.fields.filter(field => {
+        const key = `${fl.page_type ?? ''}\u0000${field}\u0000${fl.link_type}`;
+        return !legacyKeys.has(key);
+      });
+      if (fields.length === 0) continue;
+      mappings.push({
+        fields,
+        pageType: fl.page_type,
+        type: fl.link_type,
+        direction: 'outgoing',
+        dirHint: '',
+      });
+    }
+  } catch {
+    // Pack load failure should not break legacy frontmatter extraction.
+  }
+  packFrontmatterMappingsCache = mappings;
+  return mappings;
+}
+
 // ─── Slug resolver ──────────────────────────────────────────────
 
 export interface SlugResolver {
@@ -766,7 +808,7 @@ export async function extractFrontmatterLinks(
   const candidates: LinkCandidate[] = [];
   const unresolved: UnresolvedFrontmatterRef[] = [];
 
-  for (const mapping of FRONTMATTER_LINK_MAP) {
+  for (const mapping of await frontmatterMappingsWithPackDefaults()) {
     if (mapping.pageType && mapping.pageType !== pageType) continue;
     for (const field of mapping.fields) {
       const value = frontmatter[field];
@@ -836,7 +878,14 @@ export interface TimelineCandidate {
 
 // Match: `- **YYYY-MM-DD** | summary` or `- **YYYY-MM-DD** -- summary`
 // or `- **YYYY-MM-DD** - summary` or just `**YYYY-MM-DD** | summary`.
-const TIMELINE_LINE_RE = /^\s*-?\s*\*\*(\d{4}-\d{2}-\d{2})\*\*\s*[|\-–—]+\s*(.+?)\s*$/;
+// Also accepts legacy compiled-truth timeline bullets such as
+// `- 2026-05-05: Page created from canonical roster`.
+const TIMELINE_LINE_RE = /^\s*(?:-\s*)?(?:\*\*)?(\d{4}-\d{2}-\d{2})(?:\*\*)?\s*[|:\-–—]+\s*(.+?)\s*$/;
+
+// Match entity-page mention bullets where the date is carried by the linked
+// source slug, e.g. `- [[sources/youtube/.../2026-05-28-title|Title]] — note`
+// or `- [Title](sources/youtube/.../2026-05-28-title.md) — note`.
+const TIMELINE_DATED_SOURCE_DATE_RE = /\/(\d{4}-\d{2}-\d{2})-[A-Za-z0-9]/;
 
 /**
  * Parse timeline entries from content. Looks at:
@@ -855,6 +904,16 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
   while (i < lines.length) {
     const m = TIMELINE_LINE_RE.exec(lines[i]);
     if (!m) {
+      const trimmed = lines[i].trim();
+      const datedSource = trimmed.startsWith('- ') ? TIMELINE_DATED_SOURCE_DATE_RE.exec(trimmed) : null;
+      if (datedSource) {
+        const date = datedSource[1];
+        const summaryRaw = trimmed.slice(2).trim();
+        const summary = summaryRaw.length > 1000 ? `${summaryRaw.slice(0, 997)}...` : summaryRaw;
+        if (isValidDate(date) && summary.length > 0) {
+          result.push({ date, summary, detail: '' });
+        }
+      }
       i++;
       continue;
     }

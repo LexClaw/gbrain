@@ -152,6 +152,8 @@ export interface ContentSanitySummary {
   by_source: Record<string, number>;
   /** Top junk-pattern names by hit count (sorted desc). */
   top_patterns: Array<{ name: string; count: number }>;
+  /** Top reason-code prefixes by hit count (sorted desc). */
+  top_reasons: Array<{ name: string; count: number }>;
 }
 
 export function summarizeContentSanityEvents(
@@ -160,6 +162,7 @@ export function summarizeContentSanityEvents(
   const by_type = { hard_block: 0, soft_block: 0, warn: 0 };
   const by_source: Record<string, number> = {};
   const patternCounts: Record<string, number> = {};
+  const reasonCounts: Record<string, number> = {};
 
   for (const ev of events) {
     by_type[ev.event_type]++;
@@ -170,9 +173,16 @@ export function summarizeContentSanityEvents(
     for (const name of ev.literal_substring_matches) {
       patternCounts[name] = (patternCounts[name] ?? 0) + 1;
     }
+    for (const msg of ev.reason_messages) {
+      const reason = String(msg).split(':')[0] || String(msg);
+      reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1;
+    }
   }
 
   const top_patterns = Object.entries(patternCounts)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+  const top_reasons = Object.entries(reasonCounts)
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count);
 
@@ -181,5 +191,6 @@ export function summarizeContentSanityEvents(
     by_type,
     by_source,
     top_patterns,
+    top_reasons,
   };
 }

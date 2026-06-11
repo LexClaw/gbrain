@@ -57,7 +57,7 @@ Compile a daily briefing from brain context.
 
 Before generating any briefing, load context from gbrain systematically.
 
-**For autonomous/cron execution**: See `references/cron-briefing-pattern.md` for validated streamlined workflow including PATH setup, held message processing, and timeout handling.
+**For autonomous/cron execution**: See `references/cron-briefing-pattern.md` for validated streamlined workflow including PATH setup, held message processing, and timeout handling. **June 2026 50K+ scale update**: See `references/june-2026-50k-scale-execution.md` for scale-aware query patterns that prevent fragmentation at large brain sizes.
 
 ### Before a meeting
 

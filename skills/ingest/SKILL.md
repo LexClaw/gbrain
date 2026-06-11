@@ -24,6 +24,8 @@ writes_to:
 
 # Ingest Skill
 
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+
 Ingest meetings, articles, media, documents, and conversations into the brain.
 
 > **Filing rule:** Read `skills/_brain-filing-rules.md` before creating any new page.
@@ -309,5 +311,3 @@ Raw source: [preserved at path / uploaded to cloud]
 - Tag a page in gbrain (add_tag)
 - Store raw data in gbrain (put_raw_data)
 - Check backlinks in gbrain (get_backlinks)
-FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
-

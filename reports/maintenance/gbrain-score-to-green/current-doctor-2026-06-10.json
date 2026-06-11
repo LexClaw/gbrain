@@ -1,0 +1,763 @@
+{
+  "brain_checks_score": 70,
+  "category_scores": {
+    "brain": 70,
+    "meta": 100,
+    "ops": 95,
+    "skill": 95
+  },
+  "checks": [
+    {
+      "category": "skill",
+      "message": "366 Hermes skills indexed ($HERMES_HOME/skills); RESOLVER.md trigger reachability is not enforced for Hermes description-routed skills",
+      "name": "resolver_health",
+      "status": "ok"
+    },
+    {
+      "category": "skill",
+      "message": "366/366 skills pass (derived manifest)",
+      "name": "skill_conformance",
+      "status": "ok"
+    },
+    {
+      "category": "skill",
+      "issues": [
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "perplexity"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "aeo: external lookup (perplexity) without brain-first compliance"
+          },
+          "skill": "aeo",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "firecrawl"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "arxiv: external lookup (firecrawl) without brain-first compliance"
+          },
+          "skill": "arxiv",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search",
+              "web_fetch",
+              "perplexity"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "brain-first-lookup: external lookup (web_search, web_fetch, perplexity) without brain-first compliance"
+          },
+          "skill": "brain-first-lookup",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "perplexity"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "claude-seo: external lookup (perplexity) without brain-first compliance"
+          },
+          "skill": "claude-seo",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search",
+              "firecrawl"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "cron-liveness-audit-positive-assertion: external lookup (web_search, firecrawl) without brain-first compliance"
+          },
+          "skill": "cron-liveness-audit-positive-assertion",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "perplexity"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "engagement-recency-research: external lookup (perplexity) without brain-first compliance"
+          },
+          "skill": "engagement-recency-research",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "perplexity"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "home-services-seo: external lookup (perplexity) without brain-first compliance"
+          },
+          "skill": "home-services-seo",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "jupyter-live-kernel: external lookup (web_search) without brain-first compliance"
+          },
+          "skill": "jupyter-live-kernel",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search",
+              "firecrawl"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "live-web-research-fallback-chain: external lookup (web_search, firecrawl) without brain-first compliance"
+          },
+          "skill": "live-web-research-fallback-chain",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "maps: external lookup (web_search) without brain-first compliance"
+          },
+          "skill": "maps",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "perplexity"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "obliteratus: external lookup (perplexity) without brain-first compliance"
+          },
+          "skill": "obliteratus",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search",
+              "firecrawl"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "ocr-and-documents: external lookup (web_search, firecrawl) without brain-first compliance"
+          },
+          "skill": "ocr-and-documents",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search",
+              "exa"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "research-paper-writing: external lookup (web_search, exa) without brain-first compliance"
+          },
+          "skill": "research-paper-writing",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "perplexity"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "seo-audit: external lookup (perplexity) without brain-first compliance"
+          },
+          "skill": "seo-audit",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "spike: external lookup (web_search) without brain-first compliance"
+          },
+          "skill": "spike",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "systematic-debugging: external lookup (web_search) without brain-first compliance"
+          },
+          "skill": "systematic-debugging",
+          "type": "skill_missing_brain_first"
+        },
+        {
+          "action": "Add canonical Convention callout OR set 'brain_first: exempt'",
+          "fix": {
+            "external_patterns": [
+              "web_search"
+            ],
+            "formerly_hardcoded_exempt": false,
+            "kind": "add-convention-callout",
+            "summary_line": "web-browser-automation: external lookup (web_search) without brain-first compliance"
+          },
+          "skill": "web-browser-automation",
+          "type": "skill_missing_brain_first"
+        }
+      ],
+      "message": "17 skill(s) do external lookups without a brain-first compliance signal. Fix via 'gbrain doctor --fix' (adds canonical Convention callout) or set 'brain_first: exempt' in skill frontmatter for genuine infra skills.",
+      "name": "skill_brain_first",
+      "status": "warn"
+    },
+    {
+      "category": "brain",
+      "message": "81 historical sync failure(s), all acknowledged [UNKNOWN=64, SLUG_MISMATCH=17].",
+      "name": "sync_failures",
+      "status": "ok"
+    },
+    {
+      "category": "meta",
+      "message": "info: 1 slug fallback in the last 7 days (SLUG_FALLBACK_FRONTMATTER).",
+      "name": "slug_fallback_audit",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "disabled (opt-in). Enable with: gbrain config set autopilot.nightly_quality_probe.enabled true",
+      "name": "nightly_quality_probe_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "details": {
+        "kinds": [
+          {
+            "cost_7d_usd": 95.69681,
+            "eval_fail_count": 0,
+            "eval_pass_count": 0,
+            "halt_count": 4,
+            "halt_rate": 0.019230769230769232,
+            "kind": "facts.conversation",
+            "last_updated_at": "2026-06-10T17:12:39.589Z",
+            "round_completed_count": 204
+          },
+          {
+            "cost_7d_usd": 0,
+            "eval_fail_count": 0,
+            "eval_pass_count": 0,
+            "halt_count": 0,
+            "halt_rate": 0,
+            "kind": "facts.fence",
+            "last_updated_at": "2026-06-10T17:10:58.899Z",
+            "round_completed_count": 188
+          },
+          {
+            "cost_7d_usd": 0,
+            "eval_fail_count": 0,
+            "eval_pass_count": 0,
+            "halt_count": 0,
+            "halt_rate": 0,
+            "kind": "takes.proposed",
+            "last_updated_at": "2026-06-10T17:12:01.474Z",
+            "round_completed_count": 146
+          }
+        ],
+        "rollup_write_failures_7d": 0,
+        "schema_version": 1
+      },
+      "message": "3 kind(s) tracked, all halt rates below 10%",
+      "name": "extract_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "details": {
+        "backlog": 7639,
+        "fix_hint": "gbrain extract-conversation-facts --background --max-cost-usd 5",
+        "known_approximation": "backlog counts pages with NO extraction terminal row; pages with new messages since prior extraction may show OK until next run",
+        "types": [
+          "conversation",
+          "meeting",
+          "slack",
+          "email",
+          "session"
+        ]
+      },
+      "message": "7639 eligible pages without extraction. Fix: gbrain extract-conversation-facts --background --max-cost-usd 5",
+      "name": "conversation_facts_backlog",
+      "remediation": [
+        {
+          "est_seconds": 600,
+          "est_usd_cost": 5,
+          "id": "conversation_facts_backfill",
+          "idempotency_key": "default:extract-conversation-facts:4447bf4c",
+          "job": "extract-conversation-facts",
+          "params": {
+            "maxCostUsd": 5,
+            "sourceId": "default"
+          },
+          "rationale": "Backfill facts for conversation/meeting/slack/email pages so chunker-loses-anchor recall misses get a topical-header-rich facts row to bind to.",
+          "severity": "medium",
+          "status": "remediable"
+        }
+      ],
+      "remediation_status": "remediable",
+      "status": "warn"
+    },
+    {
+      "category": "brain",
+      "message": "64 transcript-like page(s): imessage-iso-pipe=49, bold-name-colon-outside=14, _no_match=1 (36 sampled summary/index page(s) skipped)",
+      "name": "conversation_format_coverage",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "No progressive-batch operations in the last 7 days",
+      "name": "progressive_batch_audit_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Skipped (nightly probe is opt-in; enable with `gbrain config set autopilot.conversation_parser_probe.enabled true`)",
+      "name": "conversation_parser_probe_health",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "gbrain home is outside any enclosing git worktree.",
+      "name": "home_dir_in_worktree",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "Connected, 70670 pages",
+      "name": "connection",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "Extension installed",
+      "name": "pgvector",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "RLS enabled on 60/60 public tables",
+      "name": "rls",
+      "status": "ok"
+    },
+    {
+      "category": "meta",
+      "message": "Version 111 (latest: 111)",
+      "name": "schema_version",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "Auto-RLS event trigger installed",
+      "name": "rls_event_trigger",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "100% coverage, 0 missing",
+      "name": "embeddings",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "openai:text-embedding-3-large \u2713 1298ms, 1536 dims, DB aligned",
+      "name": "embedding_provider",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Registry healthy: 2 columns (embedding, embedding_image) (all indexed); active='embedding'",
+      "name": "embedding_column_registry",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "no embedding env overrides set",
+      "name": "embedding_env_override",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Entity link coverage 98%, timeline 71%",
+      "name": "graph_coverage",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Brain score 89/100 (embed 35/35, links 25/25, timeline 8/15, orphans 11/15, dead-links 10/10)",
+      "name": "brain_score",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Orphan ratio 45% (13864/31091 linkable pages)",
+      "name": "orphan_ratio",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Sampled 500 pages; no bare-tweet phrases or external links.",
+      "name": "integrity",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "6 row(s) double-encoded (files.metadata=6). Fix: gbrain repair-jsonb",
+      "name": "jsonb_integrity",
+      "status": "warn"
+    },
+    {
+      "category": "brain",
+      "message": "No takes yet",
+      "name": "takes_weight_grid",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "All FK-child tables clean (10 tables checked)",
+      "name": "child_table_orphans",
+      "status": "ok"
+    },
+    {
+      "category": "skill",
+      "message": "whoknows eval fixture present (10 queries). Run `gbrain eval whoknows test/fixtures/whoknows-eval.jsonl` to grade.",
+      "name": "whoknows_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "All image-asset chunks have modality=image",
+      "name": "cross_modal_modality_backfill",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "search.unified_multimodal is off; coverage check N/A",
+      "name": "unified_multimodal_coverage",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "No truncated bodies detected",
+      "name": "markdown_body_completeness",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "10 page(s) exceed 500000-byte block threshold. Top: workspace/content/raw/unresolved-targets (2255317b, src=default); domain/crypto/raw/unresolved-targets (1621605b, src=default); lex-workspace/sie/analytics/2026-06-08 (1408393b, src=default). New ingests with the same shape get frontmatter.embed_skip set automatically; existing oversized pages can be split or accepted as non-embeddable.",
+      "name": "oversized_pages",
+      "status": "warn"
+    },
+    {
+      "category": "brain",
+      "message": "No junk-pattern hits in 1000 recent page(s) (use --content-audit for full scan)",
+      "name": "scraper_junk_pages",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "65 events (hard=0 soft=27 warn=38), reasons: PAGE_OVERSIZE_WARN=38, PAGE_OVERSIZED=27, sources: default=65. Oversize-only cluster: pages are allowed to land with embedding skipped/warned; split only the recurring raw-doc/session sources that need semantic retrieval. (Local audit only \u2014 multi-host operators set GBRAIN_AUDIT_DIR.)",
+      "name": "content_sanity_audit_recent",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "1 source(s) clean \u2014 no frontmatter issues",
+      "name": "frontmatter_integrity",
+      "status": "ok"
+    },
+    {
+      "category": "meta",
+      "message": "No capture failures in the last 24h",
+      "name": "eval_capture",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "No probe runs in the last 7 days. Run `gbrain eval suspected-contradictions --query \"...\" --top-k 5` to populate.",
+      "name": "contradictions",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "No facts:absorb failures in the last 24h.",
+      "name": "facts_extraction_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Sample of last 1000 pages clean (no fallback-with-parseable-fm-date, no future-dated, no pre-1990)",
+      "name": "effective_date_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "34 pages have non-zero emotional_weight; no take/weight mismatches detected",
+      "name": "salience_health",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "No stalled-forever jobs; no queue over depth 10.",
+      "name": "queue_health",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "Subagent tier resolves to default (claude-sonnet-4-6) \u2014 full tool-loop capability",
+      "name": "subagent_capability",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "facts_health(default): 2 active, 2 today, 2 this week, 0 consolidated, top entities \u2014",
+      "name": "facts_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "1 of 1 image(s) missing from disk (e.g. sources/thechaicoder/2026-06-09-image-sequence-scrollytelling-hero-workflow/keyframes.jpg). Fix: restore from git, or `gbrain sync --skip-failed` to acknowledge.",
+      "name": "image_assets",
+      "status": "warn"
+    },
+    {
+      "category": "brain",
+      "message": "OCR not in use (or no images ingested with OCR opt-in)",
+      "name": "ocr_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "details": {
+        "stale_count": 0,
+        "synced_recently_count": 1,
+        "unchanged_count": 0
+      },
+      "message": "All 1 federated source(s) synced recently",
+      "name": "sync_freshness",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "Single-source brain \u2014 sync --all consolidation not applicable.",
+      "name": "sync_consolidation",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "All 1 federated source(s) cycled recently",
+      "name": "cycle_freshness",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "search.mode is unset (using balanced fallback). Run `gbrain search modes` to see what is running and pick a mode explicitly.",
+      "name": "search_mode",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "No retrieval-affecting files changed in working tree.",
+      "name": "eval_drift",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "Reranker disabled \u2014 no failures expected",
+      "name": "reranker_health",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "No exhausted batch retries in last 24h. 22 transient retry(s) succeeded. Disconnect-call audit: 5134 call(s) in 24h (most recent caller: at disconnect (/Users/TJ/gbrain/src/core/postgres-engine.ts:207:7)).",
+      "name": "batch_retry_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "25.0% of pages have inbound links (10-29% \u2014 graph signals fire occasionally)",
+      "name": "graph_signals_coverage",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "Migration v79 applied; tracking enabled. Calibration profile not yet generated \u2014 brainstorm/lsd will run unbiased until enough takes are resolved.",
+      "name": "brainstorm_health",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "Configured embedding model \"openai:text-embedding-3-large\" is not ZeroEntropy \u2014 skip.",
+      "name": "ze_embedding_health",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Schema width (1536d) matches gateway embedding_dimensions",
+      "name": "embedding_width_consistency",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "facts.embedding is halfvec(1536) \u2014 matches gateway embedding_dimensions (openai:text-embedding-3-large).",
+      "name": "facts_embedding_width_consistency",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Single-source brain (no federation to check)",
+      "name": "source_routing_health",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "No OAuth clients registered",
+      "name": "oauth_confidential_client_health",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "Lock path: /Users/TJ/.gbrain/autopilot.lock",
+      "name": "autopilot_lock_scope",
+      "status": "ok"
+    },
+    {
+      "category": "ops",
+      "message": "1 stale lock(s) detected (ttl_expires_at < NOW()):\n  gbrain-cycle:default (pid 32719 on TJs-Mac-Studio.local, age 0h) \u2192 gbrain sync --break-lock",
+      "name": "stale_locks",
+      "status": "warn"
+    },
+    {
+      "category": "meta",
+      "details": {
+        "counts": {
+          "global": 8,
+          "mixed": 2,
+          "source": 11
+        },
+        "phase_scope_map": {
+          "backlinks": "source",
+          "calibration_profile": "global",
+          "consolidate": "source",
+          "conversation_facts_backfill": "source",
+          "embed": "global",
+          "extract": "source",
+          "extract_atoms": "source",
+          "extract_facts": "source",
+          "grade_takes": "global",
+          "lint": "source",
+          "orphans": "global",
+          "patterns": "mixed",
+          "propose_takes": "source",
+          "purge": "global",
+          "recompute_emotional_weight": "source",
+          "resolve_symbol_edges": "global",
+          "schema-suggest": "source",
+          "skillopt": "global",
+          "sync": "source",
+          "synthesize": "mixed",
+          "synthesize_concepts": "global"
+        }
+      },
+      "message": "Phase taxonomy: 11 source-scoped, 8 brain-global, 2 mixed. Source-safe: [lint, backlinks, sync, extract, extract_facts, extract_atoms, recompute_emotional_weight, consolidate, propose_takes, conversation_facts_backfill, schema-suggest]. Brain-global: [resolve_symbol_edges, synthesize_concepts, grade_takes, calibration_profile, skillopt, embed, orphans, purge]. Mixed: [synthesize, patterns].",
+      "name": "cycle_phase_scope",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "No stale chunks",
+      "name": "embed_staleness",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Coverage 94% \u00b1 0.5%",
+      "name": "entity_link_coverage",
+      "status": "ok"
+    },
+    {
+      "category": "brain",
+      "message": "Coverage 70% \u00b1 0.9% (target 90%)",
+      "name": "timeline_coverage",
+      "status": "warn"
+    },
+    {
+      "category": "brain",
+      "message": "0 takes (takes.bootstrap_enabled is false; opt in to enable)",
+      "name": "takes_count",
+      "status": "warn"
+    },
+    {
+      "category": "meta",
+      "message": "Active pack tj-v2@1.0.0+8f4c85f6 is current (no successor declared)",
+      "name": "pack_upgrade_available",
+      "status": "ok"
+    },
+    {
+      "category": "meta",
+      "message": "26 distinct typed values (pack declares 36)",
+      "name": "type_proliferation",
+      "status": "ok"
+    },
+    {
+      "category": "meta",
+      "message": "No dangling aliases",
+      "name": "dangling_aliases",
+      "status": "ok"
+    }
+  ],
+  "health_score": 60,
+  "schema_version": 2,
+  "status": "warnings"
+}

@@ -1,0 +1,35 @@
+--- process tree ---
+  PID  PPID STARTED                      ELAPSED STAT COMMAND
+32719 15118 Wed Jun 10 13:05:31 2026       29:23 S    bun /Users/TJ/.bun/bin/gbrain jobs work --max-rss 10240
+--- open files relevant ---
+bun     32719   TJ    1u     REG               1,17 33917241           150323901 /Users/TJ/.gbrain/autopilot.log
+bun     32719   TJ    2u     REG               1,17 57592589           155712234 /Users/TJ/.gbrain/autopilot.err
+bun     32719   TJ    4u     REG               1,17 33917241           150323901 /Users/TJ/.gbrain/autopilot.log
+bun     32719   TJ    5u     REG               1,17 57592589           155712234 /Users/TJ/.gbrain/autopilot.err
+bun     32719   TJ    8u    IPv6 0xe9e5c4577741870f      0t0                 TCP localhost:54521->localhost:postgresql (ESTABLISHED)
+bun     32719   TJ    9u    IPv6 0xb4f1b7a2b079d744      0t0                 TCP localhost:54522->localhost:postgresql (ESTABLISHED)
+bun     32719   TJ   11u    IPv6 0x8298a1e3e691c476      0t0                 TCP localhost:54556->localhost:postgresql (ESTABLISHED)
+bun     32719   TJ   12u    IPv6 0x30afa23fc11e218f      0t0                 TCP localhost:54557->localhost:postgresql (ESTABLISHED)
+bun     32719   TJ   14u    IPv6 0x69a8e40da5d93513      0t0                 TCP localhost:54704->localhost:postgresql (ESTABLISHED)
+bun     32719   TJ   15u    IPv6 0xfde8119b0178b68b      0t0                 TCP localhost:54705->localhost:postgresql (ESTABLISHED)
+--- recent minion jobs ---
+7465|sync|completed|2026-06-10 13:24:57.725875-04|2026-06-10 13:24:57.884316-04|
+7464|sync|completed|2026-06-10 13:14:55.986388-04|2026-06-10 13:14:56.173268-04|
+7463|autopilot-cycle|completed|2026-06-10 13:09:57.343905-04|2026-06-10 13:12:40.567205-04|
+7462|sync|completed|2026-06-10 13:09:52.082127-04|2026-06-10 13:09:52.249042-04|
+7461|autopilot-cycle|completed|2026-06-10 13:04:54.366054-04|2026-06-10 13:06:01.509796-04|
+7460|sync|completed|2026-06-10 12:59:53.436164-04|2026-06-10 12:59:53.649845-04|
+7459|sync|completed|2026-06-10 12:49:52.23355-04|2026-06-10 12:49:52.386351-04|
+7458|sync|completed|2026-06-10 12:39:50.759161-04|2026-06-10 12:39:50.9116-04|
+7457|sync|completed|2026-06-10 12:29:49.218695-04|2026-06-10 12:29:49.3725-04|
+7456|sync|completed|2026-06-10 12:19:42.673328-04|2026-06-10 12:19:42.794887-04|
+7455|sync|completed|2026-06-10 12:14:41.761041-04|2026-06-10 12:14:41.892317-04|
+7454|sync|completed|2026-06-10 12:09:40.970967-04|2026-06-10 12:09:41.10841-04|
+7453|sync|completed|2026-06-10 12:04:39.849983-04|2026-06-10 12:04:40.014966-04|
+7452|autopilot-cycle|completed|2026-06-10 11:59:42.72714-04|2026-06-10 12:02:29.400674-04|
+7451|autopilot-cycle|completed|2026-06-10 11:54:40.729949-04|2026-06-10 11:55:42.104885-04|
+7450|sync|completed|2026-06-10 11:54:40.478428-04|2026-06-10 11:54:40.716006-04|
+7449|sync|completed|2026-06-10 11:44:38.390732-04|2026-06-10 11:44:38.589389-04|
+7448|sync|completed|2026-06-10 11:34:36.151934-04|2026-06-10 11:34:36.351458-04|
+7447|sync|completed|2026-06-10 11:24:34.662301-04|2026-06-10 11:24:34.815595-04|
+7446|sync|completed|2026-06-10 11:14:33.124462-04|2026-06-10 11:14:33.343019-04|

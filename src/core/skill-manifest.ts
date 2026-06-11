@@ -26,7 +26,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
-import { join } from 'path';
+import { relative, join } from 'path';
 
 export interface ManifestEntry {
   name: string;
@@ -60,43 +60,47 @@ function parseSkillName(skillMdPath: string): string | null {
   }
 }
 
+const MANIFEST_SKIP_DIRS = new Set<string>(['conventions', 'migrations']);
+
 /**
- * Walk skillsDir, return every `<skillsDir>/<dir>/SKILL.md` as a
- * ManifestEntry. Dotfile and underscore-prefixed dirs are skipped.
+ * Walk skillsDir recursively, returning every nested `SKILL.md` as a
+ * ManifestEntry. Hermes skills can live at `category/name/SKILL.md`, while
+ * gbrain's bundled skills are usually direct children. Dotfile,
+ * underscore-prefixed, and convention/migration dirs are skipped.
  */
 function deriveManifest(skillsDir: string): ManifestEntry[] {
   const out: ManifestEntry[] = [];
   if (!existsSync(skillsDir)) return out;
 
-  let entries: string[];
-  try {
-    entries = readdirSync(skillsDir);
-  } catch {
-    return out;
-  }
+  const walk = (dirAbs: string) => {
+    let entries: string[];
+    try { entries = readdirSync(dirAbs); }
+    catch { return; }
 
-  for (const entry of entries) {
-    // Skip hidden dirs and convention-family sibling dirs (_conventions/,
-    // conventions/, migrations/, recipes/, etc. are never "skills" in the
-    // routing sense). Only entries with a direct `SKILL.md` count.
-    if (entry.startsWith('.') || entry.startsWith('_')) continue;
+    for (const entry of entries) {
+      if (entry.startsWith('.') || entry.startsWith('_') || MANIFEST_SKIP_DIRS.has(entry)) continue;
 
-    const subdirAbs = join(skillsDir, entry);
-    let isDir = false;
-    try {
-      isDir = statSync(subdirAbs).isDirectory();
-    } catch {
-      continue;
+      const subdirAbs = join(dirAbs, entry);
+      let isDir = false;
+      try { isDir = statSync(subdirAbs).isDirectory(); }
+      catch { continue; }
+      if (!isDir) continue;
+
+      const skillMd = join(subdirAbs, 'SKILL.md');
+      if (existsSync(skillMd)) {
+        const rel = relative(skillsDir, skillMd).replace(/\\/g, '/');
+        const fallbackName = rel.replace(/\/SKILL\.md$/, '').split('/').pop() ?? entry;
+        const frontmatterName = parseSkillName(skillMd);
+        const name = frontmatterName && frontmatterName !== '' ? frontmatterName : fallbackName;
+        out.push({ name, path: rel });
+        continue;
+      }
+
+      walk(subdirAbs);
     }
-    if (!isDir) continue;
-
-    const skillMd = join(subdirAbs, 'SKILL.md');
-    if (!existsSync(skillMd)) continue;
-
-    const frontmatterName = parseSkillName(skillMd);
-    const name = frontmatterName && frontmatterName !== '' ? frontmatterName : entry;
-    out.push({ name, path: `${entry}/SKILL.md` });
   }
+
+  walk(skillsDir);
 
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;

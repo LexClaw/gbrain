@@ -1319,10 +1319,14 @@ in the facts table (source='${TERMINAL_AUDIT_SOURCE}'). gbrain doctor's
 conversation_facts_backlog check counts pages without this row.
 `;
 
-function buildJobParams(args: string[]): Record<string, unknown> {
+export function buildExtractConversationFactsJobParams(args: string[]): Record<string, unknown> {
   const parsed = parseArgs(args);
   return {
-    sourceId: parsed.sourceId,
+    // Minion handler is intentionally strict per-source. The inline CLI can
+    // enumerate all sources when omitted, but a single background job cannot;
+    // pin the legacy/default source so `--background` never dispatches an
+    // invalid job with missing data.sourceId.
+    sourceId: parsed.sourceId ?? 'default',
     types: parsed.types,
     slug: parsed.slug,
     dryRun: parsed.dryRun,
@@ -1356,7 +1360,7 @@ export async function runExtractConversationFacts(
     engine,
     args,
     jobName: 'extract-conversation-facts',
-    paramBuilder: buildJobParams,
+    paramBuilder: buildExtractConversationFactsJobParams,
   });
   if (backgrounded) return;
 

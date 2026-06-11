@@ -629,6 +629,15 @@ export interface TrajectoryPoint {
 /** Maximum results returned by search operations. Internal bulk operations (listPages) are not clamped. */
 export const MAX_SEARCH_LIMIT = 100;
 
+export interface DeleteFactsForPageOpts {
+  /**
+   * Optional source-provenance scope for callers that only own a subset
+   * of rows at the `(source_id, source_markdown_slug)` coordinate.
+   * Omitted preserves the legacy unscoped delete behavior.
+   */
+  sourceScope?: 'fence-origin';
+}
+
 /** Clamp a user-provided search limit to a safe range. */
 export function clampSearchLimit(limit: number | undefined, defaultLimit = 20, cap = MAX_SEARCH_LIMIT): number {
   if (limit === undefined || limit === null || !Number.isFinite(limit) || Number.isNaN(limit)) return defaultLimit;
@@ -1557,12 +1566,17 @@ export interface BrainEngine {
   ): Promise<{ inserted: number; ids: number[] }>;
 
   /**
-   * v0.32.2: hard-delete every fact row scoped to a single fence page.
+   * v0.32.2: hard-delete fact rows scoped to a single page coordinate.
    *
-   * Keyed on `(source_id, source_markdown_slug)`. Used by the
-   * `extract_facts` cycle phase before re-inserting from the fence — the
-   * fence is canonical, the DB is the derived index, so each phase run
-   * wipes the page-scoped index and rebuilds it from the markdown.
+   * Default behavior is intentionally unscoped: every row keyed on
+   * `(source_id, source_markdown_slug)` is deleted. Non-reconcile callers
+   * such as phantom-redirect depend on that full coordinate wipe.
+   *
+   * Callers that only own fence-origin rows may pass
+   * `sourceScope: 'fence-origin'`, which narrows the delete to rows whose
+   * `source` is NULL, empty, or starts with `fence`. The `extract_facts`
+   * cycle phase uses that scoped mode before re-inserting from the fence
+   * so facts from other writers at the same markdown slug survive.
    *
    * Hard DELETE (not soft-delete via `expired_at`). A fence row that
    * disappears from markdown corresponds to a fact the user removed
@@ -1577,7 +1591,7 @@ export interface BrainEngine {
    * until the v0_32_2 migration backfills them. Cycle-phase callers in
    * commit 7 add the empty-fence-guard as a belt-and-suspenders check.
    */
-  deleteFactsForPage(slug: string, source_id: string): Promise<{ deleted: number }>;
+  deleteFactsForPage(slug: string, source_id: string, opts?: DeleteFactsForPageOpts): Promise<{ deleted: number }>;
 
   /**
    * Mark a fact expired. Never DELETE. Returns true iff a row was updated.

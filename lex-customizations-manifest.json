@@ -603,7 +603,7 @@
     {
       "path": "src/commands/orphans.ts",
       "kind": "modified-upstream-file",
-      "source_commit": "kn7cb8y",
+      "source_commit": "2cda5d97",
       "rationale": "LEX-FORK (card kn7cb8y): adds 'sessions' to FIRST_SEGMENT_EXCLUSIONS so archival Hermes transcripts do not inflate orphan_ratio while preserving genuine content orphan reporting.",
       "reapply": "hand-merge",
       "merge_strategy": "After upstream merge, re-add the sessions first-segment exclusion if absent. Marker check: grep -q \"'sessions'\" src/commands/orphans.ts AND grep -q 'sessions/ are archival Hermes transcripts' src/commands/orphans.ts. Do NOT add tweet/tweets first-segment exclusions; tweets are /raw/-nested and covered by RAW_SEGMENT."
@@ -618,15 +618,15 @@
     {
       "path": "test/fixtures/conversation-parser/hermes-session-archive-3d1468.md",
       "kind": "new-file",
-      "source_commit": "kn7dyv5ntf9g6bh65mnr3xx4b18851k8",
-      "rationale": "LEX-FORK (yield tuning): real prior 0-fact Hermes session fixture used to prove B-FIX-1 filters skill-doc/context-compaction preambles and samples substantive turns. PRIVATE content (session log) — fork-local only, never push to a public upstream PR without redaction.",
+      "source_commit": "7b52eade",
+      "rationale": "LEX-FORK (yield tuning): real prior 0-fact Hermes session fixture used to prove B-FIX-1 filters skill-doc/context-compaction preambles and samples substantive turns. PRIVATE content (session log) \u2014 fork-local only, never push to a public upstream PR without redaction.",
       "reapply": "checkout-subtree"
     },
     {
       "path": "test/fixtures/conversation-parser/hermes-session-archive-39d867.md",
       "kind": "new-file",
       "source_commit": "a2430c27",
-      "rationale": "LEX-FORK (T4 wiring): real Hermes session-archive fixture for the fallback test. PRIVATE content (session log) — fork-local only, never push to a public upstream PR without redaction. Card kn7e69h.",
+      "rationale": "LEX-FORK (T4 wiring): real Hermes session-archive fixture for the fallback test. PRIVATE content (session log) \u2014 fork-local only, never push to a public upstream PR without redaction. Card kn7e69h.",
       "reapply": "checkout-subtree"
     }
   ]

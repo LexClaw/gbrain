@@ -5,7 +5,7 @@ Modes:
   --subscribe @Handle [@Handle ...]   Add channels to channels.yaml (resolves UC id)
   --once                              Poll all subscribed channels once
   --once --dry-run                    Smoke-test poll: parse RSS, no writes
-  --backfill CHANNEL_ID               Backfill videos and streams from channel catalog
+  --backfill CHANNEL_ID               Backfill videos from channel catalog
   --enrich-queue                      Drain enrichment queue files (consumed by second cron)
   --status                            Print cursor + queue summary
 """
@@ -81,8 +81,7 @@ def _parse_since(value: str | None) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def cmd_backfill(channel_id: str, since_arg: str | None, max_videos: int | None, dry_run: bool,
-                 include_streams: bool) -> int:
+def cmd_backfill(channel_id: str, since_arg: str | None, max_videos: int | None, dry_run: bool) -> int:
     channels = yl.load_channels()
     channel = next((c for c in channels if c.channel_id == channel_id), None)
     if channel is None:
@@ -110,7 +109,6 @@ def cmd_backfill(channel_id: str, since_arg: str | None, max_videos: int | None,
         try:
             summary = yl.backfill_channel(
                 channel, cursors, since=since, max_videos=max_videos, dry_run=dry_run,
-                include_streams=include_streams,
             )
         except (yl.DownloadError, json.JSONDecodeError) as e:
             yl.log(f"backfill failed for {channel.handle}: {e}", level="ERROR")
@@ -230,8 +228,6 @@ def main(argv: list[str]) -> int:
     p.add_argument("--backfill", metavar="CHANNEL_ID")
     p.add_argument("--since", metavar="YYYY-MM-DD")
     p.add_argument("--max", type=int, dest="max_videos", metavar="N")
-    p.add_argument("--include-streams", dest="include_streams", action="store_true", default=True)
-    p.add_argument("--no-include-streams", dest="include_streams", action="store_false")
     p.add_argument("--enrich-queue", action="store_true")
     p.add_argument("--status", action="store_true")
     args = p.parse_args(argv)
@@ -243,7 +239,7 @@ def main(argv: list[str]) -> int:
     if args.once:
         return cmd_once(args.dry_run)
     if args.backfill:
-        return cmd_backfill(args.backfill, args.since, args.max_videos, args.dry_run, args.include_streams)
+        return cmd_backfill(args.backfill, args.since, args.max_videos, args.dry_run)
     if args.status:
         return cmd_status()
     p.print_help()

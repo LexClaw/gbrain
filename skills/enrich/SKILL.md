@@ -28,6 +28,8 @@ writes_to:
 
 # Enrich Skill
 
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+
 Enrich person and company pages from external sources. Scale effort to importance.
 
 ## Contract
@@ -347,5 +349,3 @@ Both page types have bidirectional back-links to every entity they mention.
 - Retrieve raw data from gbrain (get_raw_data)
 - Link entities in gbrain (add_link)
 - Check backlinks in gbrain (get_backlinks)
-FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
-

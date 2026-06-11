@@ -335,17 +335,46 @@ async function executeDecisions(sql: ReturnType<typeof postgres>, decisions: Dec
       const deleteIds = decision.deletePages.map(p => p.id);
       const canonicalId = decision.canonical.id;
 
+      // links has UNIQUE NULLS NOT DISTINCT (from_page_id, to_page_id, link_type,
+      // link_source, origin_page_id). Repointing to_page_id can collide with an
+      // existing link already pointing at the canonical. Delete the would-be
+      // duplicates on the to-be-deleted pages first, then repoint survivors.
+      await tx`
+        DELETE FROM links l
+        WHERE l.to_page_id = ANY(${deleteIds})
+          AND EXISTS (
+            SELECT 1 FROM links c
+            WHERE c.to_page_id = ${canonicalId}
+              AND c.from_page_id IS NOT DISTINCT FROM l.from_page_id
+              AND c.link_type IS NOT DISTINCT FROM l.link_type
+              AND c.link_source IS NOT DISTINCT FROM l.link_source
+              AND c.origin_page_id IS NOT DISTINCT FROM l.origin_page_id
+          )
+      `;
       const links = await tx<{ id: number }[]>`
         UPDATE links
         SET to_page_id = ${canonicalId}
         WHERE to_page_id = ANY(${deleteIds})
         RETURNING id
       `;
+      // PG has no ON CONFLICT for UPDATE. Two-step: first delete timeline rows
+      // on the to-be-deleted pages that would collide with an identical row
+      // already on the canonical, then repoint the survivors.
+      await tx`
+        DELETE FROM timeline_entries te
+        WHERE te.page_id = ANY(${deleteIds})
+          AND EXISTS (
+            SELECT 1 FROM timeline_entries c
+            WHERE c.page_id = ${canonicalId}
+              AND c.date IS NOT DISTINCT FROM te.date
+              AND c.summary IS NOT DISTINCT FROM te.summary
+              AND c.source IS NOT DISTINCT FROM te.source
+          )
+      `;
       const timeline = await tx<{ id: number }[]>`
         UPDATE timeline_entries
         SET page_id = ${canonicalId}
         WHERE page_id = ANY(${deleteIds})
-        ON CONFLICT (page_id, date, summary, source) DO NOTHING
         RETURNING id
       `;
       const pages = await tx<{ id: number }[]>`

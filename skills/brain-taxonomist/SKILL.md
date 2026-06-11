@@ -119,6 +119,7 @@ type is needed and let the schema-pack cathedral handle the proposal flow.
 - `ingest` — article/media ingestion consults brain-taxonomist for filing.
 - `repo-architecture` — delegates the filing decision to this skill.
 - `book-mirror` — after generating a mirror, files it via brain-taxonomist.
+- `references/filing-gate-conformance-audits.md` — how to audit brain-writing skills for filing-gate conformance, including the distinction between brain-first lookup and filing-gate path governance.
 
 ## Periodic Drift Detection
 

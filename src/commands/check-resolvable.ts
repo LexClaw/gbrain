@@ -158,6 +158,8 @@ export function resolveSkillsDir(flags: Flags): {
 
   const sourceLabel = {
     env_explicit: '$GBRAIN_SKILLS_DIR (explicit operator override)',
+    hermes_home: '$HERMES_HOME/skills',
+    hermes_default: '~/.hermes/skills',
     repo_root: 'repo root skills/',
     openclaw_workspace_env: '$OPENCLAW_WORKSPACE/skills',
     openclaw_workspace_env_root: '$OPENCLAW_WORKSPACE (AGENTS.md at workspace root)',

@@ -23,6 +23,8 @@ writes_to:
 
 # voice-note-ingest — Exact-Phrasing Voice Capture
 
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+
 > **Convention:** see [conventions/quality.md](../conventions/quality.md) for
 > citation rules, back-link enforcement, and exact-phrasing requirements.
 >
@@ -198,5 +200,3 @@ The full behavior contract is documented in the body sections above; this sectio
 ## Output Format
 
 The skill's output shape is documented inline in the body sections above (see "Output", "Brain page format", or equivalent). The literal section header here exists for the conformance test (`test/skills-conformance.test.ts`).
-FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
-

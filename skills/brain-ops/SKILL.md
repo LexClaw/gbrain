@@ -28,6 +28,8 @@ writes_to:
 
 # Brain Operations — The Ambient Context Layer
 
+FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
+
 The brain is not an archive. It is a live context membrane that every interaction
 flows through in both directions.
 
@@ -171,5 +173,3 @@ the citation is `[gstack:plans/foo]`. That's the whole rule.
 - `references/namespace-fallback-discipline.md` — don't stop at a 404; fall through `people/`, `people/wiki/`, `search`, `query` before declaring no-page.
 - `references/cli-default-limits.md` — `gbrain list` defaults to 50 with no truncation indicator; never quote a count without `--limit 100000` or a Postgres cross-check.
 - `references/synthesis-page-writes.md` — TJ-TRAINING / MEMORY-curated / decisions / learnings write semantics. Covers the migrated-stub trap, get-then-put append pattern, yaml-fence strip, post-write verification. Read whenever you need to update a `lex-workspace/*` synthesis page.
-FILING GATE: before creating any brain page, consult `~/.hermes/skills/RESOLVER.md` (the routing table) and the `brain-taxonomist` filing rules. Do not hardcode page paths; route through the resolver.
-

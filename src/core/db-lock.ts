@@ -485,6 +485,92 @@ export function syncLockId(sourceId: string): string {
 export const SYNC_LOCK_ID = syncLockId('default');
 
 /**
+ * Canonical recovery-command hint for a stale/busy lock row.
+ *
+ * `gbrain_cycle_locks` holds MANY lock ids, not just sync locks:
+ *   - `gbrain-sync:<source>`      performSync's writer window
+ *   - `gbrain-cycle`              legacy global cycle lock
+ *   - `gbrain-cycle:<source>`     per-source cycle lock (autopilot / `jobs work`)
+ *   - `gbrain-migrate:<db>`       migration lock
+ *   - `gbrain-reindex-multimodal` reindex lock
+ *   - `embed-backfill:<source>`   embed-backfill job lock
+ *
+ * Before this helper, both doctor's `stale_locks` check and performSync's
+ * "another sync is in progress" message hard-coded the `gbrain-sync:<source>`
+ * shape and fell back to a bare `gbrain sync --break-lock` for every other
+ * id. That bare hint resolves to `gbrain-sync:default` — the WRONG lock. An
+ * operator following it to clear a stale `gbrain-cycle:default` lock would be
+ * told "nothing to break" while the real stale row persisted (the 2026-06-10
+ * cycle-lock incident).
+ *
+ * The recovery path is uniform: `gbrain sync --break-lock` runs the same safe
+ * break worker (cross-host refusal + ttl-expired/pid-dead guard, optional
+ * `--max-age`) against ANY lock id. Sync locks keep the familiar
+ * `--source <s>` spelling for back-compat; every other id routes through the
+ * generic `--lock <id>` flag.
+ */
+export function breakLockHintFor(lockId: string): string {
+  if (lockId.startsWith('gbrain-sync:')) {
+    return `gbrain sync --break-lock --source ${lockId.slice('gbrain-sync:'.length)}`;
+  }
+  return `gbrain sync --break-lock --lock ${lockId}`;
+}
+
+/**
+ * Result of parsing the `--lock <id>` argument off a `gbrain sync --break-lock`
+ * argv slice. Flat (non-discriminated) on purpose so callers never depend on
+ * control-flow narrowing:
+ *   - present:false                       → no `--lock` flag at all; caller
+ *                                           falls through to --source/--all.
+ *   - present:true + error (value absent) → `--lock` was given but its value is
+ *                                           missing, empty, or another flag.
+ *   - present:true + value (error absent) → a validated, non-empty lock id.
+ */
+export interface LockArgResult {
+  present: boolean;
+  value?: string;
+  error?: string;
+}
+
+/**
+ * Parse and VALIDATE the `--lock <id>` argument for `gbrain sync --break-lock`.
+ *
+ * Why this exists (the 2026-06-10 Leigh-review bug): the original inline
+ * `args.find((a, i) => args[i - 1] === '--lock')` returns whatever token
+ * *follows* `--lock`. Three failure modes that the find-pattern silently
+ * accepted for an operator-facing destructive recovery command:
+ *
+ *   1. `--break-lock --lock` (flag is the LAST token): `find` returns
+ *      `undefined`, indistinguishable from "no --lock at all" → the CLI
+ *      silently fell through to the default `gbrain-sync:default` lock. The
+ *      operator typed `--lock` and broke a DIFFERENT lock than they named.
+ *   2. `--break-lock --lock --force`: `find` returns `'--force'` → it would
+ *      try to break a lock literally named "--force".
+ *   3. `--break-lock --lock ''` (empty value): `find` returns `''` →
+ *      `runBreakLock(engine, '', ...)` targets an empty lock id.
+ *
+ * This resolver treats `--lock` as REQUIRING a non-empty value that is not
+ * itself a flag (does not start with `-`). A present-but-invalid `--lock`
+ * returns an `error` string the CLI prints before exiting 1, rather than
+ * falling through to a different lock.
+ */
+export function parseLockArg(args: readonly string[]): LockArgResult {
+  const idx = args.indexOf('--lock');
+  if (idx === -1) return { present: false };
+  const value = args[idx + 1];
+  if (value === undefined) {
+    return { present: true, error: '--lock requires a lock id (e.g. --lock gbrain-cycle:default). No value was given.' };
+  }
+  if (value.trim() === '') {
+    return { present: true, error: '--lock requires a non-empty lock id (e.g. --lock gbrain-cycle:default). An empty value was given.' };
+  }
+  if (value.startsWith('-')) {
+    return { present: true, error: `--lock requires a lock id, but got the flag '${value}'. Did you forget the lock id? (e.g. --lock gbrain-cycle:default)` };
+  }
+  return { present: true, value };
+}
+
+/**
  * v0.30.1 (T4 + A4): wrap long-running work in a refreshing TTL lock.
  *
  * Problem: tryAcquireDbLock has a TTL but only stays exclusive if someone

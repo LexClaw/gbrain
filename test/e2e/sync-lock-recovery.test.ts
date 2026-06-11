@@ -171,6 +171,82 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     expect(snap).toBeNull();
   });
 
+  // ── v0.41.x: generic `--lock <id>` break path (cycle-lock incident fix) ──
+  // gbrain_cycle_locks holds non-sync lock ids too (gbrain-cycle:<source>,
+  // gbrain-migrate:<db>, ...). The 2026-06-10 incident: a stale
+  // gbrain-cycle:default lock had no supported recovery — the doctor hint
+  // pointed at `gbrain sync --break-lock`, which targets gbrain-sync:default,
+  // a different row. `--lock <id>` routes the literal id through the same
+  // safe break worker.
+  test('--break-lock --lock gbrain-cycle:default clears a TTL-expired cycle lock', async () => {
+    const eng = getEngine();
+    await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-cycle:default'`;
+    await (eng as any).sql`
+      INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at)
+      VALUES ('gbrain-cycle:default', 99999, ${hostname()}, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '30 minutes')
+    `;
+
+    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:default']);
+    expect(result.code).toBe(0);
+    expect(result.stdout + result.stderr).toMatch(/broke lock.*ttl_expired/i);
+
+    // The cycle lock row should be gone; the sync lock untouched.
+    const snap = await inspectLock(eng, 'gbrain-cycle:default');
+    expect(snap).toBeNull();
+  });
+
+  test('--break-lock --lock refuses a live local holder (same guard as sync locks)', async () => {
+    const eng = getEngine();
+    await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-cycle:default'`;
+    // Our pid → guaranteed alive on this host, fresh TTL → must refuse.
+    await (eng as any).sql`
+      INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at)
+      VALUES ('gbrain-cycle:default', ${process.pid}, ${hostname()}, NOW(), NOW() + INTERVAL '30 minutes')
+    `;
+
+    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:default']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/Refusing to break lock/);
+
+    const snap = await inspectLock(eng, 'gbrain-cycle:default');
+    expect(snap).not.toBeNull();
+    await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-cycle:default'`;
+  });
+
+  test('--break-lock --lock on an absent row exits 0 (nothing to break)', () => {
+    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:no-such-source']);
+    expect(result.code).toBe(0);
+    expect(result.stdout + result.stderr).toMatch(/not held|nothing to break/i);
+  });
+
+  test('--lock and --source are mutually exclusive', () => {
+    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:default', '--source', 'default']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/mutually exclusive/i);
+  });
+
+  test('--lock cannot be combined with --all', () => {
+    const result = runCli(['sync', '--break-lock', '--lock', 'gbrain-cycle:default', '--all']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/cannot be combined with --all/i);
+  });
+
+  test('--force-break-lock --lock clears a live cycle lock (force escape hatch)', async () => {
+    const eng = getEngine();
+    await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-cycle:default'`;
+    await (eng as any).sql`
+      INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at)
+      VALUES ('gbrain-cycle:default', ${process.pid}, ${hostname()}, NOW(), NOW() + INTERVAL '30 minutes')
+    `;
+
+    const result = runCli(['sync', '--force-break-lock', '--lock', 'gbrain-cycle:default']);
+    expect(result.code).toBe(0);
+    expect(result.stdout + result.stderr).toMatch(/[Ff]orce-broke lock|WARNING/);
+
+    const snap = await inspectLock(eng, 'gbrain-cycle:default');
+    expect(snap).toBeNull();
+  });
+
   test('SIGTERM during sync releases the lock within 3s', async () => {
     // Start a sync subprocess that will hold the lock briefly.
     // We'd ideally watch for the lock row to appear, then SIGTERM. Since

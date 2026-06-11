@@ -700,9 +700,8 @@ async function formatLockBusyMessage(engine: BrainEngine, lockKey: string): Prom
   }
 
   const ageHuman = formatAgeHuman(snap.age_ms);
-  const breakHint = lockKey.startsWith('gbrain-sync:')
-    ? `gbrain sync --break-lock --source ${lockKey.slice('gbrain-sync:'.length)}`
-    : `gbrain sync --break-lock`;
+  const { breakLockHintFor } = await import('../core/db-lock.ts');
+  const breakHint = breakLockHintFor(lockKey);
   const ttlNote = snap.ttl_expired ? ' [TTL expired]' : '';
   return (
     `Another sync is in progress (lock ${lockKey} held by pid ${snap.holder_pid} on ${snap.holder_host}, ` +
@@ -1186,6 +1185,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       detachedWorkingTreeManifest.renamed.length > 0);
 
   if (lastCommit === headCommit && !versionMismatch && !versionNeverSet && !hasDetachedWorkingTreeChanges) {
+    // No-op sync still proves freshness. Stamp last_sync_at/newest_content_at
+    // so doctor does not report a quiet, caught-up repo as stale just because
+    // no files changed since the last import.
+    if (!opts.dryRun) {
+      await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit, newestCommitMs(repoPath));
+    }
     return {
       status: 'up_to_date',
       fromCommit: lastCommit,
@@ -2124,6 +2129,21 @@ Options:
                        Exit codes: 0 = all sources ok, 1 = any error,
                        2 = cost-prompt-not-confirmed.
   --yes                Accept any interactive prompts (CI / non-TTY).
+  --break-lock         Clear a stale lock so the next sync/cycle can run.
+                       Safe by default: refuses unless the holder is on
+                       this host AND (TTL expired OR PID dead + lock >60s).
+                       Scope with --source <id> (sync locks) or --lock <id>
+                       (any lock — see below). Add --max-age <s> to break
+                       only wedged-but-alive holders (last refresh older
+                       than <s>). --force-break-lock skips every guard.
+  --lock <id>          (with --break-lock/--force-break-lock) Target ANY
+                       lock id in gbrain_cycle_locks, not just sync locks.
+                       Use this to clear stale cycle locks
+                       (gbrain-cycle:<source>), migrate locks
+                       (gbrain-migrate:<db>), reindex/embed-backfill locks,
+                       etc. 'gbrain doctor' prints the exact --lock command
+                       for each stale row. Mutually exclusive with --source
+                       and --all.
 
 See also:
   gbrain embed --stale    Re-embed all stale chunks (post --no-embed).
@@ -2182,6 +2202,49 @@ See also:
   // source in one call; runBreakLock now widens to iterate sources when
   // --all is set and accept maxAgeSeconds for age-gated breaks.
   if (breakLock || forceBreakLock) {
+    // v0.41.x: `--lock <id>` breaks ANY lock id in gbrain_cycle_locks, not
+    // just `gbrain-sync:<source>` rows. `gbrain_cycle_locks` is a shared
+    // table holding cycle locks (`gbrain-cycle`, `gbrain-cycle:<source>`),
+    // migrate locks (`gbrain-migrate:<db>`), reindex/embed-backfill locks,
+    // etc. Before this flag the only recoverable rows were sync locks; a
+    // stale `gbrain-cycle:default` lock had no supported recovery path (the
+    // doctor hint pointed at `--break-lock` which resolved to
+    // `gbrain-sync:default`). `--lock` routes the literal id through the same
+    // safe runBreakLock worker (cross-host refusal + ttl-expired/pid-dead
+    // guard, optional --max-age). The doctor's stale_locks hint now emits
+    // `--lock <id>` for every non-sync row (see breakLockHintFor).
+    //
+    // `--lock` parsing/validation lives in parseLockArg (db-lock.ts) so the
+    // missing/empty/flag-shaped-value cases are covered by unit tests and an
+    // operator can't silently break the default sync lock by fat-fingering
+    // `--lock` with no id (the 2026-06-10 review bug).
+    const { parseLockArg } = await import('../core/db-lock.ts');
+    const lockArgResult = parseLockArg(args);
+    if (lockArgResult.present && lockArgResult.error) {
+      console.error(lockArgResult.error);
+      process.exit(1);
+    }
+    if (lockArgResult.present) {
+      const lockArg = lockArgResult.value!;
+      if (syncAll) {
+        console.error('--lock cannot be combined with --all (--lock targets one explicit lock id).');
+        process.exit(1);
+      }
+      if (args.find((a, i) => args[i - 1] === '--source') !== undefined) {
+        console.error('--lock and --source are mutually exclusive (--source is sugar for --lock gbrain-sync:<source>).');
+        process.exit(1);
+      }
+      // source_id label is best-effort: extract from a `<scope>:<id>` shape
+      // for the JSON envelope; bare ids (e.g. `gbrain-cycle`) have no source.
+      const colon = lockArg.indexOf(':');
+      const sourceLabel = colon >= 0 ? lockArg.slice(colon + 1) : lockArg;
+      const exit = await runBreakLock(engine, lockArg, sourceLabel, {
+        force: forceBreakLock,
+        json: jsonOut,
+        maxAgeSeconds,
+      });
+      process.exit(exit);
+    }
     if (syncAll) {
       const { listSources } = await import('../core/sources-ops.ts');
       const sources = await listSources(engine);

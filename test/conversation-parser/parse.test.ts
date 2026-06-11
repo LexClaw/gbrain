@@ -115,8 +115,30 @@ describe('parseConversation — REGRESSION PR #1461 (telegram-bracket)', () => {
   });
 });
 
+describe('parseConversation — Hermes iMessage session archive ISO pipe format', () => {
+  test('parses ISO timestamp pipe-delimited iMessage archive lines', () => {
+    const body = [
+      '# iMessage archive: any;-;+140****4061',
+      '# date: 2026-05-27',
+      '',
+      '2026-05-27T15:55:28Z | TJ | Different Attorneys at different points',
+      '2026-05-27T15:56:03Z | +140****4061 | Basic structure you want is Holding LLC',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-05-27' });
+    expect(r.matched_pattern_id).toBe('imessage-iso-pipe');
+    expect(r.messages).toHaveLength(2);
+    expect(r.messages[0]).toEqual({
+      speaker: 'TJ',
+      timestamp: '2026-05-27T15:55:00Z',
+      text: 'Different Attorneys at different points',
+    });
+    expect(r.messages[1].speaker).toBe('+140****4061');
+    expect(r.messages[1].text).toBe('Basic structure you want is Holding LLC');
+  });
+});
+
 // ---------------------------------------------------------------------------
-// All 12 built-ins must parse their test_positive samples
+// All built-ins must parse their test_positive samples
 // ---------------------------------------------------------------------------
 
 describe('parseConversation — every built-in matches its test_positive sample', () => {

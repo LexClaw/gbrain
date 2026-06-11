@@ -11,15 +11,15 @@
  *   1. Reads the markdown body (DB-side fetch via engine.getPage).
  *   2. Parses the `## Facts` fence with parseFactsFence.
  *   3. Maps ParsedFact → FenceExtractedFact via extractFactsFromFenceText.
- *   4. Wipes the page's DB index via deleteFactsForPage.
+ *   4. Wipes the page's fence-origin DB index via deleteFactsForPage.
  *   5. Re-inserts via engine.insertFacts batch.
  *
- * After the phase, the DB index for every affected page byte-matches
- * the fence (modulo embeddings + runtime-derived fields). Pages with
- * no fence go through delete-then-empty-insert — DB rows for that
- * page coordinate are wiped; legacy NULL-source_markdown_slug rows
- * survive because deleteFactsForPage targets source_markdown_slug =
- * slug only.
+ * After the phase, the fence-origin DB index for every affected page
+ * byte-matches the fence (modulo embeddings + runtime-derived fields).
+ * Pages with no fence go through delete-then-empty-insert — only rows
+ * whose source is NULL, empty, or `fence%` at that page coordinate are
+ * wiped. Rows from other writers keyed to the same source_markdown_slug
+ * survive.
  *
  * Empty-fence guard (Codex R2-#7): the phase refuses to do its
  * destructive reconciliation pass when legacy rows (row_num IS NULL,
@@ -209,10 +209,10 @@ export async function runExtractFacts(
 
     if (opts.dryRun) continue;
 
-    // Wipe-and-reinsert per page. The deleteFactsForPage call targets
-    // source_markdown_slug = slug only, so NULL-source_markdown_slug
-    // legacy rows survive (the partial-UNIQUE-index keyspace).
-    const deleted = await engine.deleteFactsForPage(slug, sourceId);
+    // Wipe-and-reinsert per page for rows owned by the fence reconciler.
+    // Other writers can legitimately share source_markdown_slug = slug;
+    // keep them out of this derived-index reconciliation pass.
+    const deleted = await engine.deleteFactsForPage(slug, sourceId, { sourceScope: 'fence-origin' });
     result.factsDeleted += deleted.deleted;
 
     if (parsed.facts.length === 0) continue;

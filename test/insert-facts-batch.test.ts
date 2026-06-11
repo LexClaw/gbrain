@@ -282,6 +282,24 @@ describe('engine.deleteFactsForPage', () => {
     expect(remaining.rows[0].fact).toBe('pre-v51 row');
     expect(remaining.rows[0].source_markdown_slug).toBeNull();
   });
+
+  test('sourceScope fence-origin deletes only empty and fence-prefixed source rows', async () => {
+    await engine.insertFacts(
+      [
+        fixtureFact(1, { fact: 'empty source', source: '' }),
+        fixtureFact(2, { fact: 'fence source', source: 'fence:reconcile' }),
+        fixtureFact(3, { fact: 'conversation source', source: 'cli:extract-conversation-facts' }),
+      ],
+      { source_id: 'default' },
+    );
+
+    const r = await engine.deleteFactsForPage('people/alice', 'default', { sourceScope: 'fence-origin' });
+    expect(r.deleted).toBe(2);
+
+    const remaining = await engine.listFactsByEntity('default', 'people/alice');
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].fact).toBe('conversation source');
+  });
 });
 
 describe('insertFacts + deleteFactsForPage round-trip (the reconciliation pattern)', () => {
