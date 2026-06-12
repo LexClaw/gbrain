@@ -481,7 +481,7 @@ export function resolveSlugForPath(filePath: string, repoPrefix?: string): strin
 //   3. Let `gbrain sync --skip-failed` acknowledge a known-bad set so
 //      repos with many broken files aren't permanently stuck.
 
-import { existsSync as _existsSync, readFileSync as _readFileSync, appendFileSync as _appendFileSync, mkdirSync as _mkdirSync } from 'fs';
+import { existsSync as _existsSync, readFileSync as _readFileSync, appendFileSync as _appendFileSync, mkdirSync as _mkdirSync, writeFileSync as _writeFileSync } from 'fs';
 import { join as _joinPath } from 'path';
 import { gbrainPath as _gbrainPath } from './config.ts';
 import { createHash as _createHash } from 'crypto';
@@ -494,6 +494,13 @@ export interface SyncFailure {
   commit: string;
   line?: number;
   ts: string;
+  /** Number of times this exact (path, commit, error) failure was observed. */
+  attempt_count?: number;
+  /** Timestamp of the most recent duplicate observation/retry failure. */
+  last_attempt_at?: string;
+  /** True once a failure survives retry and needs operator attention. */
+  alarmed?: boolean;
+  alarmed_at?: string;
   acknowledged?: boolean;
   acknowledged_at?: string;
 }
@@ -520,6 +527,16 @@ export function classifyErrorCode(errorMsg: string): string {
   }
   if (/canceling statement due to statement timeout|STATEMENT_TIMEOUT/i.test(errorMsg)) {
     return 'STATEMENT_TIMEOUT';
+  }
+
+  // High-risk write-path failures. These are not parse nits: they mean a page
+  // write or its post-write embedding path failed and must be retried/alarmed
+  // rather than silently absorbed by sync-failure deduplication.
+  if (/put-page truncation bug|page header present but body is empty|PUT_PAGE_TRUNCATION/i.test(errorMsg)) {
+    return 'PUT_PAGE_TRUNCATION';
+  }
+  if (/embedding.*(timed? out|timeout)|(?:timed? out|timeout).*embedding|EMBEDDING_TIMEOUT/i.test(errorMsg)) {
+    return 'EMBEDDING_TIMEOUT';
   }
 
   // YAML / frontmatter patterns. These match either the canonical message
@@ -673,9 +690,11 @@ export function loadSyncFailures(): SyncFailure[] {
 }
 
 /**
- * Append failure entries to the JSONL. Dedups by (path, commit, error-hash) —
- * the same file failing with the same error on the same commit writes ONCE
- * to the log, not once per sync run.
+ * Append failure entries to the JSONL. Dedups by (path, commit, error-hash),
+ * but duplicate unacknowledged failures are updated in-place with an
+ * attempt_count and alarm flag. This preserves the historical one-row-per-root-
+ * cause log shape while making failed retries visible to doctor/ops instead of
+ * silently dropping repeat observations.
  */
 export function recordSyncFailures(
   failures: Array<{ path: string; error: string; line?: number }>,
@@ -683,10 +702,13 @@ export function recordSyncFailures(
 ): void {
   if (failures.length === 0) return;
   const existing = loadSyncFailures();
-  const seen = new Set(existing.map(f => _dedupKey(f)));
+  const indexByKey = new Map(existing.map((f, i) => [_dedupKey(f), i]));
+  const seenKeys = new Set(indexByKey.keys());
+  let changedExisting = false;
 
   _mkdirSync(_failuresDir(), { recursive: true });
   const now = new Date().toISOString();
+  const appended: SyncFailure[] = [];
   for (const f of failures) {
     const entry: SyncFailure = {
       path: f.path,
@@ -695,10 +717,36 @@ export function recordSyncFailures(
       commit,
       line: f.line,
       ts: now,
+      attempt_count: 1,
     };
-    if (seen.has(_dedupKey(entry))) continue;
-    _appendFileSync(syncFailuresPath(), JSON.stringify(entry) + '\n');
-    seen.add(_dedupKey(entry));
+    const key = _dedupKey(entry);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex !== undefined) {
+      const current = existing[existingIndex];
+      if (!current.acknowledged) {
+        const attemptCount = Math.max(1, current.attempt_count ?? 1) + 1;
+        existing[existingIndex] = {
+          ...current,
+          code: current.code ?? entry.code,
+          attempt_count: attemptCount,
+          last_attempt_at: now,
+          ...(attemptCount >= 2 && !current.alarmed
+            ? { alarmed: true, alarmed_at: now }
+            : {}),
+        };
+        changedExisting = true;
+      }
+      continue;
+    }
+    if (seenKeys.has(key)) continue;
+    appended.push(entry);
+    seenKeys.add(key);
+  }
+  if (changedExisting) {
+    const all = [...existing, ...appended];
+    _writeFileSync(syncFailuresPath(), all.map(e => JSON.stringify(e)).join('\n') + '\n');
+  } else if (appended.length > 0) {
+    _appendFileSync(syncFailuresPath(), appended.map(e => JSON.stringify(e)).join('\n') + '\n');
   }
 }
 
@@ -732,8 +780,7 @@ export function acknowledgeSyncFailures(): AcknowledgeResult {
   });
   if (changed === 0) return { count: 0, summary: [] };
   _mkdirSync(_failuresDir(), { recursive: true });
-  const fd = require('fs').writeFileSync;
-  fd(syncFailuresPath(), updated.map(e => JSON.stringify(e)).join('\n') + '\n');
+  _writeFileSync(syncFailuresPath(), updated.map(e => JSON.stringify(e)).join('\n') + '\n');
   return {
     count: changed,
     summary: summarizeFailuresByCode(newlyAcked),

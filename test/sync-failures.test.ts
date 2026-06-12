@@ -127,6 +127,8 @@ describe('Bug 9 — doctor surfaces sync failures', () => {
     const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
     expect(source).toContain('sync_failures');
     expect(source).toContain('unacknowledgedSyncFailures');
+    expect(source).toContain('alarmedFailures');
+    expect(source).toContain('ALARM:');
     expect(source).toContain("'gbrain sync --skip-failed'");
   });
 });
@@ -237,9 +239,50 @@ describe('classifyErrorCode — error message to code mapping', () => {
     expect(classifyErrorCode('Skipping symlink: /path/to/link.md')).toBe('SYMLINK_NOT_ALLOWED');
   });
 
+  test('classifies put-page truncation guard failures', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      `Refusing to write 'daily/today': page header present but body is empty. This is the put-page truncation bug — typically 'gbrain put --file <path>'`
+    )).toBe('PUT_PAGE_TRUNCATION');
+  });
+
+  test('classifies embedding timeout failures', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('Embedding request timed out after 30000ms')).toBe('EMBEDDING_TIMEOUT');
+  });
+
   test('returns UNKNOWN for unrecognized errors', async () => {
     const { classifyErrorCode } = await import('../src/core/sync.ts');
     expect(classifyErrorCode('something completely different')).toBe('UNKNOWN');
+  });
+});
+
+// P1b write-path reliability: duplicate failures from an automatic retry must
+// update the existing unacked row instead of silently de-duping. Once a retry
+// still fails, the row is alarmed so doctor/ops see unrecovered write loss.
+describe('recordSyncFailures — retry attempts and alarms', () => {
+  test('increments attempt_count and alarms duplicate unrecovered failures', async () => {
+    const { recordSyncFailures, loadSyncFailures } = await import('../src/core/sync.ts');
+    const failure = {
+      path: 'daily/today.md',
+      error: `Refusing to write 'daily/today': page header present but body is empty. This is the put-page truncation bug`,
+    };
+
+    recordSyncFailures([failure], 'commit1');
+    let entries = loadSyncFailures();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].attempt_count).toBe(1);
+    expect(entries[0].acknowledged).toBeFalsy();
+    expect(entries[0].alarmed).toBeFalsy();
+
+    recordSyncFailures([failure], 'commit1');
+    entries = loadSyncFailures();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].attempt_count).toBe(2);
+    expect(entries[0].code).toBe('PUT_PAGE_TRUNCATION');
+    expect(entries[0].acknowledged).toBeFalsy();
+    expect(entries[0].alarmed).toBe(true);
+    expect(typeof entries[0].alarmed_at).toBe('string');
   });
 });
 
