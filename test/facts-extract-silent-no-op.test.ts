@@ -81,6 +81,15 @@ describe('facts extract — silent-no-op regression (v0.31.6 bug class)', () => 
     expect(isAvailable('chat')).toBe(true);
   });
 
+  test('model override availability can rescue facts extraction when global chat default is unavailable', () => {
+    configureGateway({
+      chat_model: 'anthropic:claude-sonnet-4-6',
+      env: { OPENROUTER_API_KEY: 'sk-or-test' },
+    });
+    expect(isAvailable('chat')).toBe(false);
+    expect(isAvailable('chat', 'openrouter:openai/gpt-5')).toBe(true);
+  });
+
   test('extractFactsFromTurn returns [] gracefully when chat is unavailable (no API key)', async () => {
     // Make chat unavailable by omitting ANTHROPIC_API_KEY.
     // This is the legitimate "graceful degradation" path — not a silent bug,

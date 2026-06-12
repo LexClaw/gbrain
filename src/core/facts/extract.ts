@@ -154,18 +154,20 @@ export async function extractFactsFromTurn(input: ExtractInput): Promise<Extract
   cleaned = cleaned.trim();
   if (!cleaned) return [];
 
-  if (!isAvailable('chat')) {
+  const cap = Math.max(1, Math.min(input.maxFactsPerTurn ?? 10, 25));
+  const defaultModel = await getFactsExtractionModel(input.engine);
+  const model = input.model ?? defaultModel;
+
+  if (!isAvailable('chat', model)) {
     // No chat gateway → no extraction. Caller still inserts facts via direct
     // `gbrain take add` paths.
     return [];
   }
 
-  const cap = Math.max(1, Math.min(input.maxFactsPerTurn ?? 10, 25));
-  const defaultModel = await getFactsExtractionModel(input.engine);
   let result: ChatResult;
   try {
     result = await chat({
-      model: input.model ?? defaultModel,
+      model,
       system: EXTRACTOR_SYSTEM,
       messages: [
         {

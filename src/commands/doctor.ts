@@ -5443,11 +5443,59 @@ export async function buildChecks(
        ORDER BY source_id, COUNT(*) DESC`,
     );
 
+    const yieldRows = await engine.executeRaw<{
+      source_id: string;
+      terminal_pages: string | number;
+      pages_with_facts: string | number;
+      fact_rows: string | number;
+    }>(
+      `WITH terminal_pages AS (
+         SELECT source_id, source_markdown_slug
+           FROM facts
+          WHERE source = 'cli:extract-conversation-facts:terminal'
+            AND created_at >= now() - INTERVAL '24 hours'
+            AND expired_at IS NULL
+       )
+       SELECT
+         t.source_id,
+         COUNT(*)::text AS terminal_pages,
+         COUNT(DISTINCT f.source_markdown_slug)::text AS pages_with_facts,
+         COUNT(f.id)::text AS fact_rows
+       FROM terminal_pages t
+       LEFT JOIN facts f
+         ON f.source_id = t.source_id
+        AND f.source_markdown_slug = t.source_markdown_slug
+        AND f.source = 'cli:extract-conversation-facts'
+        AND f.expired_at IS NULL
+       GROUP BY t.source_id
+       ORDER BY t.source_id`,
+    );
+
+    const yieldStats = yieldRows.map(r => {
+      const terminalPages = typeof r.terminal_pages === 'number' ? r.terminal_pages : parseInt(r.terminal_pages, 10);
+      const pagesWithFacts = typeof r.pages_with_facts === 'number' ? r.pages_with_facts : parseInt(r.pages_with_facts, 10);
+      const factRows = typeof r.fact_rows === 'number' ? r.fact_rows : parseInt(r.fact_rows, 10);
+      return {
+        source_id: r.source_id,
+        terminal_pages: Number.isFinite(terminalPages) ? terminalPages : 0,
+        pages_with_facts: Number.isFinite(pagesWithFacts) ? pagesWithFacts : 0,
+        fact_rows: Number.isFinite(factRows) ? factRows : 0,
+      };
+    });
+    const zeroYieldSources = yieldStats.filter(r => r.terminal_pages > 0 && r.fact_rows === 0);
+    const yieldSummary = yieldStats
+      .map(r => `${r.source_id}: ${r.fact_rows} fact row(s) from ${r.pages_with_facts}/${r.terminal_pages} completed page(s)`)
+      .join(' | ');
+
     if (rows.length === 0) {
       checks.push({
         name: 'facts_extraction_health',
-        status: 'ok',
-        message: 'No facts:absorb failures in the last 24h.',
+        status: zeroYieldSources.length > 0 ? 'warn' : 'ok',
+        message: zeroYieldSources.length > 0
+          ? `Conversation fact extraction completed with zero extracted facts in the last 24h: ${yieldSummary}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider and run \`gbrain extract-conversation-facts --dry-run --types session --limit 1\` before backfill.`
+          : yieldStats.length > 0
+          ? `No facts:absorb failures in the last 24h. Conversation extraction yield: ${yieldSummary}.`
+          : 'No facts:absorb failures in the last 24h. No conversation extraction completions observed.',
       });
     } else {
       // Group per source so the breakdown is operator-friendly.
@@ -5465,14 +5513,19 @@ export async function buildChecks(
           `${sid}: ${reasons.map(x => `${x.n} ${x.reason}`).join(', ')}`,
         )
         .join(' | ');
+      const yieldWarn = zeroYieldSources.length > 0;
       checks.push({
         name: 'facts_extraction_health',
-        status: anyOverThreshold ? 'warn' : 'ok',
+        status: anyOverThreshold || yieldWarn ? 'warn' : 'ok',
         message: anyOverThreshold
           ? `Facts:absorb failures over the threshold (${threshold}) in the last 24h: ${summary}. ` +
             `Run \`gbrain recall --since 24h --json\` to inspect what landed; ` +
-            `tune the gate via \`gbrain config set facts.absorb_warn_threshold N\`.`
-          : `Facts:absorb activity in last 24h (under threshold ${threshold}): ${summary}.`,
+            `tune the gate via \`gbrain config set facts.absorb_warn_threshold N\`.` +
+            (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : '')
+          : yieldWarn
+          ? `Facts:absorb activity is under threshold (${threshold}) but conversation fact extraction completed with zero extracted facts: ${yieldSummary}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider before backfill.`
+          : `Facts:absorb activity in last 24h (under threshold ${threshold}): ${summary}.` +
+            (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : ''),
       });
     }
   } catch (err) {
