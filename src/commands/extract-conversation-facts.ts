@@ -68,6 +68,7 @@ import type { BrainEngine, NewFact } from '../core/engine.ts';
 import type { Page } from '../core/types.ts';
 import {
   extractFactsFromTurn,
+  getFactsExtractionModel,
   isFactsExtractionEnabled,
 } from '../core/facts/extract.ts';
 import { isAvailable, withBudgetTracker } from '../core/ai/gateway.ts';
@@ -899,6 +900,12 @@ export async function runExtractConversationFactsCore(
   // who skip doctor crash on first insert with the opaque pgvector
   // error. Preflight catches them up-front. Result cached per process.
   if (!opts.dryRun) {
+    const extractionModel = await getFactsExtractionModel(engine);
+    if (!isAvailable('chat', extractionModel)) {
+      throw new Error(
+        `facts extraction chat gateway unavailable for ${extractionModel}; configure facts.extraction_model/models.tier.reasoning with an available chat provider`,
+      );
+    }
     await assertFactsEmbeddingDimMatchesConfig(engine);
   }
 
@@ -1359,10 +1366,16 @@ export async function runExtractConversationFacts(
     process.exit(1);
   }
 
-  // Chat gateway is required for non-dry-run.
-  if (!parsed.dryRun && !isAvailable('chat')) {
-    console.error('Chat gateway unavailable. Configure an Anthropic or compatible chat model, or pass --dry-run to preview segmentation.');
-    process.exit(1);
+  // Chat gateway is required for non-dry-run. Check the actual facts
+  // extraction model, not the generic chat_model default, so
+  // facts.extraction_model can route through OpenRouter/LiteLLM even when the
+  // global chat default is unavailable.
+  if (!parsed.dryRun) {
+    const extractionModel = await getFactsExtractionModel(engine);
+    if (!isAvailable('chat', extractionModel)) {
+      console.error(`Chat gateway unavailable for facts extraction model ${extractionModel}. Configure facts.extraction_model/models.tier.reasoning with an available chat provider, or pass --dry-run to preview segmentation.`);
+      process.exit(1);
+    }
   }
 
   // Aggregate result across all sources.

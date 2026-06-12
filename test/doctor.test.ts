@@ -106,7 +106,9 @@ describe('doctor command', () => {
   // writeFactsAbsorbLog from src/core/facts/absorb-log.ts), groups by
   // (source_id, reason) over the last 24h, warns when any (source, reason)
   // pair exceeds the configurable threshold (facts.absorb_warn_threshold,
-  // default 10).
+  // default 10). Also compares extract-conversation-facts terminal rows to
+  // per-segment facts so zero-yield extraction cannot report green just
+  // because facts:absorb did not throw.
   test('doctor source contains facts_extraction_health check that iterates sources', async () => {
     const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
     expect(source).toContain('facts_extraction_health');
@@ -118,6 +120,9 @@ describe('doctor command', () => {
     expect(block.length).toBeGreaterThan(0);
     expect(block).toContain('GROUP BY source_id');
     expect(block).toContain("source_type = 'facts:absorb'");
+    expect(block).toContain("source = 'cli:extract-conversation-facts:terminal'");
+    expect(block).toContain("source = 'cli:extract-conversation-facts'");
+    expect(block).toContain('zero extracted facts');
     expect(block).toContain('facts.absorb_warn_threshold');
     // 24h window
     expect(block).toMatch(/INTERVAL\s+'24\s*hours?'/i);
