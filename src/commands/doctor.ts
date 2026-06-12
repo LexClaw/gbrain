@@ -3481,6 +3481,10 @@ export async function buildChecks(
     if (unacked.length > 0) {
       const codeSummary = summarizeFailuresByCode(unacked);
       const codeBreakdown = codeSummary.map(s => `${s.code}=${s.count}`).join(', ');
+      const alarmedFailures = unacked.filter(f => f.alarmed);
+      const alarmPrefix = alarmedFailures.length > 0
+        ? `ALARM: ${alarmedFailures.length} unrecovered sync failure(s) survived retry. `
+        : '';
       const preview = unacked.slice(0, 3).map(f => `${f.path} (${f.error.slice(0, 60)})`).join('; ');
       // v0.40.3.0 T8b (D8 + D12 Bug 3): emit a single sync-retry-failed
       // step. sync-skip-failed is DELIBERATELY NOT emitted as a remediation
@@ -3497,16 +3501,16 @@ export async function buildChecks(
         // Content-stable per codex D12 Bug 2: count + oldest_ts captures
         // the relevant state without using a real timestamp.
         params: { failure_count: unacked.length, oldest_failure: oldestTs },
-        severity: unacked.length >= 10 ? 'high' : 'medium',
+        severity: alarmedFailures.length > 0 || unacked.length >= 10 ? 'high' : 'medium',
         est_seconds: 30,
         est_usd_cost: 0,
         rationale: `Retry ${unacked.length} unacked sync failure(s) (codes: ${codeBreakdown})`,
       });
       checks.push({
         name: 'sync_failures',
-        status: 'warn',
+        status: alarmedFailures.length > 0 ? 'fail' : 'warn',
         message:
-          `${unacked.length} unacknowledged sync failure(s) [${codeBreakdown}]. ${preview}` +
+          `${alarmPrefix}${unacked.length} unacknowledged sync failure(s) [${codeBreakdown}]. ${preview}` +
           `${unacked.length > 3 ? `, and ${unacked.length - 3} more` : ''}. ` +
           `Fix the file(s) and re-run 'gbrain sync', or use 'gbrain sync --skip-failed' to acknowledge.`,
         remediation: [retryStep],
