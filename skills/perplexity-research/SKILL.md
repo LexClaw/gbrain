@@ -8,6 +8,11 @@ triggers:
   - "what's new about"
   - "current state of"
   - "web research"
+  - "current web evidence"
+  - "current sources"
+  - "market landscape"
+  - "source-backed strategic brief"
+  - "what is new or contradictory"
   - "what changed about"
   - "surface new developments"
 mutating: true
@@ -158,10 +163,25 @@ the agent doesn't re-narrate already-known facts.
 Pass `recency_filter` to Perplexity: `hour | day | week | month`. Useful
 for news-cycle topics; omit for evergreen research.
 
+## Auto-Research Routing
+
+For standing research / Sage auto-research work, this skill is the default web/current-source engine. Do not start by designing a bespoke search engine or a full research-agenda taxonomy. First audit and route the existing primitives:
+
+- `perplexity-research` for source discovery, citation-backed synthesis, and deltas against GBrain context.
+- `engagement-recency-research` when the question is social/community recency or "what people are actually saying."
+- GBrain for prior context, durable findings, claim/evidence separation, and cross-links.
+- Sage / the auto-research loop for orchestration, verification, escalation, and Mission Control routing.
+
+See `references/auto-research-routing.md` for the session-specific routing correction.
+
 ## Anti-Patterns
 
 - ❌ Sending NO brain context. Then it's just a search — use `web_fetch`
   instead.
+- ❌ Designing a bespoke research engine before checking whether the existing
+  Perplexity / gstack / Hermes research primitives are callable and routed.
+- ❌ Treating "what should we auto-research?" as the first blocker when the
+  immediate work is wiring the research engine path. Topic selection can come later.
 - ❌ Truncating the brain context. The whole point is "knows what you
   know." Send dense context.
 - ❌ Discarding citations. Every claim in the output must have a URL.
