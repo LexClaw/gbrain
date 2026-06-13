@@ -1021,9 +1021,9 @@ HANDLER TYPES (built in)
       const allowShellJobs = hasFlag(args, '--allow-shell-jobs') ||
                              !!process.env.GBRAIN_ALLOW_SHELL_JOBS;
       const detach = hasFlag(args, '--detach');
-      // Supervisor defaults --max-rss 2048 (MB) — main production path uses
-      // the supervisor, so the watchdog is on by default here.
-      const maxRssMb = parseMaxRssFlag(args) ?? 2048;
+      // Supervisor defaults to the same high-memory envelope as autopilot.
+      // Large cycle jobs routinely exceed 2048 MB before graceful draining.
+      const maxRssMb = parseMaxRssFlag(args) ?? (Number(process.env.GBRAIN_SUPERVISOR_MAX_RSS) || 10240);
 
       const cliPath = parseFlag(args, '--cli-path') ?? resolveGbrainCliPath();
 

@@ -415,13 +415,13 @@ describe('MinionSupervisor', () => {
   });
 
   describe('integration: --max-rss spawn args (v0.21)', () => {
-    it('passes --max-rss 2048 to spawned worker by default', async () => {
+    it('passes --max-rss 10240 to spawned worker by default', async () => {
       const outFile = join(tmpdir(), `gbrain-sup-maxrss-${process.pid}-${Date.now()}.txt`);
       try { unlinkSync(outFile); } catch { /* may not exist */ }
 
-      // Worker logs its argv to OUT_FILE so the test can assert --max-rss 2048
+      // Worker logs its argv to OUT_FILE so the test can assert --max-rss 10240
       // landed there. spawnOnce in supervisor.ts builds:
-      //   ['jobs', 'work', '--concurrency', '1', '--queue', 'default', '--max-rss', '2048']
+      //   ['jobs', 'work', '--concurrency', '1', '--queue', 'default', '--max-rss', '10240']
       // exit 1 required post-D1/D2: code=0 workers respawn forever.
       const h = makeHarness('maxrss-default', `printf '%s\\n' "$*" > "$OUT_FILE" ; exit 1`);
 
@@ -435,7 +435,7 @@ describe('MinionSupervisor', () => {
 
         expect(existsSync(outFile)).toBe(true);
         const argv = readFileSync(outFile, 'utf8').trim();
-        expect(argv).toContain('--max-rss 2048');
+        expect(argv).toContain('--max-rss 10240');
       } finally {
         try { unlinkSync(outFile); } catch { /* noop */ }
         h.cleanup();
