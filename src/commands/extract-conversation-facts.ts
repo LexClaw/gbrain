@@ -265,6 +265,8 @@ export interface ExtractConversationFactsResult {
    * safe; surfaced for operator observability.
    */
   orphan_facts_cleaned: number;
+  /** Pages that parsed into segments but produced zero persisted facts. */
+  pages_zero_facts: number;
   segments_processed: number;
   facts_extracted: number;
   facts_inserted: number;
@@ -805,6 +807,14 @@ async function processPage(
   // segment (no break on segmentLimit; that's an explicit partial run).
   const fullyProcessed =
     state.segmentLimit === 0 || segmentsThisPage < state.segmentLimit;
+  const completedWithFacts = pageInsertedTotal > 0;
+  if (!state.dryRun && fullyProcessed && newestEnd !== null && !completedWithFacts) {
+    state.result.pages_zero_facts++;
+    process.stderr.write(
+      `[extract-conversation-facts] ${page.slug}: zero facts extracted across ${segmentsThisPage} segments; not marking complete\n`,
+    );
+    newestEnd = null;
+  }
   if (!state.dryRun && fullyProcessed && newestEnd !== null) {
     try {
       await writeTerminalAuditRow(state.engine, state.sourceId, page.slug, rowNum);
@@ -886,6 +896,7 @@ export async function runExtractConversationFactsCore(
     pages_skipped_disappeared: 0,
     pages_lock_skipped: 0,
     orphan_facts_cleaned: 0,
+    pages_zero_facts: 0,
     segments_processed: 0,
     facts_extracted: 0,
     facts_inserted: 0,
@@ -1399,6 +1410,7 @@ export async function runExtractConversationFacts(
     pages_skipped_disappeared: 0,
     pages_lock_skipped: 0,
     orphan_facts_cleaned: 0,
+    pages_zero_facts: 0,
     segments_processed: 0,
     facts_extracted: 0,
     facts_inserted: 0,
@@ -1439,6 +1451,7 @@ export async function runExtractConversationFacts(
       aggregate.pages_skipped_disappeared += perSource.pages_skipped_disappeared;
       aggregate.pages_lock_skipped += perSource.pages_lock_skipped;
       aggregate.orphan_facts_cleaned += perSource.orphan_facts_cleaned;
+      aggregate.pages_zero_facts += perSource.pages_zero_facts;
       aggregate.segments_processed += perSource.segments_processed;
       aggregate.facts_extracted += perSource.facts_extracted;
       aggregate.facts_inserted += perSource.facts_inserted;
@@ -1473,6 +1486,9 @@ export async function runExtractConversationFacts(
   }
   if (aggregate.orphan_facts_cleaned > 0) {
     console.log(`  Cleaned ${aggregate.orphan_facts_cleaned} orphan fact(s) from prior partial runs (D11 replay safety).`);
+  }
+  if (aggregate.pages_zero_facts > 0) {
+    console.log(`  ${aggregate.pages_zero_facts} page(s) produced zero facts and were left incomplete for retry.`);
   }
   if (anyBudgetExhausted) {
     console.log(`  Budget cap reached. Re-run with a higher --max-cost-usd to continue.`);

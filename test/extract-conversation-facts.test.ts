@@ -245,6 +245,34 @@ const SAMPLE_BODY = [
   fmt('Bob Demo', '2024-03-16', '8:05 AM', 'Day one! How is it?'),
 ].join('\n');
 
+function installDefaultChatStub(): void {
+  let callIndex = 0;
+  __setChatTransportForTests(async (): Promise<ChatResult> => {
+    callIndex++;
+    return {
+      text: JSON.stringify({
+        facts: [{
+          fact: `synthetic fact #${callIndex}`,
+          kind: 'event',
+          entity: 'companies/acme-corp',
+          confidence: 1.0,
+          notability: 'high',
+        }],
+      }),
+      blocks: [],
+      stopReason: 'end',
+      usage: {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+      },
+      model: 'stub:stub',
+      providerId: 'stub',
+    };
+  });
+}
+
 describe('runExtractConversationFactsCore', () => {
   let engine: PGLiteEngine;
 
@@ -252,34 +280,6 @@ describe('runExtractConversationFactsCore', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
-
-    // Deterministic chat-transport stub. Records calls + returns one
-    // fact per turn. Real-LLM extraction quality is the eval suite's job.
-    let callIndex = 0;
-    __setChatTransportForTests(async (): Promise<ChatResult> => {
-      callIndex++;
-      return {
-        text: JSON.stringify({
-          facts: [{
-            fact: `synthetic fact #${callIndex}`,
-            kind: 'event',
-            entity: 'companies/acme-corp',
-            confidence: 1.0,
-            notability: 'high',
-          }],
-        }),
-        blocks: [],
-        stopReason: 'end',
-        usage: {
-          input_tokens: 100,
-          output_tokens: 50,
-          cache_read_tokens: 0,
-          cache_creation_tokens: 0,
-        },
-        model: 'stub:stub',
-        providerId: 'stub',
-      };
-    });
 
     // Deterministic embedding stub.
     __setEmbedTransportForTests(
@@ -297,6 +297,7 @@ describe('runExtractConversationFactsCore', () => {
   });
 
   beforeEach(async () => {
+    installDefaultChatStub();
     // Clean state per test. Use executeRaw because PGLite uses different
     // truncation semantics than the canonical reset helper.
     await engine.executeRaw(`DELETE FROM facts WHERE source LIKE 'cli:extract-conversation-facts%'`);
@@ -448,6 +449,43 @@ describe('runExtractConversationFactsCore', () => {
     });
     expect(third.pages_processed).toBe(1);
     expect(third.segments_processed).toBeGreaterThanOrEqual(1);
+  });
+
+  test('does not mark a page complete when extraction yields zero facts', async () => {
+    __setChatTransportForTests(async (): Promise<ChatResult> => ({
+      text: JSON.stringify({ facts: [] }),
+      blocks: [],
+      stopReason: 'end',
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+      },
+      model: 'stub:stub',
+      providerId: 'stub',
+    }));
+
+    const result = await runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      slug: 'conversations/imessage/alice-example',
+      sleepMs: 0,
+    });
+
+    expect(result.pages_processed).toBe(1);
+    expect(result.pages_zero_facts).toBe(1);
+    expect(result.facts_inserted).toBe(0);
+
+    const terminalRows = await engine.executeRaw<{ count: string | number }>(
+      `SELECT COUNT(*) AS count FROM facts WHERE source = $1 AND source_session = $2`,
+      [TERMINAL_AUDIT_SOURCE, `${TERMINAL_AUDIT_SOURCE}:conversations/imessage/alice-example`],
+    );
+    expect(Number(terminalRows[0]?.count ?? 0)).toBe(0);
+
+    const checkpoints = await engine.executeRaw<{ n: string | number }>(
+      `SELECT COALESCE(SUM(jsonb_array_length(completed_keys)), 0) AS n FROM op_checkpoints WHERE op = 'extract-conversation-facts'`,
+    );
+    expect(Number(checkpoints[0]?.n ?? 0)).toBe(0);
   });
 
   test('honors facts.extraction_enabled kill-switch (F2)', async () => {
