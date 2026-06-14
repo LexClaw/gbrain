@@ -130,7 +130,7 @@ describe('summarizeCrashes — aggregation', () => {
     const summary = summarizeCrashes([]);
     expect(summary).toEqual({
       total: 0,
-      by_cause: { runtime_error: 0, oom_or_external_kill: 0, unknown: 0, legacy: 0 },
+      by_cause: { runtime_error: 0, oom_or_external_kill: 0, sigpipe: 0, unknown: 0, legacy: 0 },
       clean_exits: 0,
     });
   });
@@ -172,6 +172,23 @@ describe('summarizeCrashes — aggregation', () => {
     ]);
     expect(summary.total).toBe(1);
     expect(summary.by_cause.legacy).toBe(1);
+    expect(summary.clean_exits).toBe(0);
+  });
+
+  // code=141 (128 + 13 SIGPIPE): the worker wrote to a closed stdout/stderr
+  // pipe. The upstream classifier in child-worker-supervisor.ts stamps
+  // likely_cause='sigpipe'. It IS still a crash (counts toward total) but
+  // routes to its own bucket instead of inflating `unknown`. This is the
+  // exact incident this wave fixes: every "unknown=1" doctor warning was a
+  // code-141 SIGPIPE mislabeled.
+  test('sigpipe (code 141) routes to its own bucket, not unknown', () => {
+    const summary = summarizeCrashes([
+      evt('worker_exited', { likely_cause: 'sigpipe', code: 141 }),
+    ]);
+    expect(summary.total).toBe(1);
+    expect(summary.by_cause.sigpipe).toBe(1);
+    expect(summary.by_cause.unknown).toBe(0);
+    expect(summary.by_cause.legacy).toBe(0);
     expect(summary.clean_exits).toBe(0);
   });
 });

@@ -315,6 +315,13 @@ export class ChildWorkerSupervisor {
           likelyCause = 'oom_or_external_kill';
         } else if (signal === 'SIGTERM') {
           likelyCause = 'graceful_shutdown';
+        } else if (code === 141) {
+          // 141 = 128 + 13 (SIGPIPE): the worker wrote to a closed stdout/
+          // stderr pipe (parent log rotation, reader detach). Transient and
+          // self-healing via respawn; named explicitly so it stops inflating
+          // the `unknown` bucket and operators can tell pipe churn from real
+          // faults. Still counted as a crash so a runaway pipe loop surfaces.
+          likelyCause = 'sigpipe';
         } else if (code === 1) {
           likelyCause = 'runtime_error';
         } else if (code === 0) {

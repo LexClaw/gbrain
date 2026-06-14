@@ -3385,7 +3385,7 @@ export async function buildChecks(
     // shape is the right contract.
     const summary = summarizeCrashes(events);
     const crashes24h = summary.total;
-    const causeStr = `runtime=${summary.by_cause.runtime_error} oom=${summary.by_cause.oom_or_external_kill} unknown=${summary.by_cause.unknown} legacy=${summary.by_cause.legacy}`;
+    const causeStr = `runtime=${summary.by_cause.runtime_error} oom=${summary.by_cause.oom_or_external_kill} sigpipe=${summary.by_cause.sigpipe} unknown=${summary.by_cause.unknown} legacy=${summary.by_cause.legacy}`;
     const maxCrashesEvent = events.filter(e => e.event === 'max_crashes_exceeded').pop() ?? null;
 
     // Only surface a Check if the supervisor was ever observed (stops the

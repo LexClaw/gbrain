@@ -922,7 +922,7 @@ HANDLER TYPES (built in)
           if (supervisorPid) console.log(`  PID:           ${supervisorPid}`);
           console.log(`  PID file:      ${pidFile}`);
           if (lastStart) console.log(`  Last start:    ${lastStart}`);
-          console.log(`  Crashes (24h):     ${summary.total} (runtime=${summary.by_cause.runtime_error} oom=${summary.by_cause.oom_or_external_kill} unknown=${summary.by_cause.unknown} legacy=${summary.by_cause.legacy})`);
+          console.log(`  Crashes (24h):     ${summary.total} (runtime=${summary.by_cause.runtime_error} oom=${summary.by_cause.oom_or_external_kill} sigpipe=${summary.by_cause.sigpipe} unknown=${summary.by_cause.unknown} legacy=${summary.by_cause.legacy})`);
           console.log(`  Clean exits (24h): ${summary.clean_exits}`);
           if (maxCrashesEvent) console.log(`  ⚠ Max crashes exceeded at ${maxCrashesEvent.ts}`);
         }

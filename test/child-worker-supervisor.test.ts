@@ -135,6 +135,39 @@ describe('ChildWorkerSupervisor', () => {
       }
     });
 
+    it('code=141 (SIGPIPE) exit is classified likelyCause=sigpipe', async () => {
+      // 141 = 128 + 13 (SIGPIPE): worker wrote to a closed stdout/stderr
+      // pipe. Must NOT bucket as 'unknown' (the mislabel this wave fixes).
+      // First run exits 141, then clean-exits so the harness terminates.
+      const h = makeHarness(
+        'sigpipe',
+        `
+COUNTER_FILE="$(dirname "$0")/counter"
+[ -f "$COUNTER_FILE" ] || echo 0 > "$COUNTER_FILE"
+COUNT=$(cat "$COUNTER_FILE")
+NEXT=$((COUNT + 1))
+echo "$NEXT" > "$COUNTER_FILE"
+if [ "$NEXT" -eq 1 ]; then exit 141; else exit 0; fi
+`,
+      );
+      try {
+        const res = await runUntilTerminal(h, {
+          maxCrashes: 5,
+          _backoffFloorMs: 5,
+          stopAfterEvents: 30,
+        });
+        const exits = res.events.filter(
+          (e): e is Extract<ChildSupervisorEvent, { kind: 'worker_exited' }> =>
+            e.kind === 'worker_exited',
+        );
+        const sigpipeExit = exits.find((e) => e.code === 141);
+        expect(sigpipeExit).toBeDefined();
+        expect(sigpipeExit!.likelyCause).toBe('sigpipe');
+      } finally {
+        h.cleanup();
+      }
+    });
+
     it('interleaved code=0 and code!=0 exits still trip max_crashes', async () => {
       // Worker alternates: each invocation increments a counter file and
       // exits 1 on odd hits, 0 on even hits (so exit-sequence is 1,0,1,0,1).

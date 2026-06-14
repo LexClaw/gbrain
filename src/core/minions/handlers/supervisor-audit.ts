@@ -132,15 +132,17 @@ const CLEAN_EXIT_CAUSES = new Set(['clean_exit', 'graceful_shutdown']);
 /**
  * Per-cause crash bucket shape returned by `summarizeCrashes()`. Bucket names
  * mirror the upstream `likely_cause` values: `runtime_error` (code=1),
- * `oom_or_external_kill` (SIGKILL), `unknown` (other signals/codes). The
- * `legacy` bucket catches pre-v0.34 entries lacking `likely_cause` that fall
- * through to the `code !== 0` fallback.
+ * `oom_or_external_kill` (SIGKILL), `sigpipe` (code=141, broken stdout/
+ * stderr pipe), `unknown` (other signals/codes). The `legacy` bucket
+ * catches pre-v0.34 entries lacking `likely_cause` that fall through to
+ * the `code !== 0` fallback.
  */
 export interface CrashSummary {
   total: number;
   by_cause: {
     runtime_error: number;
     oom_or_external_kill: number;
+    sigpipe: number;
     unknown: number;
     legacy: number;
   };
@@ -185,7 +187,7 @@ export function isCrashExit(event: SupervisorEmission): boolean {
 export function summarizeCrashes(events: SupervisorEmission[]): CrashSummary {
   const summary: CrashSummary = {
     total: 0,
-    by_cause: { runtime_error: 0, oom_or_external_kill: 0, unknown: 0, legacy: 0 },
+    by_cause: { runtime_error: 0, oom_or_external_kill: 0, sigpipe: 0, unknown: 0, legacy: 0 },
     clean_exits: 0,
   };
   for (const e of events) {
@@ -198,6 +200,7 @@ export function summarizeCrashes(events: SupervisorEmission[]): CrashSummary {
     const cause = e.likely_cause as string | undefined;
     if (cause === 'runtime_error') summary.by_cause.runtime_error++;
     else if (cause === 'oom_or_external_kill') summary.by_cause.oom_or_external_kill++;
+    else if (cause === 'sigpipe') summary.by_cause.sigpipe++;
     else if (cause === 'unknown') summary.by_cause.unknown++;
     else summary.by_cause.legacy++;  // pre-v0.34 fallback OR future unrecognized cause
   }
