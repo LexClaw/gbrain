@@ -154,11 +154,12 @@ describe('extract-conversation-facts — structural contracts (T5)', () => {
 });
 
 describe('extract-conversation-facts — Result type carries new counters', () => {
-  test('ExtractConversationFactsResult has pages_lock_skipped + orphan_facts_cleaned', () => {
+  test('ExtractConversationFactsResult has pages_lock_skipped + orphan_facts_cleaned + pages_zero_facts', () => {
     // Source-level shape check (the type is exported but bun:test
     // doesn't introspect types at runtime; a grep is honest).
     expect(SRC).toMatch(/pages_lock_skipped:\s*number/);
     expect(SRC).toMatch(/orphan_facts_cleaned:\s*number/);
+    expect(SRC).toMatch(/pages_zero_facts:\s*number/);
   });
 
   test('initial result object literal initializes both counters to 0', () => {
@@ -168,5 +169,7 @@ describe('extract-conversation-facts — Result type carries new counters', () =
     expect(initOccurrences.length).toBeGreaterThanOrEqual(2);
     const cleanedOccurrences = SRC.match(/orphan_facts_cleaned:\s*0/g) ?? [];
     expect(cleanedOccurrences.length).toBeGreaterThanOrEqual(2);
+    const zeroFactsOccurrences = SRC.match(/pages_zero_facts:\s*0/g) ?? [];
+    expect(zeroFactsOccurrences.length).toBeGreaterThanOrEqual(2);
   });
 });

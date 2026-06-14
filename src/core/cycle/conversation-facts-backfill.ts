@@ -250,6 +250,7 @@ export async function runPhaseConversationFactsBackfill(
             // + delete-orphans-first replay safety.
             pages_lock_skipped: 0,
             orphan_facts_cleaned: 0,
+            pages_zero_facts: 0,
             segments_processed: 0,
             facts_extracted: 0,
             facts_inserted: 0,
@@ -282,6 +283,7 @@ export async function runPhaseConversationFactsBackfill(
   const totals = {
     pages_processed: 0,
     pages_skipped: 0,
+    pages_zero_facts: 0,
     facts_inserted: 0,
     sources_processed: 0,
   };
@@ -289,11 +291,12 @@ export async function runPhaseConversationFactsBackfill(
     if (!r.error) totals.sources_processed++;
     totals.pages_processed += r.pages_processed;
     totals.pages_skipped += r.pages_skipped;
+    totals.pages_zero_facts += r.pages_zero_facts;
     totals.facts_inserted += r.facts_inserted;
   }
 
   const anyError = Object.values(perSourceResults).some((r) => r.error);
-  const status = anyError ? 'warn' : 'ok';
+  const status = anyError || totals.pages_zero_facts > 0 ? 'warn' : 'ok';
   const summary = `${totals.facts_inserted} facts inserted across ${totals.sources_processed}/${sources.length} sources, ~$${totalSpent.toFixed(4)} spent`;
 
   return {
@@ -306,6 +309,7 @@ export async function runPhaseConversationFactsBackfill(
       sources_processed: totals.sources_processed,
       pages_processed: totals.pages_processed,
       pages_skipped: totals.pages_skipped,
+      pages_zero_facts: totals.pages_zero_facts,
       facts_inserted: totals.facts_inserted,
       spent_usd: totalSpent,
       skipped_by_brain_wide_cap: skippedByBrainWideCap,
