@@ -5483,18 +5483,72 @@ export async function buildChecks(
       };
     });
     const zeroYieldSources = yieldStats.filter(r => r.terminal_pages > 0 && r.fact_rows === 0);
+    const partialZeroYieldSources = yieldStats
+      .map(r => ({ ...r, zero_fact_pages: Math.max(0, r.terminal_pages - r.pages_with_facts) }))
+      .filter(r => r.zero_fact_pages > 0);
     const yieldSummary = yieldStats
-      .map(r => `${r.source_id}: ${r.fact_rows} fact row(s) from ${r.pages_with_facts}/${r.terminal_pages} completed page(s)`)
+      .map(r => {
+        const zeroFactPages = Math.max(0, r.terminal_pages - r.pages_with_facts);
+        return `${r.source_id}: ${r.fact_rows} fact row(s) from ${r.pages_with_facts}/${r.terminal_pages} completed page(s)` +
+          (zeroFactPages > 0 ? `, ${zeroFactPages} zero-fact completed page(s)` : '');
+      })
       .join(' | ');
+
+    let rollupSummary = '';
+    let rollupWarn = false;
+    try {
+      const rollupRows = await engine.executeRaw<{
+        source_id: string;
+        cost_usd: string | number;
+        completed: string | number;
+        halted: string | number;
+      }>(
+        `SELECT
+           source_id,
+           SUM(cost_usd)::text AS cost_usd,
+           SUM(round_completed_count)::text AS completed,
+           SUM(halt_count)::text AS halted
+         FROM extract_rollup_7d
+         WHERE kind = 'facts.conversation'
+           AND day >= CURRENT_DATE - 1
+         GROUP BY source_id
+         ORDER BY source_id`,
+      );
+      const rollups = rollupRows.map(r => {
+        const cost = typeof r.cost_usd === 'number' ? r.cost_usd : parseFloat(r.cost_usd);
+        const completed = typeof r.completed === 'number' ? r.completed : parseInt(r.completed, 10);
+        const halted = typeof r.halted === 'number' ? r.halted : parseInt(r.halted, 10);
+        return {
+          source_id: r.source_id,
+          cost_usd: Number.isFinite(cost) ? cost : 0,
+          completed: Number.isFinite(completed) ? completed : 0,
+          halted: Number.isFinite(halted) ? halted : 0,
+        };
+      });
+      rollupSummary = rollups
+        .map(r => `${r.source_id}: ${r.completed} completed, ${r.halted} halted, $${r.cost_usd.toFixed(4)} spent`)
+        .join(' | ');
+      const factRows24h = yieldStats.reduce((acc, r) => acc + r.fact_rows, 0);
+      const spent24h = rollups.reduce((acc, r) => acc + r.cost_usd, 0);
+      rollupWarn = spent24h > 0.01 && factRows24h === 0;
+    } catch {
+      // Legacy brains may not have extract_rollup_7d. The absorb check remains useful.
+    }
 
     if (rows.length === 0) {
       checks.push({
         name: 'facts_extraction_health',
-        status: zeroYieldSources.length > 0 ? 'warn' : 'ok',
+        status: zeroYieldSources.length > 0 || partialZeroYieldSources.length > 0 || rollupWarn ? 'warn' : 'ok',
         message: zeroYieldSources.length > 0
           ? `Conversation fact extraction completed with zero extracted facts in the last 24h: ${yieldSummary}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider and run \`gbrain extract-conversation-facts --dry-run --types session --limit 1\` before backfill.`
+          : partialZeroYieldSources.length > 0
+          ? `Conversation fact extraction has completed pages with zero extracted facts in the last 24h: ${yieldSummary}. This is a per-page yield failure; run \`gbrain extract-conversation-facts --dry-run --types session --limit 1\` and inspect zero-fact pages before backfill.`
+          : rollupWarn
+          ? `Conversation fact extraction spent budget but produced zero fact rows in the last 24h. Rollup: ${rollupSummary}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider and run \`gbrain extract-conversation-facts --dry-run --types session --limit 1\` before backfill.`
           : yieldStats.length > 0
           ? `No facts:absorb failures in the last 24h. Conversation extraction yield: ${yieldSummary}.`
+          : rollupSummary
+          ? `No facts:absorb failures in the last 24h. Conversation extraction rollup: ${rollupSummary}.`
           : 'No facts:absorb failures in the last 24h. No conversation extraction completions observed.',
       });
     } else {
@@ -5513,7 +5567,7 @@ export async function buildChecks(
           `${sid}: ${reasons.map(x => `${x.n} ${x.reason}`).join(', ')}`,
         )
         .join(' | ');
-      const yieldWarn = zeroYieldSources.length > 0;
+      const yieldWarn = zeroYieldSources.length > 0 || partialZeroYieldSources.length > 0 || rollupWarn;
       checks.push({
         name: 'facts_extraction_health',
         status: anyOverThreshold || yieldWarn ? 'warn' : 'ok',
@@ -5521,11 +5575,11 @@ export async function buildChecks(
           ? `Facts:absorb failures over the threshold (${threshold}) in the last 24h: ${summary}. ` +
             `Run \`gbrain recall --since 24h --json\` to inspect what landed; ` +
             `tune the gate via \`gbrain config set facts.absorb_warn_threshold N\`.` +
-            (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : '')
+            (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : rollupSummary ? ` Conversation extraction rollup: ${rollupSummary}.` : '')
           : yieldWarn
-          ? `Facts:absorb activity is under threshold (${threshold}) but conversation fact extraction completed with zero extracted facts: ${yieldSummary}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider before backfill.`
+          ? `Facts:absorb activity is under threshold (${threshold}) but conversation fact extraction produced zero facts. ${yieldSummary || `Rollup: ${rollupSummary}`}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider before backfill.`
           : `Facts:absorb activity in last 24h (under threshold ${threshold}): ${summary}.` +
-            (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : ''),
+            (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : rollupSummary ? ` Conversation extraction rollup: ${rollupSummary}.` : ''),
       });
     }
   } catch (err) {
