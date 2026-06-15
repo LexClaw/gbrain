@@ -34,7 +34,8 @@ import { chat as gatewayChat, type ChatOpts, type ChatResult } from '../ai/gatew
 import { resolveRecipe } from '../ai/model-resolver.ts';
 import { AIConfigError } from '../ai/errors.ts';
 import { BudgetExhausted } from '../budget/budget-tracker.ts';
-import { loadConfig } from '../config.ts';
+import { normalizeModelId } from '../model-id.ts';
+import { hasAnthropicKey } from '../ai/anthropic-key.ts';
 import type { BrainEngine } from '../engine.ts';
 
 /**
@@ -80,26 +81,14 @@ function cacheKey(shape: CallShape, modelId: string, content: string): string {
 }
 
 /**
- * Anthropic-only key probe. Mirrors `hasAnthropicKey` in
- * `src/core/cycle/synthesize.ts:811` + `src/core/think/index.ts`.
- * Other providers' key checks happen lazily at `gatewayChat` time and
- * surface as AIConfigError, which the caller's try/catch absorbs.
- */
-function hasAnthropicKey(): boolean {
-  if (process.env.ANTHROPIC_API_KEY) return true;
-  try {
-    const cfg = loadConfig();
-    if (cfg?.anthropic_api_key) return true;
-  } catch {
-    // loadConfig may throw on first-run; treat as no key.
-  }
-  return false;
-}
-
-/**
  * Construction-time provider probe. Mirrors `makeJudgeClient`'s
  * "return null on unavailable" semantics. Caller short-circuits on
  * null without spending any tokens.
+ *
+ * v0.41.x (#1698): the Anthropic-only key probe is now the shared
+ * `hasAnthropicKey` from `src/core/ai/anthropic-key.ts` (was a private
+ * copy here). Other providers' key checks happen lazily at `gatewayChat`
+ * time and surface as AIConfigError, which the caller's try/catch absorbs.
  *
  * Returns a normalized model id (`provider:model`) when available, or
  * null when:
@@ -107,7 +96,7 @@ function hasAnthropicKey(): boolean {
  *   - Anthropic provider with no key (env or config).
  */
 export function probeLlmAvailability(modelStr: string): string | null {
-  const normalized = modelStr.includes(':') ? modelStr : `anthropic:${modelStr}`;
+  const normalized = normalizeModelId(modelStr);
   let providerId: string;
   try {
     const { parsed } = resolveRecipe(normalized);
@@ -141,6 +130,8 @@ export function probeLlmAvailability(modelStr: string): string | null {
  *     BudgetExhausted, which is a hard budget/pricing failure and must
  *     surface to the caller.
  *   - Parse throws or returns null.
+ *
+ * NEVER throws.
  */
 export interface RunLlmCallOpts<TOutput> {
   shape: CallShape;
@@ -167,14 +158,7 @@ export interface RunLlmCallOpts<TOutput> {
 export async function runLlmCall<TOutput>(
   opts: RunLlmCallOpts<TOutput>,
 ): Promise<TOutput | null> {
-  // LEX-FORK (card kn7e69h): when a chatTransport is injected (test seam),
-  // bypass the real-provider availability probe. The whole point of the
-  // seam is to exercise the call path WITHOUT a live provider key; otherwise
-  // probeLlmAvailability returns null on a keyless test env and the stubbed
-  // transport is never reached. Production (no chatTransport) still probes.
-  const modelStr = opts.chatTransport
-    ? (opts.modelStr.includes(':') ? opts.modelStr : `anthropic:${opts.modelStr}`)
-    : probeLlmAvailability(opts.modelStr);
+  const modelStr = probeLlmAvailability(opts.modelStr);
   if (modelStr === null) {
     // Once-per-process warn: future calls in this process won't pay
     // the probe cost again because each call's probe is cheap, but

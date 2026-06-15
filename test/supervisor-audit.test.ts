@@ -89,6 +89,21 @@ describe('isCrashExit — branch matrix', () => {
     expect(isCrashExit(evt('worker_spawned', { code: 1 }))).toBe(false);
     expect(isCrashExit(evt('max_crashes_exceeded', { likely_cause: 'runtime_error' }))).toBe(false);
   });
+
+  // code=141 (128 + 13 SIGPIPE): the worker wrote to a closed stdout/stderr
+  // pipe. It is still a crash, but routes to its own bucket instead of
+  // inflating unknown.
+  test('sigpipe (code 141) routes to its own bucket, not unknown', () => {
+    const summary = summarizeCrashes([
+      evt('worker_exited', { likely_cause: 'sigpipe', code: 141 }),
+      evt('worker_exited', { likely_cause: 'unknown', code: 2 }),
+    ]);
+    expect(summary.total).toBe(2);
+    expect(summary.by_cause.sigpipe).toBe(1);
+    expect(summary.by_cause.unknown).toBe(1);
+    expect(summary.by_cause.legacy).toBe(0);
+  });
+
 });
 
 describe('summarizeCrashes — aggregation', () => {
@@ -130,9 +145,33 @@ describe('summarizeCrashes — aggregation', () => {
     const summary = summarizeCrashes([]);
     expect(summary).toEqual({
       total: 0,
-      by_cause: { runtime_error: 0, oom_or_external_kill: 0, sigpipe: 0, unknown: 0, legacy: 0 },
+      by_cause: { runtime_error: 0, oom_or_external_kill: 0, sigpipe: 0, rss_watchdog: 0, unknown: 0, legacy: 0 },
       clean_exits: 0,
     });
+  });
+
+  // issue #1678: rss_watchdog is a crash-classified cause (NOT in
+  // CLEAN_EXIT_CAUSES) with its OWN bucket — operators watching
+  // by_cause.rss_watchdog rise know the cap is too low for the workload, a
+  // distinct signal from a generic runtime_error or OOM-killer SIGKILL.
+  test('rss_watchdog routes to its own bucket, not legacy', () => {
+    const summary = summarizeCrashes([
+      evt('worker_exited', { likely_cause: 'rss_watchdog' }),
+      evt('worker_exited', { likely_cause: 'rss_watchdog' }),
+      evt('worker_exited', { likely_cause: 'runtime_error' }),
+    ]);
+    expect(summary.total).toBe(3);
+    expect(summary.by_cause.rss_watchdog).toBe(2);
+    expect(summary.by_cause.runtime_error).toBe(1);
+    expect(summary.by_cause.legacy).toBe(0);
+    expect(summary.clean_exits).toBe(0);
+  });
+
+  // isCrashExit treats rss_watchdog as a crash (it's a real problem), NOT a
+  // clean exit — pins that the worker draining itself on a too-low cap shows
+  // up in operator health surfaces instead of looking like a clean drain.
+  test('isCrashExit classifies rss_watchdog as a crash', () => {
+    expect(isCrashExit(evt('worker_exited', { likely_cause: 'rss_watchdog' }))).toBe(true);
   });
 
   test('only non-exit events returns zero summary', () => {
@@ -157,6 +196,7 @@ describe('summarizeCrashes — aggregation', () => {
     expect(summary.by_cause.legacy).toBe(2);
     expect(summary.by_cause.runtime_error).toBe(0);
     expect(summary.by_cause.oom_or_external_kill).toBe(0);
+    expect(summary.by_cause.sigpipe).toBe(0);
     expect(summary.by_cause.unknown).toBe(0);
   });
 
@@ -172,23 +212,6 @@ describe('summarizeCrashes — aggregation', () => {
     ]);
     expect(summary.total).toBe(1);
     expect(summary.by_cause.legacy).toBe(1);
-    expect(summary.clean_exits).toBe(0);
-  });
-
-  // code=141 (128 + 13 SIGPIPE): the worker wrote to a closed stdout/stderr
-  // pipe. The upstream classifier in child-worker-supervisor.ts stamps
-  // likely_cause='sigpipe'. It IS still a crash (counts toward total) but
-  // routes to its own bucket instead of inflating `unknown`. This is the
-  // exact incident this wave fixes: every "unknown=1" doctor warning was a
-  // code-141 SIGPIPE mislabeled.
-  test('sigpipe (code 141) routes to its own bucket, not unknown', () => {
-    const summary = summarizeCrashes([
-      evt('worker_exited', { likely_cause: 'sigpipe', code: 141 }),
-    ]);
-    expect(summary.total).toBe(1);
-    expect(summary.by_cause.sigpipe).toBe(1);
-    expect(summary.by_cause.unknown).toBe(0);
-    expect(summary.by_cause.legacy).toBe(0);
     expect(summary.clean_exits).toBe(0);
   });
 });
