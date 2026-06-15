@@ -11,15 +11,15 @@
  *   1. Reads the markdown body (DB-side fetch via engine.getPage).
  *   2. Parses the `## Facts` fence with parseFactsFence.
  *   3. Maps ParsedFact → FenceExtractedFact via extractFactsFromFenceText.
- *   4. Wipes the page's fence-origin DB index via deleteFactsForPage.
+ *   4. Wipes the page's DB index via deleteFactsForPage.
  *   5. Re-inserts via engine.insertFacts batch.
  *
- * After the phase, the fence-origin DB index for every affected page
- * byte-matches the fence (modulo embeddings + runtime-derived fields).
- * Pages with no fence go through delete-then-empty-insert — only rows
- * whose source is NULL, empty, or `fence%` at that page coordinate are
- * wiped. Rows from other writers keyed to the same source_markdown_slug
- * survive.
+ * After the phase, the DB index for every affected page byte-matches
+ * the fence (modulo embeddings + runtime-derived fields). Pages with
+ * no fence go through delete-then-empty-insert — DB rows for that
+ * page coordinate are wiped; legacy NULL-source_markdown_slug rows
+ * survive because deleteFactsForPage targets source_markdown_slug =
+ * slug only.
  *
  * Empty-fence guard (Codex R2-#7): the phase refuses to do its
  * destructive reconciliation pass when legacy rows (row_num IS NULL,
@@ -42,6 +42,7 @@ import {
   type PhantomPassResult,
 } from './phantom-redirect.ts';
 import { embed, isAvailable } from '../ai/gateway.ts';
+import { isAborted } from '../abort-check.ts';
 
 export interface ExtractFactsOpts {
   /** Subset of slugs to reconcile. undefined = walk every page in the brain. */
@@ -59,6 +60,13 @@ export interface ExtractFactsOpts {
    * standard fence-reconcile loop).
    */
   brainDir?: string;
+  /**
+   * #1972: cooperative-abort signal. Checked at the top of the per-page loop,
+   * threaded into the phantom-redirect pass's lock-retry + phantom loop, and
+   * forwarded to the per-page batch embed — so a long extract_facts bails well
+   * under the worker's 30s force-evict instead of running to completion.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ExtractFactsResult {
@@ -141,6 +149,7 @@ export async function runExtractFacts(
         opts.brainDir,
         sourceId,
         opts.dryRun ?? false,
+        opts.signal,
       );
     } catch (e) {
       // The pass owns its own per-phantom try/catch; reaching this catch
@@ -188,6 +197,10 @@ export async function runExtractFacts(
 
   // ── Reconcile each page ───────────────────────────────────────
   for (const slug of slugs) {
+    // #1972: bail at the top of the per-page loop on abort. Each page is an
+    // independent delete-then-insert commit, so breaking leaves a consistent
+    // partial state; the receipt/rollup below still runs with partial counts.
+    if (isAborted(opts.signal)) break;
     result.pagesScanned += 1;
 
     const page = await engine.getPage(slug, { sourceId });
@@ -211,8 +224,12 @@ export async function runExtractFacts(
 
     // Wipe-and-reinsert per page for rows owned by the fence reconciler.
     // Other writers can legitimately share source_markdown_slug = slug;
-    // keep them out of this derived-index reconciliation pass.
-    const deleted = await engine.deleteFactsForPage(slug, sourceId, { sourceScope: 'fence-origin' });
+    // protect every non-fence source (including upstream #1928 `cli:` rows)
+    // from this derived-index reconciliation pass.
+    const deleted = await engine.deleteFactsForPage(slug, sourceId, {
+      sourceScope: 'fence-origin',
+      excludeSourcePrefixes: ['cli:'],
+    });
     result.factsDeleted += deleted.deleted;
 
     if (parsed.facts.length === 0) continue;
@@ -235,7 +252,9 @@ export async function runExtractFacts(
     if (isAvailable('embedding') && extracted.length > 0) {
       try {
         const texts = extracted.map(e => e.fact);
-        const embeddings = await embed(texts);
+        // #1972: forward the abort signal so a cancelled cycle's in-flight
+        // batch embed (a network call) is itself abortable, not just the loop.
+        const embeddings = await embed(texts, { abortSignal: opts.signal });
         // Defensive: embed should return one vector per input; if the
         // gateway returns a partial array (provider partial-batch retry
         // returning fewer than requested), only fill what we have.

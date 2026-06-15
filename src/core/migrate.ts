@@ -5023,6 +5023,215 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE search_telemetry ADD COLUMN IF NOT EXISTS rank1_high INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 112,
+    name: 'pages_links_extracted_at',
+    // v0.42.7 (#1696) — link-extraction freshness watermark.
+    //
+    // Closes the "imported ≠ curated" root cause: extraction is the silent third
+    // leg of `sync → extract → embed`, and a brain with autopilot off (the common
+    // CLI / external-cron case) accumulated 0% typed-edge coverage with nothing
+    // surfacing it. This column lets `gbrain extract --stale` sweep the historical
+    // backlog incrementally and the `links_extraction_lag` doctor check warn when
+    // extraction has fallen behind.
+    //
+    // A page is stale for extraction when:
+    //   links_extracted_at IS NULL                      (never extracted)
+    //   OR links_extracted_at < LINK_EXTRACTOR_VERSION_TS (extractor logic bumped)
+    //   OR updated_at > links_extracted_at              (edited since last extract —
+    //                                                    MCP put_page / sync --no-extract)
+    //
+    // GRANDFATHER: no backfill. After this migration every existing page has NULL
+    // links_extracted_at, so the first `gbrain doctor` correctly surfaces the real
+    // backlog (the whole point). The doctor check is warn-only by default; it only
+    // hard-fails if GBRAIN_EXTRACTION_LAG_FAIL_PCT is set — so the upgrade never
+    // breaks a CI/cron pipeline that gates on `gbrain doctor` exit code.
+    //
+    // Composite index (source_id, links_extracted_at) backs the source-scoped
+    // staleness scans. Postgres path uses CREATE INDEX CONCURRENTLY (+ invalid-
+    // remnant pre-drop, mirroring v97); PGLite uses plain CREATE INDEX. ADD COLUMN
+    // with no DEFAULT (NULL) is metadata-only on Postgres 11+ / PGLite 17.5.
+    //
+    // Mirror lives in src/schema.sql + pglite-schema.ts (fresh-install column +
+    // index) and the applyForwardReferenceBootstrap probe set in both engines.
+    sql: '',
+    transaction: false,
+    handler: async (engine) => {
+      await engine.runMigration(
+        112,
+        `ALTER TABLE pages ADD COLUMN IF NOT EXISTS links_extracted_at TIMESTAMPTZ;`
+      );
+      if (engine.kind === 'postgres') {
+        await engine.runMigration(
+          112,
+          `DO $$ BEGIN
+             IF EXISTS (
+               SELECT 1 FROM pg_index i
+               JOIN pg_class c ON c.oid = i.indexrelid
+               WHERE c.relname = 'pages_links_extracted_at_idx' AND NOT i.indisvalid
+             ) THEN
+               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_links_extracted_at_idx';
+             END IF;
+           END $$;`
+        );
+        await engine.runMigration(
+          112,
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_links_extracted_at_idx
+             ON pages (source_id, links_extracted_at);`
+        );
+      } else {
+        await engine.runMigration(
+          112,
+          `CREATE INDEX IF NOT EXISTS pages_links_extracted_at_idx
+             ON pages (source_id, links_extracted_at);`
+        );
+      }
+    },
+  },
+  {
+    version: 113,
+    name: 'links_link_source_widen_for_wikilink_basename',
+    // Issue #972: opt-in global-basename wikilink resolution (bare [[name]]
+    // resolved by slug tail) emits edges tagged
+    // `link_source = 'wikilink-resolved'`. Widen the CHECK to admit it.
+    //
+    // The FULL set is enumerated here — not just the new value — because
+    // DROP + re-ADD replaces the whole constraint. v95
+    // (links_link_source_check_includes_mentions) added 'mentions'; since
+    // this migration runs AFTER v95, omitting 'mentions' would silently
+    // clobber that widening. Keep both branches in sync with src/schema.sql
+    // and src/core/pglite-schema.ts.
+    //
+    // Renumbered v93 → v109 → v110 → v112 → v113 across successive master
+    // merges (upstream claimed through v112 — pages_links_extracted_at — in
+    // the interim). Idempotent via DROP ... IF EXISTS, so it no-ops on
+    // installs that never created the constraint.
+    idempotent: true,
+    sql: `
+      ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+      ALTER TABLE links ADD CONSTRAINT links_link_source_check
+        CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'mentions', 'wikilink-resolved'));
+    `,
+    sqlFor: {
+      pglite: `
+        ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+        ALTER TABLE links ADD CONSTRAINT links_link_source_check
+          CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'mentions', 'wikilink-resolved'));
+      `,
+    },
+  },
+  {
+    version: 114,
+    name: 'links_link_source_check_kebab_regex',
+    // Issue #1941: open link_source from a closed allowlist to a kebab-case
+    // format gate so external derivers (e.g. 'citation-graph') stamp their own
+    // provenance without a per-deriver gbrain migration. Format: lowercase
+    // kebab `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` (rejects UPPER, leading digit/dash,
+    // trailing/double dash, underscore, space) + char_length <= 64 cap on the
+    // indexed free-text column. The five prior built-ins all satisfy the regex,
+    // so existing rows pass `VALIDATE` and the constraint swap never fails.
+    //
+    // DELIBERATELY diverges from the v95/v113 plain DROP+ADD pattern: on real
+    // Postgres a plain `ADD CONSTRAINT ... CHECK` takes ACCESS EXCLUSIVE + a
+    // full-table validation scan, which can stall writes on a large `links`
+    // table. The postgres branch instead does `ADD ... NOT VALID` (instant,
+    // no scan) then `VALIDATE CONSTRAINT` (scans under SHARE UPDATE EXCLUSIVE,
+    // does not block reads/writes). That two-phase form requires running
+    // OUTSIDE a transaction → `transaction: false`. PGLite (single-writer WASM,
+    // no lock concern) keeps the plain one-shot DROP+ADD, and is the branch the
+    // schema-version hash reads (pglite-engine.ts).
+    //
+    // Idempotent via DROP ... IF EXISTS; no-ops on installs that never created
+    // the constraint and safe to re-run.
+    idempotent: true,
+    transaction: false,
+    sql: '', // engine-specific via sqlFor (postgres two-phase vs pglite one-shot)
+    sqlFor: {
+      postgres: `
+        ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+        ALTER TABLE links ADD CONSTRAINT links_link_source_check
+          CHECK (link_source IS NULL OR (link_source ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' AND char_length(link_source) <= 64)) NOT VALID;
+        ALTER TABLE links VALIDATE CONSTRAINT links_link_source_check;
+      `,
+      pglite: `
+        ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+        ALTER TABLE links ADD CONSTRAINT links_link_source_check
+          CHECK (link_source IS NULL OR (link_source ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' AND char_length(link_source) <= 64));
+      `,
+    },
+  },
+  {
+    version: 115,
+    name: 'op_checkpoint_paths_append_table',
+    // #1794 cathedral: append-only delta storage for op checkpoints. The parent
+    // op_checkpoints.completed_keys JSONB was rewritten in full on every flush —
+    // O(N^2) write bytes over a 204K-file sync. This child table banks one row
+    // per completed path; sync's appendCompleted INSERTs only the delta. The FK
+    // ON DELETE CASCADE makes clearOpCheckpoint + the 7-day purge drop children
+    // automatically. Created empty so the composite-PK index build is instant;
+    // no CONCURRENTLY / transaction:false needed (mirrors v75 op_checkpoints).
+    // The PK (op,fingerprint,path) btree's (op,fingerprint) prefix serves every
+    // read/delete, so no separate index. Keep in sync with src/schema.sql,
+    // src/core/pglite-schema.ts, src/core/schema-embedded.ts.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS op_checkpoint_paths (
+        op          TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        path        TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (op, fingerprint, path),
+        CONSTRAINT op_checkpoint_paths_parent_fk
+          FOREIGN KEY (op, fingerprint) REFERENCES op_checkpoints (op, fingerprint) ON DELETE CASCADE
+      );
+    `,
+  },
+  {
+    version: 116,
+    name: 'code_edges_source_backfill_and_callee_index',
+    // Repair + index pass for the call graph:
+    //
+    // 1. BACKFILL: importCodeFile built CodeEdgeInput rows without source_id,
+    //    so every extracted edge landed NULL. getCallersOf/getCalleesOf add
+    //    `AND source_id = <scoped>` whenever a worktree pin / --source is in
+    //    play — NULL never matches, so scoped call-graph queries silently
+    //    returned 0 rows on multi-source brains even though the edges
+    //    existed. The write path now stamps `sourceId ?? 'default'`; this
+    //    backfill repairs rows written before the fix by deriving each
+    //    edge's source from its own from_chunk's page (pages.source_id is
+    //    NOT NULL DEFAULT 'default', so COALESCE is belt-and-braces only).
+    //
+    // 2. INDEXES: getCalleesOf filters BOTH edge tables on
+    //    from_symbol_qualified, which had no index anywhere — every callee
+    //    lookup was a sequential scan, amplified per-BFS-node by the
+    //    recursive code walk (one getCalleesOf per frontier node, up to
+    //    maxNodes). With NULL edges repaired, scoped walks actually expand,
+    //    so the latent seq-scan cost becomes real. Plain CREATE INDEX (not
+    //    CONCURRENTLY): edge tables are modest (mirrors the v58 resolver
+    //    index). Keep in sync with src/schema.sql.
+    idempotent: true,
+    sql: `
+      UPDATE code_edges_symbol e
+         SET source_id = COALESCE(p.source_id, 'default')
+        FROM content_chunks c
+        JOIN pages p ON p.id = c.page_id
+       WHERE c.id = e.from_chunk_id
+         AND e.source_id IS NULL;
+
+      UPDATE code_edges_chunk e
+         SET source_id = COALESCE(p.source_id, 'default')
+        FROM content_chunks c
+        JOIN pages p ON p.id = c.page_id
+       WHERE c.id = e.from_chunk_id
+         AND e.source_id IS NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_from_symbol
+        ON code_edges_symbol (from_symbol_qualified);
+
+      CREATE INDEX IF NOT EXISTS idx_code_edges_chunk_from_symbol
+        ON code_edges_chunk (from_symbol_qualified);
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
@@ -5361,6 +5570,26 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
   const sorted = [...MIGRATIONS].sort((a, b) => a.version - b.version);
 
   const pending = sorted.filter(m => m.version > current);
+
+  // #2038: schema-drift self-heal. A migration renumbered during a master
+  // merge (v102 timeline dedup, originally v99) can be recorded-as-applied
+  // without its DDL ever running — the version counter can't see it. Repair
+  // the known drift on EVERY pass, including when nothing is pending (the
+  // affected brains are stamped AHEAD of the missing migration, so they never
+  // reach the loop below). Best-effort + idempotent: a no-op on a healthy
+  // index; `doctor` surfaces it independently if this ever fails.
+  try {
+    const { repairTimelineDedupIndex } = await import('./timeline-dedup-repair.ts');
+    const r = await repairTimelineDedupIndex(engine);
+    if (r.repaired) {
+      console.error(
+        `[migrate] healed idx_timeline_dedup drift (#2038): ${r.before.join(',') || '(absent)'} ` +
+        `→ page_id,date,summary,source` +
+        (r.collapsedDuplicates > 0 ? ` (collapsed ${r.collapsedDuplicates} duplicate row(s))` : ''),
+      );
+    }
+  } catch { /* best-effort; doctor reports the drift if this couldn't run */ }
+
   if (pending.length === 0) {
     return { applied: 0, current };
   }

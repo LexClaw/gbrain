@@ -355,8 +355,8 @@
     {
       "path": "recipes/youtube-channel-to-brain/README.md",
       "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "youtube-channel-to-brain recipe. Lex-local addition. Survived b2f1b3b3 reapply. Tracked for future upgrades.",
+      "source_commit": "a2ff94e3",
+      "rationale": "youtube-channel-to-brain recipe. Lex-local addition. Survived b2f1b3b3 reapply. Tracked for future upgrades. Updated during 2026-06-15 v0.42.41 recut: manifest source now matches latest fork-local committed content so reapply --check validates the real survivor file, not the original v0.36.3 restore baseline.",
       "reapply": "checkout-subtree"
     },
     {
@@ -369,15 +369,15 @@
     {
       "path": "recipes/youtube-channel-to-brain/scripts/youtube_lib.py",
       "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "youtube-channel-to-brain helper lib.",
+      "source_commit": "1feae6d4",
+      "rationale": "youtube-channel-to-brain helper lib. Updated during 2026-06-15 v0.42.41 recut: manifest source now matches latest fork-local committed content so reapply --check validates the real survivor file, not the original v0.36.3 restore baseline.",
       "reapply": "checkout-subtree"
     },
     {
       "path": "recipes/youtube-channel-to-brain/scripts/youtube_poll.py",
       "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "youtube-channel-to-brain polling driver.",
+      "source_commit": "e953f60c",
+      "rationale": "youtube-channel-to-brain polling driver. Updated during 2026-06-15 v0.42.41 recut: manifest source now matches latest fork-local committed content so reapply --check validates the real survivor file, not the original v0.36.3 restore baseline.",
       "reapply": "checkout-subtree"
     },
     {
@@ -439,8 +439,8 @@
     {
       "path": "recipes/youtube-channel-to-brain/tests/test_lib.py",
       "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "pytest for youtube-channel-to-brain.",
+      "source_commit": "a2ff94e3",
+      "rationale": "pytest for youtube-channel-to-brain. Updated during 2026-06-15 v0.42.41 recut: manifest source now matches latest fork-local committed content so reapply --check validates the real survivor file, not the original v0.36.3 restore baseline.",
       "reapply": "checkout-subtree"
     },
     {
@@ -495,8 +495,8 @@
     {
       "path": "skills/briefing/references/cron-briefing-pattern.md",
       "kind": "new-file",
-      "source_commit": "fa6a1ca0",
-      "rationale": "Lex-authored reference. Survived b2f1b3b3 reapply. Tracked for future upgrades.",
+      "source_commit": "e953f60c",
+      "rationale": "Lex-authored reference. Survived b2f1b3b3 reapply. Tracked for future upgrades. Updated during 2026-06-15 v0.42.41 recut: manifest source now matches latest fork-local committed content so reapply --check validates the real survivor file, not the original v0.36.3 restore baseline.",
       "reapply": "checkout-subtree"
     },
     {
@@ -611,8 +611,8 @@
     {
       "path": "test/conversation-parser-llm-fallback.test.ts",
       "kind": "new-file",
-      "source_commit": "a2430c27",
-      "rationale": "LEX-FORK (T4 wiring + yield tuning + budget safety): tests sync parser stays regex-only, async parser uses opt-in fallback to extract >0 messages from real Hermes session fixtures, B-FIX-1 filters skill-doc/context preambles from a known 0-fact session, B-FIX-3 parses fenced JSON, non-chat bodies stay no_match, and BudgetExhausted rethrows instead of failing open. Cards kn7e69h, kn7dyv5ntf9g6bh65mnr3xx4b18851k8.",
+      "source_commit": "d822461c",
+      "rationale": "LEX-FORK (T4 wiring + yield tuning + budget safety): tests sync parser stays regex-only, async parser uses opt-in fallback to extract >0 messages from real Hermes session fixtures, B-FIX-1 filters skill-doc/context preambles from a known 0-fact session, B-FIX-3 parses fenced JSON, non-chat bodies stay no_match, and BudgetExhausted rethrows instead of failing open. Cards kn7e69h, kn7dyv5ntf9g6bh65mnr3xx4b18851k8. Updated during 2026-06-15 v0.42.41 recut: manifest source now matches latest fork-local committed content so reapply --check validates the real survivor file, not the original v0.36.3 restore baseline.",
       "reapply": "checkout-subtree"
     },
     {
