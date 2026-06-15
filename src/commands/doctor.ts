@@ -5450,25 +5450,32 @@ export async function buildChecks(
       fact_rows: string | number;
     }>(
       `WITH terminal_pages AS (
-         SELECT source_id, source_markdown_slug
+         SELECT DISTINCT source_id, source_markdown_slug
            FROM facts
           WHERE source = 'cli:extract-conversation-facts:terminal'
             AND created_at >= now() - INTERVAL '24 hours'
             AND expired_at IS NULL
+       ), page_yield AS (
+         SELECT
+           t.source_id,
+           t.source_markdown_slug,
+           COUNT(f.id)::int AS fact_rows
+         FROM terminal_pages t
+         LEFT JOIN facts f
+           ON f.source_id = t.source_id
+          AND f.source_markdown_slug = t.source_markdown_slug
+          AND f.source = 'cli:extract-conversation-facts'
+          AND f.expired_at IS NULL
+         GROUP BY t.source_id, t.source_markdown_slug
        )
        SELECT
-         t.source_id,
+         source_id,
          COUNT(*)::text AS terminal_pages,
-         COUNT(DISTINCT f.source_markdown_slug)::text AS pages_with_facts,
-         COUNT(f.id)::text AS fact_rows
-       FROM terminal_pages t
-       LEFT JOIN facts f
-         ON f.source_id = t.source_id
-        AND f.source_markdown_slug = t.source_markdown_slug
-        AND f.source = 'cli:extract-conversation-facts'
-        AND f.expired_at IS NULL
-       GROUP BY t.source_id
-       ORDER BY t.source_id`,
+         SUM(CASE WHEN fact_rows > 0 THEN 1 ELSE 0 END)::text AS pages_with_facts,
+         SUM(fact_rows)::text AS fact_rows
+       FROM page_yield
+       GROUP BY source_id
+       ORDER BY source_id`,
     );
 
     const yieldStats = yieldRows.map(r => {

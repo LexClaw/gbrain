@@ -56,6 +56,17 @@ describe('facts_extraction_health — conversation extraction yield', () => {
         source_markdown_slug: 'sessions/example-ok',
       },
       {
+        fact: 'Alice Example became VP of Sales at Acme Corp.',
+        kind: 'event',
+        entity_slug: 'people/alice-example',
+        source: 'cli:extract-conversation-facts',
+        source_session: 'cli:extract-conversation-facts:sessions/example-ok',
+        confidence: 1,
+        notability: 'high',
+        row_num: 1,
+        source_markdown_slug: 'sessions/example-ok',
+      },
+      {
         fact: 'EXTRACTION_COMPLETE',
         kind: 'fact',
         entity_slug: null,
@@ -63,7 +74,7 @@ describe('facts_extraction_health — conversation extraction yield', () => {
         source_session: 'cli:extract-conversation-facts:terminal:sessions/example-ok',
         confidence: 1,
         notability: 'low',
-        row_num: 1,
+        row_num: 2,
         source_markdown_slug: 'sessions/example-ok',
       },
     ] as never, { source_id: 'default' });
@@ -71,6 +82,6 @@ describe('facts_extraction_health — conversation extraction yield', () => {
     const checks = await buildChecks(engine, ['--json', '--scope=brain']);
     const check = checks.find(c => c.name === 'facts_extraction_health');
     expect(check?.status).toBe('ok');
-    expect(check?.message).toContain('default: 1 fact row(s) from 1/1 completed page(s)');
+    expect(check?.message).toContain('default: 2 fact row(s) from 1/1 completed page(s)');
   });
 });
