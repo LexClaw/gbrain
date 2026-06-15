@@ -196,6 +196,51 @@ describe('buildChecks — orchestrator against PGLite', () => {
     expect(withJson.map(c => c.name)).toEqual(without.map(c => c.name));
   });
 
+  test('facts_extraction_health warns when completed conversation pages have zero facts', async () => {
+    await engine.insertFacts([
+      {
+        fact: 'EXTRACTION_COMPLETE',
+        kind: 'fact',
+        entity_slug: null,
+        source: 'cli:extract-conversation-facts:terminal',
+        source_session: 'cli:extract-conversation-facts:terminal:sessions/with-facts',
+        source_markdown_slug: 'sessions/with-facts',
+        row_num: 0,
+        confidence: 1,
+        notability: 'low',
+      } as never,
+      {
+        fact: 'EXTRACTION_COMPLETE',
+        kind: 'fact',
+        entity_slug: null,
+        source: 'cli:extract-conversation-facts:terminal',
+        source_session: 'cli:extract-conversation-facts:terminal:sessions/zero-facts',
+        source_markdown_slug: 'sessions/zero-facts',
+        row_num: 0,
+        confidence: 1,
+        notability: 'low',
+      } as never,
+      {
+        fact: 'Alice Example joined Acme Corp.',
+        kind: 'event',
+        entity_slug: 'companies/acme-corp',
+        source: 'cli:extract-conversation-facts',
+        source_session: 'cli:extract-conversation-facts:sessions/with-facts',
+        source_markdown_slug: 'sessions/with-facts',
+        row_num: 1,
+        confidence: 1,
+        notability: 'high',
+      } as never,
+    ], { source_id: 'default' });
+
+    const checks = await buildChecks(engine, []);
+    const check = checks.find(c => c.name === 'facts_extraction_health');
+    expect(check).toBeDefined();
+    expect(check!.status).toBe('warn');
+    expect(check!.message).toContain('zero-fact completed page');
+    expect(check!.message).toContain('1 fact row(s) from 1/2 completed page(s), 1 zero-fact completed page(s)');
+  });
+
   test('returns partial check list when engine is null (no early process.exit)', async () => {
     // Pre-v0.39 the no-engine path called outputResults + process.exit
     // directly. Post-extract it returns the partial list so the wrapper
