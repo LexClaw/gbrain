@@ -289,6 +289,40 @@ describe('gbrain check-resolvable CLI — integration', () => {
     expect(r.json.ok).toBe(true);
   });
 
+  it('does not flag categorized resolver paths as orphan triggers', () => {
+    const root = mkdtempSync(join(tmpdir(), 'check-resolvable-category-path-'));
+    created.push(root);
+    const skillsDir = join(root, 'skills');
+    const skillDir = join(skillsDir, 'category', 'alpha');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillsDir, 'manifest.json'), JSON.stringify({
+      skills: [{ name: 'alpha', path: 'category/alpha/SKILL.md' }],
+    }, null, 2));
+    writeFileSync(join(skillDir, 'SKILL.md'), [
+      '---',
+      'name: alpha',
+      'triggers:',
+      '  - "alpha"',
+      '---',
+      '# alpha',
+      '',
+    ].join('\n'));
+    writeFileSync(join(skillsDir, 'RESOLVER.md'), [
+      '# RESOLVER',
+      '',
+      '| Trigger | Skill |',
+      '|---------|-------|',
+      '| alpha | `skills/category/alpha/SKILL.md` |',
+      '',
+    ].join('\n'));
+
+    const r = run(['--json', '--skills-dir', skillsDir]);
+    expect(r.json).not.toBeNull();
+    expect(r.json.report.warnings.some((i: any) => i.type === 'orphan_trigger')).toBe(false);
+    expect(r.json.report.errors.length).toBe(0);
+    expect(r.status).toBe(0);
+  });
+
   it('D-CX-3: --strict promotes warnings to exit 1', () => {
     const skillsDir = makeFixture(
       [{ name: 'alpha', triggers: ['alpha'], inManifest: false }],
