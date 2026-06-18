@@ -451,7 +451,48 @@ describe('runExtractConversationFactsCore', () => {
     expect(third.segments_processed).toBeGreaterThanOrEqual(1);
   });
 
-  test('does not mark a page complete when extraction yields zero facts', async () => {
+  test('bulk enumeration skips pages that already have terminal rows even without checkpoint state', async () => {
+    await runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      slug: 'conversations/imessage/alice-example',
+      sleepMs: 0,
+    });
+    await engine.executeRaw(`DELETE FROM op_checkpoints WHERE op = 'extract-conversation-facts'`);
+    await engine.executeRaw(
+      `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
+       VALUES ($1, $2, $3::jsonb, now())`,
+      [
+        'extract-conversation-facts',
+        extractConversationFactsFingerprint({ sourceId: 'default' }),
+        JSON.stringify([
+          encodeCheckpointEntry(
+            'default',
+            'sessions/2026-05-17-1803-45cd97',
+            '2099-01-01T00:00:00.000Z',
+          ),
+        ]),
+      ],
+    );
+
+    const result = await runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      types: ['conversation', 'session'],
+      limit: 1,
+      sleepMs: 0,
+    });
+
+    expect(result.pages_considered).toBe(1);
+    expect(result.pages_processed).toBe(1);
+    expect(result.facts_inserted).toBeGreaterThan(0);
+
+    const sessionTerminalRows = await engine.executeRaw<{ count: string | number }>(
+      `SELECT COUNT(*) AS count FROM facts WHERE source = $1 AND source_session = $2`,
+      [TERMINAL_AUDIT_SOURCE, `${TERMINAL_AUDIT_SOURCE}:sessions/2026-05-17-1803-45cd97`],
+    );
+    expect(Number(sessionTerminalRows[0]?.count ?? 0)).toBe(1);
+  });
+
+  test('marks a fully processed page complete when extraction yields zero facts', async () => {
     __setChatTransportForTests(async (): Promise<ChatResult> => ({
       text: JSON.stringify({ facts: [] }),
       blocks: [],
@@ -480,12 +521,12 @@ describe('runExtractConversationFactsCore', () => {
       `SELECT COUNT(*) AS count FROM facts WHERE source = $1 AND source_session = $2`,
       [TERMINAL_AUDIT_SOURCE, `${TERMINAL_AUDIT_SOURCE}:conversations/imessage/alice-example`],
     );
-    expect(Number(terminalRows[0]?.count ?? 0)).toBe(0);
+    expect(Number(terminalRows[0]?.count ?? 0)).toBe(1);
 
     const checkpoints = await engine.executeRaw<{ n: string | number }>(
       `SELECT COALESCE(SUM(jsonb_array_length(completed_keys)), 0) AS n FROM op_checkpoints WHERE op = 'extract-conversation-facts'`,
     );
-    expect(Number(checkpoints[0]?.n ?? 0)).toBe(0);
+    expect(Number(checkpoints[0]?.n ?? 0)).toBe(1);
   });
 
   test('honors facts.extraction_enabled kill-switch (F2)', async () => {
