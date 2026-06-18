@@ -43,11 +43,11 @@
  *     (source_id, source_markdown_slug, row_num); per-segment row_num
  *     would collide on segment 2. Per-page counter increments across
  *     segments.
- *   - Terminal audit row on completion. After all segments commit, one
- *     extra fact row with source='cli:extract-conversation-facts:terminal'
- *     marks the page complete. Doctor's backlog query checks for the
- *     terminal row, NOT any fact — partial extraction → no terminal →
- *     next run resumes.
+ *   - Terminal audit row on completion. After all segments are attempted,
+ *     one extra fact row with source='cli:extract-conversation-facts:terminal'
+ *     marks the page complete, even when the extractor found zero user facts.
+ *     Doctor's backlog query checks for the terminal row, NOT any fact —
+ *     partial extraction → no terminal → next run resumes.
  *   - Optional budgetTracker via opts. If a tracker is in opts, use it
  *     as-is (NO `withBudgetTracker` wrap, which would REPLACE the active
  *     tracker per gateway.ts AsyncLocalStorage semantics, defeating an
@@ -663,6 +663,37 @@ function cpEntriesToMap(entries: string[]): Map<string, string> {
   return map;
 }
 
+async function filterPagesMissingTerminalRows(
+  engine: BrainEngine,
+  sourceId: string,
+  pages: Page[],
+): Promise<Page[]> {
+  if (pages.length === 0) return pages;
+  const slugs = pages.map((p) => p.slug);
+  try {
+    const rows = await engine.executeRaw<{ slug: string }>(
+      `SELECT p.slug
+         FROM pages p
+        WHERE p.source_id = $1
+          AND p.slug = ANY($2::text[])
+          AND NOT EXISTS (
+            SELECT 1 FROM facts f
+             WHERE f.source = $3
+               AND f.source_session = $3 || ':' || p.slug
+               AND f.source_id = p.source_id
+          )`,
+      [sourceId, slugs, TERMINAL_AUDIT_SOURCE],
+    );
+    const missing = new Set(rows.map((r) => r.slug));
+    return pages.filter((p) => missing.has(p.slug));
+  } catch (err) {
+    process.stderr.write(
+      `[extract-conversation-facts] terminal-row prefilter failed for ${sourceId}; falling back to checkpoint-only resume: ${(err as Error).message}\n`,
+    );
+    return pages;
+  }
+}
+
 async function processPage(
   state: ExtractCoreState,
   page: Page,
@@ -807,18 +838,19 @@ async function processPage(
     if (state.sleepMs > 0) await sleep(state.sleepMs);
   }
 
-  // Eng-v2 C7 / E16: write terminal audit row after all segments commit
-  // successfully. Only run when not dry-run AND we got through every
-  // segment (no break on segmentLimit; that's an explicit partial run).
+  // Eng-v2 C7 / E16: write terminal audit row after all segments are
+  // attempted. A fully parsed page with zero extracted facts is still
+  // complete for backlog purposes; otherwise low-signal pages retry forever.
+  // Only run when not dry-run AND we got through every segment (no break on
+  // segmentLimit; that's an explicit partial run).
   const fullyProcessed =
     state.segmentLimit === 0 || segmentsThisPage < state.segmentLimit;
   const completedWithFacts = pageInsertedTotal > 0;
   if (!state.dryRun && fullyProcessed && newestEnd !== null && !completedWithFacts) {
     state.result.pages_zero_facts++;
     process.stderr.write(
-      `[extract-conversation-facts] ${page.slug}: zero facts extracted across ${segmentsThisPage} segments; not marking complete\n`,
+      `[extract-conversation-facts] ${page.slug}: zero facts extracted across ${segmentsThisPage} segments; marking terminal audit complete\n`,
     );
-    newestEnd = null;
   }
   if (!state.dryRun && fullyProcessed && newestEnd !== null) {
     try {
@@ -1049,12 +1081,28 @@ export async function runExtractConversationFactsCore(
           });
           if (batch.length === 0) break;
 
-          // Respect --limit at batch granularity: clip the batch so we
+          // Respect --limit at batch granularity after filtering out pages
+          // that already have the durable terminal audit row. The op-checkpoint
+          // table is only a short-lived resume optimization; the facts terminal
+          // row is the system of record used by doctor. Without this prefilter,
+          // a malformed/stale checkpoint can make bulk runs spend their page
+          // budget re-walking already-terminal pages and never reduce backlog.
+          const missingTerminal = opts.force
+            ? batch
+            : await filterPagesMissingTerminalRows(engine, sourceId, batch);
+
+          // Respect --limit at batch granularity: clip the filtered batch so we
           // never overshoot the cap by `workers - 1` extra pages.
-          let claimable = batch;
+          let claimable = missingTerminal;
           if (opts.limit) {
             const remaining = opts.limit - processedPagesCount;
-            if (remaining < batch.length) claimable = batch.slice(0, remaining);
+            if (remaining < claimable.length) claimable = claimable.slice(0, remaining);
+          }
+
+          if (!opts.force && claimable.length > 0) {
+            for (const page of claimable) {
+              state.cpMap.delete(cpMapKey(sourceId, page.slug));
+            }
           }
 
           await runSlidingPool({
@@ -1380,6 +1428,12 @@ export async function runExtractConversationFacts(
     args,
     jobName: 'extract-conversation-facts',
     paramBuilder: buildJobParams,
+    // Drain runs are intentionally repeatable: the same command should start a
+    // fresh job after a prior run completes because backlog state has changed.
+    // maybeBackground's default content-hash idempotency key is correct for
+    // pure enqueue semantics, but here it returned a week-old completed job and
+    // prevented the operator's paste-ready doctor fix from draining anything.
+    source: `cli:${Date.now().toString(36)}`,
   });
   if (backgrounded) return;
 
@@ -1489,7 +1543,7 @@ export async function runExtractConversationFacts(
     console.log(`  Cleaned ${aggregate.orphan_facts_cleaned} orphan fact(s) from prior partial runs (D11 replay safety).`);
   }
   if (aggregate.pages_zero_facts > 0) {
-    console.log(`  ${aggregate.pages_zero_facts} page(s) produced zero facts and were left incomplete for retry.`);
+    console.log(`  ${aggregate.pages_zero_facts} page(s) produced zero facts and were marked complete with terminal audit rows.`);
   }
   if (anyBudgetExhausted) {
     console.log(`  Budget cap reached. Re-run with a higher --max-cost-usd to continue.`);

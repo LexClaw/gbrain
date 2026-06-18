@@ -519,7 +519,7 @@ describe('runExtractConversationFactsCore', () => {
     expect(Number(sessionTerminalRows[0]?.count ?? 0)).toBe(1);
   });
 
-  test('does not mark a page complete when extraction yields zero facts', async () => {
+  test('marks a fully processed page complete when extraction yields zero facts', async () => {
     __setChatTransportForTests(async (): Promise<ChatResult> => ({
       text: JSON.stringify({ facts: [] }),
       blocks: [],
@@ -548,12 +548,12 @@ describe('runExtractConversationFactsCore', () => {
       `SELECT COUNT(*) AS count FROM facts WHERE source = $1 AND source_session = $2`,
       [TERMINAL_AUDIT_SOURCE, `${TERMINAL_AUDIT_SOURCE}:conversations/imessage/alice-example`],
     );
-    expect(Number(terminalRows[0]?.count ?? 0)).toBe(0);
+    expect(Number(terminalRows[0]?.count ?? 0)).toBe(1);
 
     const checkpoints = await engine.executeRaw<{ n: string | number }>(
       `SELECT COALESCE(SUM(jsonb_array_length(completed_keys)), 0) AS n FROM op_checkpoints WHERE op = 'extract-conversation-facts'`,
     );
-    expect(Number(checkpoints[0]?.n ?? 0)).toBe(0);
+    expect(Number(checkpoints[0]?.n ?? 0)).toBe(1);
   });
 
   test('does not mark a page complete when the extraction provider fails', async () => {
