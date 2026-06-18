@@ -1,4 +1,5 @@
 import type { BrainEngine } from '../core/engine.ts';
+import type { Page } from '../core/types.ts';
 import * as db from '../core/db.ts';
 import { LATEST_VERSION, getIdleBlockers } from '../core/migrate.ts';
 import { checkResolvable } from '../core/check-resolvable.ts';
@@ -50,6 +51,33 @@ import { isUndefinedColumnError } from '../core/utils.ts';
 // drift from what search actually filters.
 import { resolveHardExcludes, DEFAULT_HARD_EXCLUDES } from '../core/search/source-boost.ts';
 import { escapeLikePattern, buildVisibilityClause } from '../core/search/sql-ranking.ts';
+
+const COVERAGE_NON_SPEAKER_LABELS = new Set([
+  'attendees',
+  'context',
+  'date',
+  'source',
+  'summary',
+]);
+
+function countTranscriptAnchors(body: string): number {
+  let count = 0;
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.trim();
+    const match =
+      line.match(/^\*\*(?!\[)([^*:]{1,80}):\*\*\s+\S/) ??
+      line.match(/^\*\*([^*\[\]:]{1,80})\*\*\s*:\s+\S/);
+    if (!match) continue;
+    const label = match[1].trim().toLowerCase();
+    if (!COVERAGE_NON_SPEAKER_LABELS.has(label)) count++;
+  }
+  return count;
+}
+
+export function isConversationFormatCoverageCandidate(page: Page, body = ''): boolean {
+  if (page.type !== 'meeting') return true;
+  return countTranscriptAnchors(body) >= 3;
+}
 
 export interface Check {
   name: string;
@@ -4747,36 +4775,48 @@ export async function buildChecks(
           message: 'No conversation-type pages — coverage check not applicable',
         });
       } else {
-        const hitsByPattern: Record<string, number> = {};
-        let unmatched = 0;
-        for (const page of sample) {
+        const coverageSample = sample.filter((page) => {
           const body = `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`.trim();
-          const result = parseConversation(body, { page, noPolish: true, noFallback: true });
-          const id = result.matched_pattern_id ?? '_no_match';
-          hitsByPattern[id] = (hitsByPattern[id] ?? 0) + 1;
-          if (result.phase === 'no_match') unmatched++;
-        }
-        const unmatchedPct = (unmatched / sample.length) * 100;
-        const breakdown = Object.entries(hitsByPattern)
-          .sort(([, a], [, b]) => b - a)
-          .map(([k, v]) => `${k}=${v}`)
-          .join(', ');
-        if (unmatchedPct > 10) {
-          checks.push({
-            name: 'conversation_format_coverage',
-            status: 'warn',
-            message:
-              `${unmatched}/${sample.length} conversation pages (${unmatchedPct.toFixed(1)}%) match NO built-in pattern. ` +
-              `Breakdown: ${breakdown}. ` +
-              `Investigate: gbrain conversation-parser scan <slug> | ` +
-              `Enable LLM fallback (opt-in): gbrain config set conversation_parser.llm_fallback_enabled true`,
-          });
-        } else {
+          return isConversationFormatCoverageCandidate(page, body);
+        });
+        if (coverageSample.length === 0) {
           checks.push({
             name: 'conversation_format_coverage',
             status: 'ok',
-            message: `${sample.length} pages: ${breakdown}`,
+            message: 'No transcript-like conversation pages — coverage check not applicable',
           });
+        } else {
+          const hitsByPattern: Record<string, number> = {};
+          let unmatched = 0;
+          for (const page of coverageSample) {
+            const body = `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`.trim();
+            const result = parseConversation(body, { page, noPolish: true, noFallback: true });
+            const id = result.matched_pattern_id ?? '_no_match';
+            hitsByPattern[id] = (hitsByPattern[id] ?? 0) + 1;
+            if (result.phase === 'no_match') unmatched++;
+          }
+          const unmatchedPct = (unmatched / coverageSample.length) * 100;
+          const breakdown = Object.entries(hitsByPattern)
+            .sort(([, a], [, b]) => b - a)
+            .map(([k, v]) => `${k}=${v}`)
+            .join(', ');
+          if (unmatchedPct > 10) {
+            checks.push({
+              name: 'conversation_format_coverage',
+              status: 'warn',
+              message:
+                `${unmatched}/${coverageSample.length} transcript-like conversation pages (${unmatchedPct.toFixed(1)}%) match NO built-in pattern. ` +
+                `Breakdown: ${breakdown}. ` +
+                `Investigate: gbrain conversation-parser scan <slug> | ` +
+                `Enable LLM fallback (opt-in): gbrain config set conversation_parser.llm_fallback_enabled true`,
+            });
+          } else {
+            checks.push({
+              name: 'conversation_format_coverage',
+              status: 'ok',
+              message: `${coverageSample.length} transcript-like pages: ${breakdown}`,
+            });
+          }
         }
       }
     } catch (err) {
