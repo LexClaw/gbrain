@@ -72,6 +72,21 @@ describe('embedQuery — bare (no opts)', () => {
     expect(calls.length).toBe(1);
     expect(calls[0].modelString).toBe('text-embedding-3-large');
   });
+
+  test('OpenRouter OpenAI text-embedding-3-large forwards configured dimensions', async () => {
+    configureGateway({
+      embedding_model: 'openrouter:openai/text-embedding-3-large',
+      embedding_dimensions: 1536,
+      env: { OPENROUTER_API_KEY: 'or-test' },
+    });
+    installCaptureTransport(d => new Array(d).fill(0).map(() => 0.1));
+
+    const v = await embedQuery('hello');
+    expect(v.length).toBe(1536);
+    expect(calls.length).toBe(1);
+    expect(calls[0].modelString).toBe('openai/text-embedding-3-large');
+    expect(calls[0].providerOptions).toEqual({ openaiCompatible: { dimensions: 1536 } });
+  });
 });
 
 describe('embedQuery — { embeddingModel } override', () => {

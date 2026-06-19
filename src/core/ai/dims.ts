@@ -76,16 +76,20 @@ const OPENAI_TEXT3_MAX_DIMS: Record<string, number> = {
   'text-embedding-3-large': 3072,
 };
 
+function normalizeOpenAITextEmbedding3ModelId(modelId: string): string {
+  return modelId.startsWith('openai/') ? modelId.slice('openai/'.length) : modelId;
+}
+
 export function isOpenAITextEmbedding3Model(modelId: string): boolean {
-  return modelId in OPENAI_TEXT3_MAX_DIMS;
+  return normalizeOpenAITextEmbedding3ModelId(modelId) in OPENAI_TEXT3_MAX_DIMS;
 }
 
 export function maxOpenAITextEmbedding3Dim(modelId: string): number | undefined {
-  return OPENAI_TEXT3_MAX_DIMS[modelId];
+  return OPENAI_TEXT3_MAX_DIMS[normalizeOpenAITextEmbedding3ModelId(modelId)];
 }
 
 export function isValidOpenAITextEmbedding3Dim(modelId: string, dims: number): boolean {
-  const max = OPENAI_TEXT3_MAX_DIMS[modelId];
+  const max = maxOpenAITextEmbedding3Dim(modelId);
   if (max === undefined) return false;
   return Number.isInteger(dims) && dims >= 1 && dims <= max;
 }
@@ -119,11 +123,8 @@ export function dimsProviderOptions(
     case 'native-openai': {
       // text-embedding-3-* supports dimensions; text-embedding-ada-002 does not.
       // OpenAI embeddings are symmetric — inputType ignored.
-      if (modelId.startsWith('text-embedding-3')) {
-        // v0.36.0.0 (D13): fail-loud when configured dim is outside the
-        // model's Matryoshka range. OpenAI returns HTTP 400 otherwise with
-        // a generic message that misroutes as a network blip.
-        if (isOpenAITextEmbedding3Model(modelId) && !isValidOpenAITextEmbedding3Dim(modelId, dims)) {
+      if (isOpenAITextEmbedding3Model(modelId)) {
+        if (!isValidOpenAITextEmbedding3Dim(modelId, dims)) {
           const max = maxOpenAITextEmbedding3Dim(modelId)!;
           throw new AIConfigError(
             `OpenAI model "${modelId}" supports embedding_dimensions in 1..${max}, got ${dims}.`,
@@ -201,8 +202,8 @@ export function dimsProviderOptions(
       // configured for a smaller width (e.g. 1536) hard-fail at first embed.
       // Azure/OpenAI-compat embeddings are symmetric — inputType ignored.
       // v0.36.0.0 (D13): same range validation as native-openai path.
-      if (modelId.startsWith('text-embedding-3')) {
-        if (isOpenAITextEmbedding3Model(modelId) && !isValidOpenAITextEmbedding3Dim(modelId, dims)) {
+      if (isOpenAITextEmbedding3Model(modelId)) {
+        if (!isValidOpenAITextEmbedding3Dim(modelId, dims)) {
           const max = maxOpenAITextEmbedding3Dim(modelId)!;
           throw new AIConfigError(
             `OpenAI model "${modelId}" supports embedding_dimensions in 1..${max}, got ${dims}.`,

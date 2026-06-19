@@ -30,6 +30,8 @@ describe('OpenAI text-embedding-3 model recognition', () => {
   test('isOpenAITextEmbedding3Model for known variants', () => {
     expect(isOpenAITextEmbedding3Model('text-embedding-3-small')).toBe(true);
     expect(isOpenAITextEmbedding3Model('text-embedding-3-large')).toBe(true);
+    expect(isOpenAITextEmbedding3Model('openai/text-embedding-3-small')).toBe(true);
+    expect(isOpenAITextEmbedding3Model('openai/text-embedding-3-large')).toBe(true);
   });
 
   test('isOpenAITextEmbedding3Model rejects ada-002 and unrelated', () => {
@@ -41,6 +43,8 @@ describe('OpenAI text-embedding-3 model recognition', () => {
   test('maxOpenAITextEmbedding3Dim returns 1536 / 3072', () => {
     expect(maxOpenAITextEmbedding3Dim('text-embedding-3-small')).toBe(1536);
     expect(maxOpenAITextEmbedding3Dim('text-embedding-3-large')).toBe(3072);
+    expect(maxOpenAITextEmbedding3Dim('openai/text-embedding-3-small')).toBe(1536);
+    expect(maxOpenAITextEmbedding3Dim('openai/text-embedding-3-large')).toBe(3072);
     expect(maxOpenAITextEmbedding3Dim('text-embedding-ada-002')).toBeUndefined();
   });
 });
@@ -51,6 +55,7 @@ describe('isValidOpenAITextEmbedding3Dim — Matryoshka range', () => {
     expect(isValidOpenAITextEmbedding3Dim('text-embedding-3-large', 1024)).toBe(true);
     expect(isValidOpenAITextEmbedding3Dim('text-embedding-3-large', 1536)).toBe(true);
     expect(isValidOpenAITextEmbedding3Dim('text-embedding-3-large', 3072)).toBe(true);
+    expect(isValidOpenAITextEmbedding3Dim('openai/text-embedding-3-large', 1536)).toBe(true);
   });
 
   test('text-embedding-3-large: rejects out-of-range', () => {
@@ -117,14 +122,29 @@ describe('dimsProviderOptions — OpenAI native path', () => {
   });
 });
 
-describe('dimsProviderOptions — OpenAI on openai-compatible adapter (Azure case)', () => {
+describe('dimsProviderOptions — OpenAI on openai-compatible adapter (Azure/OpenRouter case)', () => {
   test('text-embedding-3-large at 1024d via openai-compat path returns dimensions=1024', () => {
     const opts = dimsProviderOptions('openai-compatible', 'text-embedding-3-large', 1024);
     expect(opts).toEqual({ openaiCompatible: { dimensions: 1024 } });
   });
 
+  test('openai/text-embedding-3-large at 1536d via openai-compat path returns dimensions=1536', () => {
+    const opts = dimsProviderOptions('openai-compatible', 'openai/text-embedding-3-large', 1536);
+    expect(opts).toEqual({ openaiCompatible: { dimensions: 1536 } });
+  });
+
+  test('openai/text-embedding-3-small at 512d via openai-compat path returns dimensions=512', () => {
+    const opts = dimsProviderOptions('openai-compatible', 'openai/text-embedding-3-small', 512);
+    expect(opts).toEqual({ openaiCompatible: { dimensions: 512 } });
+  });
+
   test('text-embedding-3-large at 5000d via openai-compat path throws', () => {
     expect(() => dimsProviderOptions('openai-compatible', 'text-embedding-3-large', 5000))
+      .toThrow(AIConfigError);
+  });
+
+  test('openai/text-embedding-3-large at 5000d via openai-compat path throws', () => {
+    expect(() => dimsProviderOptions('openai-compatible', 'openai/text-embedding-3-large', 5000))
       .toThrow(AIConfigError);
   });
 
