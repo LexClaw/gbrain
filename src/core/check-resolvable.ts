@@ -174,10 +174,14 @@ export function parseResolverEntries(resolverContent: string): ResolverEntry[] {
         continue;
       }
 
-      // Backtick-wrapped skill path
-      const pathMatch = skillCol.match(/`(skills\/[^`]+\/SKILL\.md)`/);
-      if (pathMatch) {
-        entries.push({ trigger, skillPath: pathMatch[1], isGStack: false, section: currentSection });
+      // Backtick-wrapped skill paths. Accept both canonical `skills/<path>`
+      // and live resolver shorthand `<category>/<skill>/SKILL.md`. Rows can
+      // contain multiple consulted skills, so emit every path in the cell.
+      const pathMatches = [...skillCol.matchAll(/`((?:skills\/)?[^`]+\/SKILL\.md)`/g)];
+      for (const match of pathMatches) {
+        const rawPath = match[1];
+        const skillPath = rawPath.startsWith('skills/') ? rawPath : `skills/${rawPath}`;
+        entries.push({ trigger, skillPath, isGStack: false, section: currentSection });
       }
       continue;
     }
@@ -289,6 +293,31 @@ export function extractDelegationTargets(content: string): DelegationRef[] {
     }
   }
   return refs;
+}
+
+function loadResolverDisambiguationLines(skillsDir: string): string[] {
+  const paths = [
+    ...findAllResolverFiles(skillsDir),
+    ...findAllResolverFiles(join(skillsDir, '..')),
+  ];
+  const lines: string[] = [];
+  for (const p of paths) {
+    let content: string;
+    try {
+      content = readFileSync(p, 'utf-8');
+    } catch {
+      continue;
+    }
+    const section = content.match(/^##\s+Disambiguation rules\s*$([\s\S]*?)(?=^##\s+|$(?![\s\S]))/mi);
+    if (!section) continue;
+    lines.push(...section[1].split('\n').map(l => l.toLowerCase()));
+  }
+  return lines;
+}
+
+function hasExplicitDisambiguationRule(disambiguationLines: string[], skills: string[]): boolean {
+  const wanted = skills.map(s => s.toLowerCase().trim()).filter(Boolean);
+  return disambiguationLines.some(line => wanted.every(skill => line.includes(skill)));
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +471,7 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
 
   // 3. MECE overlap detection
   let overlaps = 0;
+  const disambiguationLines = loadResolverDisambiguationLines(skillsDir);
   // Build trigger→skill map from SKILL.md frontmatter triggers
   const triggerMap = new Map<string, string[]>();
   for (const skill of manifest) {
@@ -465,6 +495,7 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
     // Filter out whitelisted skills
     const nonWhitelisted = skills.filter(s => !OVERLAP_WHITELIST.has(s));
     if (nonWhitelisted.length <= 1) continue;
+    if (hasExplicitDisambiguationRule(disambiguationLines, nonWhitelisted)) continue;
     overlaps++;
     issues.push({
       type: 'mece_overlap',
@@ -484,14 +515,14 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
     try {
       const content = readFileSync(skillPath, 'utf-8');
       const triggers = extractTriggers(content);
-      if (triggers.length === 0) {
+      if (triggers.length === 0 && !resolverSkillPaths.has(`skills/${skill.path}`)) {
         gaps++;
         issues.push({
           type: 'mece_gap',
           severity: 'warning',
           skill: skill.name,
-          message: `Skill '${skill.name}' has no triggers: field in its SKILL.md frontmatter`,
-          action: `Add a triggers: array to the frontmatter of skills/${skill.path}`,
+          message: `Skill '${skill.name}' has no triggers: field in its SKILL.md frontmatter and no functional dispatcher route`,
+          action: `Add a triggers: array to the frontmatter of skills/${skill.path}, or list the skill slug in a RESOLVER.md (dispatcher for: ...) clause`,
           fix: {
             type: 'add_frontmatter',
             file: skillPath,

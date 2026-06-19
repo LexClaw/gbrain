@@ -30,6 +30,7 @@ import { relative, join } from 'path';
 import { parseResolverEntries, type ResolverEntry } from './check-resolvable.ts';
 import { findAllResolverFiles } from './resolver-filenames.ts';
 import { parseSkillFrontmatter } from './skill-frontmatter.ts';
+import { loadOrDeriveManifest, type ManifestEntry } from './skill-manifest.ts';
 
 export type TriggerSource = 'frontmatter' | 'resolver_md';
 
@@ -159,6 +160,8 @@ function loadResolverMdEntries(skillsDir: string): SkillTriggerEntry[] {
     ...findAllResolverFiles(join(skillsDir, '..')),
   ];
   const out: SkillTriggerEntry[] = [];
+  const manifest = loadOrDeriveManifest(skillsDir).skills;
+  const manifestBySlug = buildManifestSlugIndex(manifest);
   for (const p of paths) {
     let content: string;
     try {
@@ -169,6 +172,53 @@ function loadResolverMdEntries(skillsDir: string): SkillTriggerEntry[] {
     for (const e of parseResolverEntries(content)) {
       out.push({ ...e, source: 'resolver_md' });
     }
+    for (const e of parseFunctionalDispatcherEntries(content, manifestBySlug)) {
+      out.push(e);
+    }
+  }
+  return out;
+}
+
+/**
+ * Functional-area RESOLVER.md rows can route sub-skills by slug inside
+ * `(dispatcher for: a, b, c)` clauses instead of repeating one full table row
+ * per skill. That is the live Hit Network/Garry resolver shape: the area skill
+ * is the dispatcher, and the clause is the reachability map. Treat each slug in
+ * the clause as a resolver-derived trigger entry, resolving through the manifest
+ * so categorized skills keep their real `skills/<category>/<name>/SKILL.md`
+ * paths.
+ */
+function parseFunctionalDispatcherEntries(
+  resolverContent: string,
+  manifestBySlug: Map<string, ManifestEntry>,
+): SkillTriggerEntry[] {
+  const out: SkillTriggerEntry[] = [];
+  const clauses = [...resolverContent.matchAll(/\(dispatcher for:\s*([^)]+)\)/gi)];
+  for (const clause of clauses) {
+    const raw = clause[1] ?? '';
+    for (const part of raw.split(',')) {
+      const slug = part.trim();
+      if (!slug) continue;
+      const manifestEntry = manifestBySlug.get(slug);
+      if (!manifestEntry) continue;
+      out.push({
+        trigger: `dispatcher:${slug}`,
+        skillPath: `skills/${manifestEntry.path}`,
+        isGStack: false,
+        section: 'Functional-area dispatcher clause',
+        source: 'resolver_md',
+      });
+    }
+  }
+  return out;
+}
+
+function buildManifestSlugIndex(manifest: ManifestEntry[]): Map<string, ManifestEntry> {
+  const out = new Map<string, ManifestEntry>();
+  for (const entry of manifest) {
+    out.set(entry.name, entry);
+    const basename = entry.path.replace(/\/SKILL\.md$/, '').split('/').pop();
+    if (basename) out.set(basename, entry);
   }
   return out;
 }

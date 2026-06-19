@@ -323,6 +323,136 @@ describe('gbrain check-resolvable CLI — integration', () => {
     expect(r.status).toBe(0);
   });
 
+  it('accepts shorthand backticked skill paths without a leading skills/ prefix', () => {
+    const root = mkdtempSync(join(tmpdir(), 'check-resolvable-shorthand-path-'));
+    created.push(root);
+    const skillsDir = join(root, 'skills');
+    mkdirSync(join(skillsDir, 'category', 'alpha'), { recursive: true });
+    writeFileSync(join(skillsDir, 'manifest.json'), JSON.stringify({
+      skills: [{ name: 'alpha', path: 'category/alpha/SKILL.md' }],
+    }, null, 2));
+    writeFileSync(join(skillsDir, 'category', 'alpha', 'SKILL.md'), [
+      '---',
+      'name: alpha',
+      '---',
+      '# alpha',
+      '',
+    ].join('\n'));
+    writeFileSync(join(skillsDir, 'RESOLVER.md'), [
+      '# RESOLVER',
+      '',
+      '| Trigger | Skill |',
+      '|---------|-------|',
+      '| alpha | `category/alpha/SKILL.md` |',
+      '',
+    ].join('\n'));
+
+    const r = run(['--json', '--skills-dir', skillsDir]);
+    expect(r.json).not.toBeNull();
+    expect(r.json.report.errors.length).toBe(0);
+    expect(r.json.report.summary.reachable).toBe(1);
+    expect(r.status).toBe(0);
+  });
+
+  it('parses every backticked SKILL.md path in a resolver row', () => {
+    const root = mkdtempSync(join(tmpdir(), 'check-resolvable-multi-path-row-'));
+    created.push(root);
+    const skillsDir = join(root, 'skills');
+    for (const name of ['alpha', 'beta']) {
+      mkdirSync(join(skillsDir, name), { recursive: true });
+      writeFileSync(join(skillsDir, name, 'SKILL.md'), [
+        '---',
+        `name: ${name}`,
+        '---',
+        `# ${name}`,
+        '',
+      ].join('\n'));
+    }
+    writeFileSync(join(skillsDir, 'manifest.json'), JSON.stringify({
+      skills: [
+        { name: 'alpha', path: 'alpha/SKILL.md' },
+        { name: 'beta', path: 'beta/SKILL.md' },
+      ],
+    }, null, 2));
+    writeFileSync(join(skillsDir, 'RESOLVER.md'), [
+      '# RESOLVER',
+      '',
+      '| Trigger | Skill |',
+      '|---------|-------|',
+      '| combined | `alpha/SKILL.md`, `beta/SKILL.md` |',
+      '',
+    ].join('\n'));
+
+    const r = run(['--json', '--skills-dir', skillsDir]);
+    expect(r.json).not.toBeNull();
+    expect(r.json.report.errors.length).toBe(0);
+    expect(r.json.report.summary.reachable).toBe(2);
+    expect(r.status).toBe(0);
+  });
+
+  it('treats functional dispatcher clauses as resolver routes for categorized skills', () => {
+    const root = mkdtempSync(join(tmpdir(), 'check-resolvable-dispatcher-clause-'));
+    created.push(root);
+    const skillsDir = join(root, 'skills');
+    mkdirSync(join(skillsDir, 'category', 'alpha'), { recursive: true });
+    mkdirSync(join(skillsDir, 'category', 'beta'), { recursive: true });
+    writeFileSync(join(skillsDir, 'manifest.json'), JSON.stringify({
+      skills: [
+        { name: 'alpha', path: 'category/alpha/SKILL.md' },
+        { name: 'beta', path: 'category/beta/SKILL.md' },
+      ],
+    }, null, 2));
+    for (const name of ['alpha', 'beta']) {
+      writeFileSync(join(skillsDir, 'category', name, 'SKILL.md'), [
+        '---',
+        `name: ${name}`,
+        '---',
+        `# ${name}`,
+        '',
+      ].join('\n'));
+    }
+    writeFileSync(join(skillsDir, 'RESOLVER.md'), [
+      '# RESOLVER',
+      '',
+      '## Functional areas',
+      '| Area | Consult |',
+      '| --- | --- |',
+      '| **Test area** | `skills/category/alpha/SKILL.md` (dispatcher for: alpha, beta) |',
+      '',
+    ].join('\n'));
+
+    const r = run(['--json', '--skills-dir', skillsDir]);
+    expect(r.json).not.toBeNull();
+    expect(r.json.report.errors.length).toBe(0);
+    expect(r.json.report.issues.some((i: any) => i.type === 'mece_gap')).toBe(false);
+    expect(r.json.report.summary.reachable).toBe(2);
+    expect(r.status).toBe(0);
+  });
+
+  it('suppresses duplicate trigger warnings when RESOLVER.md has an explicit disambiguation rule', () => {
+    const skillsDir = makeFixture([
+      { name: 'alpha', triggers: ['shared intent'] },
+      { name: 'beta', triggers: ['shared intent'] },
+    ], created);
+    writeFileSync(join(skillsDir, 'RESOLVER.md'), [
+      '# RESOLVER',
+      '',
+      '| Trigger | Skill |',
+      '|---------|-------|',
+      '| alpha | `skills/alpha/SKILL.md` |',
+      '| beta | `skills/beta/SKILL.md` |',
+      '',
+      '## Disambiguation rules',
+      '- alpha vs beta: alpha handles alpha-shaped work; beta handles beta-shaped work.',
+      '',
+    ].join('\n'));
+
+    const r = run(['--json', '--skills-dir', skillsDir]);
+    expect(r.json).not.toBeNull();
+    expect(r.json.report.issues.some((i: any) => i.type === 'mece_overlap')).toBe(false);
+    expect(r.status).toBe(0);
+  });
+
   it('D-CX-3: --strict promotes warnings to exit 1', () => {
     const skillsDir = makeFixture(
       [{ name: 'alpha', triggers: ['alpha'], inManifest: false }],
