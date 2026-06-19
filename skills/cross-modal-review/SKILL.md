@@ -1,6 +1,7 @@
 ---
 name: cross-modal-review
 version: 1.1.0
+tags: [plan-review, review, re-review, changes-required, reviewer, verdict, second-opinion, quality-gate, peer-review]
 description: |
   Quality gate via second model. Spawn a different AI model to review work
   before committing. Includes refusal routing: if one model refuses, switch

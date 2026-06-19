@@ -2,10 +2,11 @@
 name: citation-fixer
 version: 1.1.0
 description: |
-  Audit and fix citation formatting across brain pages. Ensures every fact has
-  an inline [Source: ...] citation matching the standard format. Extended in
-  v0.25.1: scans for broken tweet/post references that lack actual URLs and
-  resolves them via the host's X / Twitter API integration.
+  Audit and fix citation formatting across knowledge-base pages. Iron Law:
+  no fact on a page without an inline [Source: ...] citation. Use when asked
+  to "fix citations", "citation audit", "check citations", or "fix broken
+  citations". Proactively invoke when writing or reviewing pages that contain
+  factual claims without source attribution.
 triggers:
   - "fix citations"
   - "fix broken citations"

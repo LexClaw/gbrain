@@ -107,6 +107,8 @@ This pattern implements the "Morning Briefing Integration Pattern (May 6-10, 202
 - Em dash enforcement in human-facing output
 - Timeout handling refinements for large brain operations
 
+For Mission Control integration failure modes and recovery patterns, see `../mission-control-integration-failures.md`.
+
 ## Validation
 
 Successful execution when:

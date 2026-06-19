@@ -2,8 +2,11 @@
 name: repo-architecture
 version: 1.0.0
 description: |
-  Where new brain files go. Decision protocol for filing brain pages by primary
-  subject, not by format or source. Reference for all brain-writing skills.
+  Decision protocol for filing knowledge-base pages by primary subject, not
+  format or source. Iron Law: file by what you would search for, never by how
+  the content arrived. Use when asked to "where does this go", "filing rules",
+  "create new page", or "which directory". Proactively invoke whenever creating
+  a new page to ensure correct placement before writing content.
 triggers:
   - "where does this go"
   - "filing rules"

@@ -2,9 +2,12 @@
 name: maintain
 version: 1.0.0
 description: |
-  Brain health checks: back-link enforcement, citation audit, filing validation,
-  stale info detection, orphan pages, and benchmarks. Use when asked to check
-  brain health, run maintenance, or audit quality.
+  Brain health checks covering back-link enforcement, citation audits, filing
+  validation, stale info detection, and orphan page cleanup. Iron Law: no page
+  without back-links, no fact without citations. Use when asked to "brain health",
+  "check backlinks", "maintenance", "orphan pages", "stale pages", or "build
+  link graph". Proactively invoke during periodic knowledge-base audits or before
+  large ingest batches.
 triggers:
   - "brain health"
   - "check backlinks"

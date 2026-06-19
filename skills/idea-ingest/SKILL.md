@@ -2,9 +2,11 @@
 name: idea-ingest
 version: 1.0.0
 description: |
-  Ingest links, articles, tweets, and ideas into the brain. Fetch content, save
-  to brain with analysis, create author people page, and cross-link. Use when the
-  user shares a link or says "read this", "save this", "think about this".
+  Ingest links, articles, tweets, and ideas into the brain with content fetching,
+  analysis, author page creation, and cross-linking. Iron Law: every ingested
+  idea creates or updates the author person page. Use when the user shares a link
+  or says "read this", "save this", "think about this", or "put this in brain".
+  Proactively invoke whenever the user shares external content worth capturing.
 triggers:
   - shares a link or URL
   - "read this"

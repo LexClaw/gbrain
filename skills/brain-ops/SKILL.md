@@ -2,9 +2,12 @@
 name: brain-ops
 version: 1.0.0
 description: |
-  Brain knowledge base operations. The core read/write cycle: brain-first lookup,
-  read-enrich-write loop, source attribution, ambient enrichment, back-linking.
-  Read this before any brain interaction.
+  Core read/write cycle for the brain knowledge base: brain-first lookup,
+  enrich-write loop, source attribution, and ambient back-linking. Iron Law:
+  back-link every entity mention from the entity page to the page mentioning it.
+  Use when performing any brain read/write/lookup, citation work, or entity
+  enrichment. Proactively invoke whenever processing inbound messages for entity
+  mentions or updating knowledge-base pages.
 triggers:
   - any brain read/write/lookup/citation
 tools:

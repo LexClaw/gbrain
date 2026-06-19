@@ -2,11 +2,12 @@
 name: skillify
 version: 1.1.0
 description: |
-  The meta skill. Turn any raw feature into a properly-skilled, tested,
-  resolvable unit of agent capability. Cross-modal eval is the recommended
-  Phase 3 quality gate: 3 frontier models from different providers critique
-  the output, you iterate to quality, THEN write tests that lock in the
-  proven-good behavior.
+  The meta skill for turning any raw feature into a properly-skilled, tested
+  unit of agent capability. Iron Law: cross-model eval is the recommended
+  Phase 3 quality gate before writing tests that lock in proven-good behavior.
+  Use when asked to "skillify this", "skillify", "is this a skill", "make this
+  proper", or "add tests and evals for this". Proactively invoke when a workflow
+  succeeds repeatedly and should be captured as a reusable skill.
 triggers:
   - "skillify this"
   - "skillify"

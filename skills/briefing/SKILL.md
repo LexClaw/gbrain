@@ -1,6 +1,10 @@
 ---
 name: briefing
-description: Compile daily briefing with meeting context, active deals, and citation tracking
+description: Compile daily briefing with meeting context, active deals, and
+  citation tracking from the knowledge base. Iron Law: no briefing without
+  verified citations for every claim. Use when asked to "daily briefing",
+  "morning briefing", or "what is happening today". Proactively invoke at the
+  start of each workday to surface relevant meeting context and active items.
 triggers:
   - "daily briefing"
   - "morning briefing"
