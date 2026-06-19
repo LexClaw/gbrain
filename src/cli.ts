@@ -2069,11 +2069,18 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
   configureGateway(buildGatewayConfig(config));
 
   const { createEngine } = await import('./core/engine-factory.ts');
-  const engine = await createEngine(toEngineConfig(config));
+  const engineConfig = toEngineConfig(config);
+  const argv = process.argv.slice(2);
+  const isJobsWorker = argv[0] === 'jobs' && argv[1] === 'work';
+  const workerPoolSize = Number(process.env.GBRAIN_WORKER_POOL_SIZE) || 4;
+  const connectConfig = isJobsWorker
+    ? { ...engineConfig, poolSize: workerPoolSize }
+    : engineConfig;
+  const engine = await createEngine(connectConfig);
   const noRetry = process.argv.includes('--no-retry-connect') ||
                   process.env.GBRAIN_NO_RETRY_CONNECT === '1';
   const { connectWithRetry } = await import('./core/db.ts');
-  await connectWithRetry(engine, toEngineConfig(config), { noRetry });
+  await connectWithRetry(engine, connectConfig, { noRetry });
 
   // v0.30.1 (Codex X1 / C2): probeOnly skips both hasPendingMigrations() probe
   // AND initSchema(). Used by `get_health` MCP op + `gbrain upgrade --status`

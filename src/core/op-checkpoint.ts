@@ -116,24 +116,37 @@ export async function loadOpCheckpoint(
   key: OpCheckpointKey,
 ): Promise<string[]> {
   try {
-    // v0.42.x (#1794): union the new append-only child rows (op_checkpoint_paths)
-    // with the legacy `completed_keys` JSONB array (recordCompleted consumers +
-    // pre-upgrade rows). UNION ALL — not UNION — because the JS Set below already
-    // dedupes, so we skip a server-side dedup sort over up to 204K rows on every
-    // resume. `jsonb_array_elements_text` expands the legacy array server-side,
-    // which also removes the old postgres.js-vs-PGLite string/array handling.
+    // v0.42.x (#1794): union the append-only child rows (op_checkpoint_paths)
+    // with legacy parent JSONB. Parent rows have existed in several shapes in
+    // live brains (array, JSON string containing an array, and nested JSON
+    // strings from text-vs-jsonb bind drift), so fetch the raw JSONB value and
+    // normalize defensively in JS rather than letting jsonb_array_elements_text
+    // throw on a scalar.
     const rows = await engine.executeRaw<{ ckey: unknown }>(
-      `SELECT path AS ckey FROM op_checkpoint_paths
+      `SELECT to_jsonb(path) AS ckey FROM op_checkpoint_paths
          WHERE op = $1 AND fingerprint = $2
        UNION ALL
-       SELECT jsonb_array_elements_text(completed_keys) AS ckey FROM op_checkpoints
+       SELECT completed_keys AS ckey FROM op_checkpoints
          WHERE op = $1 AND fingerprint = $2`,
       [key.op, key.fingerprint],
     );
     const set = new Set<string>();
-    for (const r of rows) {
-      if (typeof r.ckey === 'string') set.add(r.ckey);
-    }
+    const visit = (value: unknown, depth = 0): void => {
+      if (depth > 8 || value == null) return;
+      if (typeof value === 'string') {
+        try {
+          visit(JSON.parse(value), depth + 1);
+          return;
+        } catch {
+          set.add(value);
+          return;
+        }
+      }
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item, depth + 1);
+      }
+    };
+    for (const r of rows) visit(r.ckey);
     return [...set];
   } catch (e) {
     console.error(`[op-checkpoint] load failed (${key.op}, ${key.fingerprint}):`, (e as Error).message);
@@ -165,7 +178,7 @@ export async function recordCompleted(
   return durableWrite(engine, key, 'write', () =>
     engine.executeRawDirect(
       `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
-       VALUES ($1, $2, $3::jsonb, now())
+       VALUES ($1, $2, ($3::text)::jsonb, now())
        ON CONFLICT (op, fingerprint) DO UPDATE
          SET completed_keys = EXCLUDED.completed_keys,
              updated_at     = now()`,

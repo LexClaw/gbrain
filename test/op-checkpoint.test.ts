@@ -190,6 +190,15 @@ describe('appendCompleted (delta) + union read', () => {
     expect((await loadOpCheckpoint(engine, key)).sort()).toEqual(['legacy-1', 'legacy-2', 'new-1']);
   });
 
+  test('load tolerates scalar JSONB checkpoint rows from legacy bind drift', async () => {
+    const key = { op: 'extract-conversation-facts', fingerprint: 'fp-scalar' };
+    await engine.executeRaw(
+      `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
+       VALUES ('extract-conversation-facts', 'fp-scalar', '"[\\"page-a\\",\\"page-b\\"]"'::jsonb, now())`,
+    );
+    expect((await loadOpCheckpoint(engine, key)).sort()).toEqual(['page-a', 'page-b']);
+  });
+
   test('clearOpCheckpoint cascades to child rows', async () => {
     const key = { op: 'sync', fingerprint: 'fp-clear' };
     await appendCompleted(engine, key, ['a.md', 'b.md']);
