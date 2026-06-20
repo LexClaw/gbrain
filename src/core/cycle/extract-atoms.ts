@@ -48,7 +48,9 @@ import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult } from '../cycle.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { ProgressReporter } from '../progress.ts';
-import { chat as gatewayChat } from '../ai/gateway.ts';
+import { chat as gatewayChat, isAvailable } from '../ai/gateway.ts';
+import { resolveModel, TIER_DEFAULTS } from '../model-config.ts';
+import { getFactsExtractionModel } from '../facts/extract.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
 
@@ -338,6 +340,65 @@ export async function runPhaseExtractAtoms(
 ): Promise<PhaseResult> {
   const sourceId = opts.sourceId ?? 'default';
   const chat = opts._chat ?? gatewayChat;
+  // Atom extraction is a utility/classification-style pass. Do not inherit the
+  // generic `models.chat` reasoning default: one OpenAI quota outage turned every
+  // item in a 50-page batch into a failure and inflated the halt-rate rollup.
+  // Prefer the explicit per-task key when present, otherwise utility-tier default.
+  let atomModel = await resolveModel(engine, {
+    configKey: 'models.extract_atoms',
+    tier: 'utility',
+    fallback: TIER_DEFAULTS.utility,
+  });
+
+  // INCIDENT 2026-06-19 (atom halt-rate 96.2%): the resolved atom model can point
+  // at a provider with no usable credential in this environment (e.g. the
+  // utility-tier default is Anthropic Haiku, but ANTHROPIC_API_KEY is absent).
+  // The gateway then throws AIConfigError on EVERY chat() call before any token
+  // spend, so every round registers >=1 failure and the rollup halt_rate pins
+  // near 100% at $0 cost, the exact signature this incident showed. Conversation
+  // facts stayed healthy only because it routes through facts.extraction_model,
+  // which the operator had already pointed at a ready provider. Mirror that:
+  //   1. If the resolved atom model's provider is unavailable, fall back to the
+  //      facts extraction model (proven-ready on this brain).
+  //   2. If neither is available, SKIP the phase cleanly. Do NOT loop the work
+  //      list issuing doomed calls that inflate the halt-rate rollup. A missing
+  //      key / quota outage is an environment condition, not an extraction
+  //      failure, and must not masquerade as one.
+  // Test seam (_chat) bypasses this guard so unit tests need no real gateway.
+  if (!opts._chat) {
+    if (!isAvailable('chat', atomModel)) {
+      const factsModel = await getFactsExtractionModel(engine);
+      if (isAvailable('chat', factsModel)) {
+        console.error(
+          `[extract_atoms] resolved model "${atomModel}" has no usable credential; ` +
+          `falling back to facts extraction model "${factsModel}".`,
+        );
+        atomModel = factsModel;
+      } else {
+        const msg =
+          `[extract_atoms] no chat provider available for atom extraction ` +
+          `(tried "${atomModel}" and facts model "${factsModel}"). Skipping phase ` +
+          `cleanly. Set models.extract_atoms (or a provider key) to a ready ` +
+          `provider. This is an environment condition, not an extraction failure, ` +
+          `so it is NOT counted as a halt.`;
+        console.error(msg);
+        return {
+          phase: 'extract_atoms',
+          status: 'warn',
+          duration_ms: 0,
+          summary: 'extract_atoms: skipped, no chat provider available',
+          details: {
+            atoms_extracted: 0,
+            skipped_reason: 'no_chat_provider',
+            attempted_model: atomModel,
+            attempted_facts_model: factsModel,
+            source_id: sourceId,
+            dry_run: opts.dryRun ?? false,
+          },
+        };
+      }
+    }
+  }
 
   // 1a. Get transcripts (test seam OR production discovery).
   //     v0.41.2.1: config loader switched to loadConfigWithEngine() so the
@@ -490,6 +551,7 @@ export async function runPhaseExtractAtoms(
     const originLabel = item.kind === 'transcript' ? item.filePath : item.slug;
     try {
       const result = await chat({
+        model: atomModel,
         system: EXTRACT_PROMPT,
         messages: [
           {
