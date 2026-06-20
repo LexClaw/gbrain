@@ -93,10 +93,16 @@ gbrain jobs submit unify-types \
   --params '{"target_pack":"gbrain-base-v2"}'
 ```
 
-Watch progress per phase:
+Watch progress per phase. This CLI has no standalone `gbrain jobs follow` subcommand; either submit with `--follow` up front, or poll the job after submission:
 
 ```bash
-gbrain jobs follow <job_id>
+gbrain jobs submit unify-types \
+  --allow-protected \
+  --params '{"target_pack":"gbrain-base-v2"}' \
+  --follow
+
+# If already submitted:
+gbrain jobs get <job_id>
 ```
 
 On a 186K-page brain expect ~10 minutes. The handler runs:
@@ -241,7 +247,7 @@ Final celebration summary to stderr:
 ═══════════════════════════════════════════════════════════
 ```
 
-JSON output (`gbrain jobs follow <id> --json`) returns the structured `UnifyTypesResult` shape with `per_phase`, `pack_identity_after`, `active_pack_flipped`.
+JSON output (`gbrain jobs submit <name> --follow --json`, or the `Result:` object from `gbrain jobs get <id>`) returns the structured `UnifyTypesResult` shape with `per_phase`, `pack_identity_after`, `active_pack_flipped`.
 
 ## Reference
 
