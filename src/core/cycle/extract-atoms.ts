@@ -48,7 +48,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult } from '../cycle.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { ProgressReporter } from '../progress.ts';
-import { chat as gatewayChat, isAvailable } from '../ai/gateway.ts';
+import { chat as gatewayChat, isAvailable, validateModelId } from '../ai/gateway.ts';
 import { resolveModel, TIER_DEFAULTS } from '../model-config.ts';
 import { getFactsExtractionModel } from '../facts/extract.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
@@ -72,6 +72,33 @@ const EXTRACTABLE_PAGE_TYPES = [
 ] as const;
 const PAGE_DISCOVERY_BUDGET = 50;
 const MIN_PAGE_CHARS_FOR_EXTRACTION = 500;
+
+function unavailableChatReason(model: string): string | null {
+  const validity = validateModelId(model);
+  if (!validity.ok) return validity.detail;
+  if (!isAvailable('chat', model)) return 'no usable credential';
+  return null;
+}
+
+function providerBlockedReason(err: unknown): string | null {
+  const e = err as { name?: string; message?: string; status?: number; statusCode?: number };
+  const message = e?.message ?? String(err);
+  const haystack = `${e?.name ?? ''}\n${message}`.toLowerCase();
+  if (e?.name === 'AIConfigError') return message;
+  if (e?.status === 401 || e?.status === 403 || e?.statusCode === 401 || e?.statusCode === 403) return message;
+  if (
+    haystack.includes('api key') ||
+    haystack.includes('loadapikey') ||
+    haystack.includes('unauthorized') ||
+    haystack.includes('forbidden') ||
+    haystack.includes('insufficient_quota') ||
+    haystack.includes('current quota') ||
+    haystack.includes('billing details')
+  ) {
+    return message;
+  }
+  return null;
+}
 
 export interface ExtractAtomsOpts {
   brainDir?: string;
@@ -366,32 +393,36 @@ export async function runPhaseExtractAtoms(
   //      failure, and must not masquerade as one.
   // Test seam (_chat) bypasses this guard so unit tests need no real gateway.
   if (!opts._chat) {
-    if (!isAvailable('chat', atomModel)) {
+    const atomReason = unavailableChatReason(atomModel);
+    if (atomReason) {
       const factsModel = await getFactsExtractionModel(engine);
-      if (isAvailable('chat', factsModel)) {
+      const factsReason = unavailableChatReason(factsModel);
+      if (!factsReason) {
         console.error(
-          `[extract_atoms] resolved model "${atomModel}" has no usable credential; ` +
+          `[extract_atoms] resolved model "${atomModel}" is not usable (${atomReason}); ` +
           `falling back to facts extraction model "${factsModel}".`,
         );
         atomModel = factsModel;
       } else {
         const msg =
           `[extract_atoms] no chat provider available for atom extraction ` +
-          `(tried "${atomModel}" and facts model "${factsModel}"). Skipping phase ` +
-          `cleanly. Set models.extract_atoms (or a provider key) to a ready ` +
-          `provider. This is an environment condition, not an extraction failure, ` +
-          `so it is NOT counted as a halt.`;
+          `(tried "${atomModel}": ${atomReason}; facts model "${factsModel}": ${factsReason}). ` +
+          `Skipping phase cleanly. Set models.extract_atoms (or a provider key) ` +
+          `to a ready provider. This is an environment condition, not an extraction ` +
+          `failure, so it is NOT counted as a halt.`;
         console.error(msg);
         return {
           phase: 'extract_atoms',
           status: 'warn',
           duration_ms: 0,
-          summary: 'extract_atoms: skipped, no chat provider available',
+          summary: 'extract_atoms: skipped, no usable chat model',
           details: {
             atoms_extracted: 0,
-            skipped_reason: 'no_chat_provider',
+            skipped_reason: 'no_usable_chat_model',
             attempted_model: atomModel,
+            attempted_model_reason: atomReason,
             attempted_facts_model: factsModel,
+            attempted_facts_model_reason: factsReason,
             source_id: sourceId,
             dry_run: opts.dryRun ?? false,
           },
@@ -514,6 +545,7 @@ export async function runPhaseExtractAtoms(
   let transcriptsSkipped = 0;
   let pagesSkipped = 0;
   const failures: Array<{ source: string; error: string }> = [];
+  let providerBlocked: { source: string; error: string } | null = null;
   let estimatedSpendUsd = 0;
   const budgetCap = DEFAULT_BUDGET_USD;
 
@@ -620,6 +652,15 @@ export async function runPhaseExtractAtoms(
       // Reporter rate-limits to ~1 line/sec; safe to tick every iter.
       opts.progress?.tick(1, `${totalAtomsExtracted} atoms / ${duplicatesSkipped} skipped`);
     } catch (err) {
+      const blockedReason = providerBlockedReason(err);
+      if (blockedReason) {
+        providerBlocked = { source: originLabel, error: blockedReason };
+        console.error(
+          `[extract_atoms] provider blocked atom extraction via "${atomModel}" on ${originLabel}: ${blockedReason}. ` +
+          `Stopping this phase without recording an extraction halt.`,
+        );
+        break;
+      }
       failures.push({
         source: originLabel,
         error: err instanceof Error ? err.message : String(err),
@@ -648,6 +689,34 @@ export async function runPhaseExtractAtoms(
     } catch (err) {
       console.error(`[extract_atoms] receipt write failed: ${(err as Error).message}`);
     }
+  }
+  if (providerBlocked && failures.length === 0) {
+    return {
+      phase: 'extract_atoms',
+      status: 'warn',
+      duration_ms: 0,
+      summary:
+        `extract_atoms: provider blocked via ${atomModel}; ` +
+        `${totalAtomsExtracted} atoms from ${transcriptsProcessed}/${transcripts.length} transcripts + ` +
+        `${pagesProcessed}/${pages.length} pages before stop`,
+      details: {
+        atoms_extracted: totalAtomsExtracted,
+        transcripts_processed: transcriptsProcessed,
+        transcripts_total: transcripts.length,
+        transcripts_skipped_budget: transcriptsSkipped,
+        pages_processed: pagesProcessed,
+        pages_total: pages.length,
+        pages_skipped_budget: pagesSkipped,
+        duplicates_skipped: duplicatesSkipped,
+        failures: [],
+        provider_blocked: providerBlocked,
+        attempted_model: atomModel,
+        estimated_spend_usd: estimatedSpendUsd,
+        budget_usd: budgetCap,
+        source_id: sourceId,
+        dry_run: opts.dryRun ?? false,
+      },
+    };
   }
   if (!opts.dryRun) {
     await upsertExtractRollup(engine, {

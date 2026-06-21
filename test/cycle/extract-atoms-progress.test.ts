@@ -12,6 +12,7 @@ import { runPhaseExtractAtoms } from '../../src/core/cycle/extract-atoms.ts';
 import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import type { ProgressReporter } from '../../src/core/progress.ts';
 import type { ChatResult, ChatOpts } from '../../src/core/ai/gateway.ts';
+import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 
@@ -26,6 +27,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  resetGateway();
   await resetPgliteState(engine);
 });
 
@@ -115,6 +117,73 @@ describe('extract_atoms progress wiring (T4)', () => {
     const ticks = events.filter(e => e.kind === 'tick');
     expect(ticks.length).toBe(3);
     expect(ticks[0].note).toMatch(/atoms.*skipped/);
+  });
+
+  test('routes extraction through utility-tier Haiku instead of generic chat model', async () => {
+    const seenModels: Array<string | undefined> = [];
+    const validAtomJson = JSON.stringify([
+      { title: 'A', atom_type: 'insight', body: 'body a' },
+    ]);
+    await runPhaseExtractAtoms(engine, {
+      sourceId: 'default',
+      _transcripts: [
+        { filePath: '/tmp/t1.txt', content: 'transcript 1 body', contentHash: 'h1'.repeat(8) },
+      ],
+      _pages: [],
+      _chat: async (o: ChatOpts) => {
+        seenModels.push(o.model);
+        return stubChat(validAtomJson)(o);
+      },
+    });
+    expect(seenModels).toEqual(['anthropic:claude-haiku-4-5-20251001']);
+  });
+
+  test('skips cleanly when atom model lacks credentials and facts model is invalid for chat', async () => {
+    configureGateway({
+      chat_model: 'openai:gpt-4o-mini',
+      env: { OPENAI_API_KEY: 'sk-test' },
+    });
+    await engine.setConfig('models.extract_atoms', 'anthropic:claude-haiku-4-5-20251001');
+    await engine.setConfig('facts.extraction_model', 'openai:gpt-5');
+
+    const result = await runPhaseExtractAtoms(engine, {
+      sourceId: 'default',
+      _transcripts: [],
+      _pages: [
+        { slug: 'articles/example', content: 'x'.repeat(600), contentHash: 'h3'.repeat(8) },
+      ],
+    });
+
+    expect(result.status).toBe('warn');
+    expect(result.summary).toBe('extract_atoms: skipped, no usable chat model');
+    expect(result.details?.skipped_reason).toBe('no_usable_chat_model');
+    expect(result.details?.attempted_facts_model_reason).toContain('not listed for OpenAI chat');
+  });
+
+  test('provider quota failure stops batch without recording an extraction halt', async () => {
+    let calls = 0;
+    const result = await runPhaseExtractAtoms(engine, {
+      sourceId: 'default',
+      _transcripts: [],
+      _pages: [
+        { slug: 'articles/a', content: 'x'.repeat(600), contentHash: 'h4'.repeat(8) },
+        { slug: 'articles/b', content: 'y'.repeat(600), contentHash: 'h5'.repeat(8) },
+      ],
+      _chat: async (_o: ChatOpts) => {
+        calls++;
+        throw new Error('[chat(openai:gpt-4.1-mini)] Failed after 3 attempts. Last error: You exceeded your current quota, please check your plan and billing details.');
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(result.status).toBe('warn');
+    expect(result.summary).toContain('provider blocked');
+    expect(result.details?.provider_blocked).toBeTruthy();
+    const rows = await engine.executeRaw<{ halt_count: number; round_completed_count: number }>(
+      `SELECT halt_count, round_completed_count FROM extract_rollup_7d WHERE kind = 'atoms'`,
+      [],
+    );
+    expect(rows).toEqual([]);
   });
 
   test('no progress wiring required — opts.progress is optional', async () => {
