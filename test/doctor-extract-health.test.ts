@@ -80,7 +80,7 @@ describe('computeExtractHealthCheck — WARN paths', () => {
        VALUES
          ('atoms', 'default', CURRENT_DATE, 0.10, 0, 0, 3, 7, 0, NOW()),
          ('facts.conversation', 'default', CURRENT_DATE, 0.40, 0, 0, 5, 5, 0, NOW()),
-         ('concepts', 'default', CURRENT_DATE, 0.05, 0, 0, 2, 8, 0, NOW())`,
+         ('concepts', 'default', CURRENT_DATE, 0.05, 0, 0, 3, 7, 0, NOW())`,
       [],
     );
     const check = await computeExtractHealthCheck(engine);
@@ -146,5 +146,64 @@ describe('computeExtractHealthCheck — 7-day window', () => {
     const check = await computeExtractHealthCheck(engine);
     expect(check.status).toBe('ok');
     expect((check.details as any)?.kinds).toHaveLength(1);
+  });
+});
+
+describe('computeExtractHealthCheck — resolved-incident recency gate', () => {
+  test('historical halt spike does NOT WARN once recent days are clean', async () => {
+    // Mirrors the 2026-06-19 atoms incident: a provider outage spiked one
+    // historical day to ~99% halt rate, dragging the 7d aggregate to >90%,
+    // but the extractor recovered and recent days are clean. The check should
+    // be OK because the recent (current-day) halt rate is below threshold.
+    await clearRollup();
+    await engine.executeRaw(
+      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
+       VALUES
+         ('atoms', 'default', CURRENT_DATE - 4, 1.20, 0, 0, 704, 7, 0, NOW() - INTERVAL '4 days'),
+         ('atoms', 'default', CURRENT_DATE,     0.36, 0, 0, 0,   3, 0, NOW())`,
+      [],
+    );
+    const check = await computeExtractHealthCheck(engine);
+    // 7d aggregate halt_rate is ~98.6% but recent (today) is 0% → OK.
+    expect(check.status).toBe('ok');
+    const atoms = (check.details as any)?.kinds.find((k: any) => k.kind === 'atoms');
+    expect(atoms.halt_rate).toBeGreaterThan(0.9);
+    expect(atoms.halt_rate_recent).toBe(0);
+  });
+
+  test('uses latest rollup bucket rather than database CURRENT_DATE', async () => {
+    await clearRollup();
+    await engine.executeRaw(
+      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
+       VALUES
+         ('atoms', 'default', CURRENT_DATE,     0.20, 0, 0, 5, 17, 0, NOW()),
+         ('atoms', 'default', CURRENT_DATE + 1, 0.36, 0, 0, 0,  3, 0, NOW())`,
+      [],
+    );
+    const check = await computeExtractHealthCheck(engine);
+    // Mirrors a near-midnight rollup: the latest logical rollup day is clean
+    // even though the database CURRENT_DATE bucket still contains stale halts.
+    expect(check.status).toBe('ok');
+    const atoms = (check.details as any)?.kinds.find((k: any) => k.kind === 'atoms');
+    expect(atoms.halt_rate).toBeGreaterThan(0.1);
+    expect(atoms.halt_rate_recent).toBe(0);
+    expect(atoms.halt_count_recent).toBe(0);
+  });
+
+  test('ongoing halt spike (recent days still failing) DOES WARN', async () => {
+    await clearRollup();
+    await engine.executeRaw(
+      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
+       VALUES
+         ('atoms', 'default', CURRENT_DATE - 4, 1.20, 0, 0, 704, 7, 0, NOW() - INTERVAL '4 days'),
+         ('atoms', 'default', CURRENT_DATE,     0.36, 0, 0, 9,   1, 0, NOW())`,
+      [],
+    );
+    const check = await computeExtractHealthCheck(engine);
+    // Recent halt rate today is 90% → still WARN.
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('atoms');
+    const atoms = (check.details as any)?.kinds.find((k: any) => k.kind === 'atoms');
+    expect(atoms.halt_rate_recent).toBeCloseTo(0.9, 2);
   });
 });

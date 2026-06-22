@@ -3220,22 +3220,38 @@ export async function computeExtractHealthCheck(
       round_completed_count: number;
       rollup_write_failures: number;
       last_updated_at: Date | string | null;
+      halt_count_recent: number;
+      round_completed_count_recent: number;
     };
 
     const rows = await engine.executeRaw<RollupRow>(
-      `SELECT
-         kind,
-         SUM(cost_usd) AS cost_7d_usd,
-         SUM(eval_pass_count) AS eval_pass_count,
-         SUM(eval_fail_count) AS eval_fail_count,
-         SUM(halt_count) AS halt_count,
-         SUM(round_completed_count) AS round_completed_count,
-         SUM(rollup_write_failures) AS rollup_write_failures,
-         MAX(updated_at) AS last_updated_at
-       FROM extract_rollup_7d
-       WHERE day >= CURRENT_DATE - 7
-       GROUP BY kind
-       ORDER BY kind`,
+      `WITH windowed AS (
+         SELECT *
+         FROM extract_rollup_7d
+         WHERE day >= CURRENT_DATE - 7
+       ), latest AS (
+         SELECT kind, MAX(day) AS latest_day
+         FROM windowed
+         GROUP BY kind
+       )
+       SELECT
+         w.kind,
+         SUM(w.cost_usd) AS cost_7d_usd,
+         SUM(w.eval_pass_count) AS eval_pass_count,
+         SUM(w.eval_fail_count) AS eval_fail_count,
+         SUM(w.halt_count) AS halt_count,
+         SUM(w.round_completed_count) AS round_completed_count,
+         SUM(w.rollup_write_failures) AS rollup_write_failures,
+         MAX(w.updated_at) AS last_updated_at,
+         -- Recent means the latest rollup bucket for this kind, not the DB's
+         -- CURRENT_DATE. The rollup day can advance ahead of the local timezone
+         -- near midnight, and using CURRENT_DATE keeps counting the stale bucket.
+         SUM(w.halt_count) FILTER (WHERE w.day = l.latest_day) AS halt_count_recent,
+         SUM(w.round_completed_count) FILTER (WHERE w.day = l.latest_day) AS round_completed_count_recent
+       FROM windowed w
+       JOIN latest l ON l.kind = w.kind
+       GROUP BY w.kind
+       ORDER BY w.kind`,
       [],
     );
 
@@ -3259,6 +3275,8 @@ export async function computeExtractHealthCheck(
       halt_count: number;
       round_completed_count: number;
       halt_rate: number;
+      halt_rate_recent: number;
+      halt_count_recent: number;
       last_updated_at: string | null;
     };
 
@@ -3266,6 +3284,9 @@ export async function computeExtractHealthCheck(
       const halts = Number(r.halt_count) || 0;
       const completed = Number(r.round_completed_count) || 0;
       const total = halts + completed;
+      const haltsRecent = Number(r.halt_count_recent) || 0;
+      const completedRecent = Number(r.round_completed_count_recent) || 0;
+      const totalRecent = haltsRecent + completedRecent;
       return {
         kind: r.kind,
         cost_7d_usd: Number(r.cost_7d_usd) || 0,
@@ -3274,6 +3295,11 @@ export async function computeExtractHealthCheck(
         halt_count: halts,
         round_completed_count: completed,
         halt_rate: total > 0 ? halts / total : 0,
+        // Recent (latest rollup bucket for this kind) halt rate. When no recent
+        // activity, fall back to the 7d rate so a kind that stopped running
+        // entirely keeps its signal.
+        halt_rate_recent: totalRecent > 0 ? haltsRecent / totalRecent : (total > 0 ? halts / total : 0),
+        halt_count_recent: haltsRecent,
         last_updated_at: r.last_updated_at
           ? new Date(r.last_updated_at).toISOString()
           : null,
@@ -3286,14 +3312,19 @@ export async function computeExtractHealthCheck(
     );
 
     // High halt rates: per F-OUT-19 doctor surfaces extractor health
-    // distinctly from rollup write health.
-    const highHaltKinds = kinds.filter(k => k.halt_rate > 0.10);
+    // distinctly from rollup write health. Gate on BOTH the 7d aggregate AND
+    // the latest rollup bucket so a resolved historical incident (a one-day
+    // provider/quota outage that spiked the 7d sum) clears the WARN once the
+    // extractor has recovered, instead of pinning RED for a full week.
+    const highHaltKinds = kinds.filter(k =>
+      k.halt_rate > 0.10 && k.halt_rate_recent > 0.10 && k.halt_count_recent >= 3,
+    );
 
     if (highHaltKinds.length > 0) {
       const top3 = [...highHaltKinds]
-        .sort((a, b) => b.halt_rate - a.halt_rate)
+        .sort((a, b) => b.halt_rate_recent - a.halt_rate_recent)
         .slice(0, 3)
-        .map(k => `${k.kind}=${(k.halt_rate * 100).toFixed(1)}%`)
+        .map(k => `${k.kind}=${(k.halt_rate_recent * 100).toFixed(1)}%`)
         .join(', ');
       return {
         name,
