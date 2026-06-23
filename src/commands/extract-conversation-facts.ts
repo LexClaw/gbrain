@@ -697,6 +697,25 @@ async function processPage(
   }
   const segments = splitIntoSegments(messages, { sinceIso });
   if (segments.length === 0) {
+    if (!state.dryRun && !sinceIso) {
+      const cleaned = await deleteOrphanFactsForPage(state.engine, state.sourceId, page.slug);
+      if (cleaned > 0) state.result.orphan_facts_cleaned += cleaned;
+      try {
+        await writeTerminalAuditRow(state.engine, state.sourceId, page.slug, 0);
+        state.result.pages_zero_facts++;
+        state.result.pages_processed++;
+        state.cpMap.set(cpMapKey(state.sourceId, page.slug), new Date(0).toISOString());
+        process.stderr.write(
+          `[extract-conversation-facts] ${page.slug}: no parseable conversation segments; marking terminal audit complete\n`,
+        );
+        return { newEndIso: new Date(0).toISOString() };
+      } catch (err) {
+        if (isAbortError(err)) throw err;
+        process.stderr.write(
+          `[extract-conversation-facts] ${page.slug} terminal audit write failed: ${(err as Error).message}\n`,
+        );
+      }
+    }
     state.result.pages_skipped++;
     return { newEndIso: null };
   }

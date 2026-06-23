@@ -300,7 +300,7 @@ describe('runExtractConversationFactsCore', () => {
     // truncation semantics than the canonical reset helper.
     await engine.executeRaw(`DELETE FROM facts WHERE source LIKE 'cli:extract-conversation-facts%'`);
     await engine.executeRaw(`DELETE FROM op_checkpoints WHERE op = 'extract-conversation-facts'`);
-    await engine.executeRaw(`DELETE FROM pages WHERE slug LIKE 'conversations/%' OR slug LIKE 'people/alice%'`);
+    await engine.executeRaw(`DELETE FROM pages WHERE slug LIKE 'conversations/%' OR slug LIKE 'sessions/%' OR slug LIKE 'meetings/%' OR slug LIKE 'people/alice%'`);
     // Set facts.extraction_enabled=true so kill-switch doesn't refuse.
     await engine.setConfig('facts.extraction_enabled', 'true');
     // Seed test pages.
@@ -424,6 +424,112 @@ describe('runExtractConversationFactsCore', () => {
     });
     expect(third.pages_processed).toBe(1);
     expect(third.segments_processed).toBeGreaterThanOrEqual(1);
+  });
+
+  test('bulk enumeration skips pages that already have terminal rows even without checkpoint state', async () => {
+    await runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      slug: 'conversations/imessage/alice-example',
+      sleepMs: 0,
+    });
+    await engine.executeRaw(`DELETE FROM op_checkpoints WHERE op = 'extract-conversation-facts'`);
+    await engine.executeRaw(
+      `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
+       VALUES ($1, $2, $3::jsonb, now())`,
+      [
+        'extract-conversation-facts',
+        extractConversationFactsFingerprint({ sourceId: 'default' }),
+        JSON.stringify([
+          encodeCheckpointEntry(
+            'default',
+            'sessions/2026-05-17-1803-45cd97',
+            '2099-01-01T00:00:00.000Z',
+          ),
+        ]),
+      ],
+    );
+
+    const result = await runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      types: ['conversation', 'session'],
+      limit: 1,
+      sleepMs: 0,
+    });
+
+    expect(result.pages_considered).toBe(1);
+    expect(result.pages_processed).toBe(1);
+    expect(result.facts_inserted).toBeGreaterThan(0);
+
+    const sessionTerminalRows = await engine.executeRaw<{ count: string | number }>(
+      `SELECT COUNT(*) AS count FROM facts WHERE source = $1 AND source_session = $2`,
+      [TERMINAL_AUDIT_SOURCE, `${TERMINAL_AUDIT_SOURCE}:sessions/2026-05-17-1803-45cd97`],
+    );
+    expect(Number(sessionTerminalRows[0]?.count ?? 0)).toBe(1);
+  });
+
+  test('marks a fully processed page complete when extraction yields zero facts', async () => {
+    __setChatTransportForTests(async (): Promise<ChatResult> => ({
+      text: JSON.stringify({ facts: [] }),
+      blocks: [],
+      stopReason: 'end',
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+      },
+      model: 'stub:stub',
+      providerId: 'stub',
+    }));
+
+    const result = await runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      slug: 'conversations/imessage/alice-example',
+      sleepMs: 0,
+    });
+
+    expect(result.pages_processed).toBe(1);
+    expect(result.pages_zero_facts).toBe(1);
+    expect(result.facts_inserted).toBe(0);
+
+    const terminalRows = await engine.executeRaw<{ count: string | number }>(
+      `SELECT COUNT(*) AS count FROM facts WHERE source = $1 AND source_session = $2`,
+      [TERMINAL_AUDIT_SOURCE, `${TERMINAL_AUDIT_SOURCE}:conversations/imessage/alice-example`],
+    );
+    expect(Number(terminalRows[0]?.count ?? 0)).toBe(1);
+
+    const checkpoints = await engine.executeRaw<{ n: string | number }>(
+      `SELECT COALESCE(SUM(jsonb_array_length(completed_keys)), 0) AS n FROM op_checkpoints WHERE op = 'extract-conversation-facts'`,
+    );
+    expect(Number(checkpoints[0]?.n ?? 0)).toBe(1);
+  });
+
+  test('marks eligible pages with no parseable segments terminal complete', async () => {
+    await engine.putPage('meetings/no-transcript-brief', {
+      type: 'meeting',
+      title: 'Meeting brief without transcript',
+      compiled_truth: '# Brief\n\nThis page has useful meeting notes but no speaker timestamp transcript lines.',
+      timeline: '',
+      frontmatter: {},
+    });
+
+    const result = await runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      types: ['meeting'],
+      slug: 'meetings/no-transcript-brief',
+      sleepMs: 0,
+    });
+
+    expect(result.pages_processed).toBe(1);
+    expect(result.pages_skipped).toBe(0);
+    expect(result.pages_zero_facts).toBe(1);
+    expect(result.facts_inserted).toBe(0);
+
+    const terminalRows = await engine.executeRaw<{ count: string | number }>(
+      `SELECT COUNT(*) AS count FROM facts WHERE source = $1 AND source_session = $2`,
+      [TERMINAL_AUDIT_SOURCE, `${TERMINAL_AUDIT_SOURCE}:meetings/no-transcript-brief`],
+    );
+    expect(Number(terminalRows[0]?.count ?? 0)).toBe(1);
   });
 
   test('honors facts.extraction_enabled kill-switch (F2)', async () => {
