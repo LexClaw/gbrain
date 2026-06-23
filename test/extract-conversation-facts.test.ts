@@ -302,7 +302,7 @@ describe('runExtractConversationFactsCore', () => {
     // truncation semantics than the canonical reset helper.
     await engine.executeRaw(`DELETE FROM facts WHERE source LIKE 'cli:extract-conversation-facts%'`);
     await engine.executeRaw(`DELETE FROM op_checkpoints WHERE op = 'extract-conversation-facts'`);
-    await engine.executeRaw(`DELETE FROM pages WHERE slug LIKE 'conversations/%' OR slug LIKE 'sessions/%' OR slug LIKE 'people/alice%'`);
+    await engine.executeRaw(`DELETE FROM pages WHERE slug LIKE 'conversations/%' OR slug LIKE 'sessions/%' OR slug LIKE 'meetings/%' OR slug LIKE 'people/alice%'`);
     // Set facts.extraction_enabled=true so kill-switch doesn't refuse.
     await engine.setConfig('facts.extraction_enabled', 'true');
     // Seed test pages.
@@ -527,6 +527,34 @@ describe('runExtractConversationFactsCore', () => {
       `SELECT COALESCE(SUM(jsonb_array_length(completed_keys)), 0) AS n FROM op_checkpoints WHERE op = 'extract-conversation-facts'`,
     );
     expect(Number(checkpoints[0]?.n ?? 0)).toBe(1);
+  });
+
+  test('marks eligible pages with no parseable segments terminal complete', async () => {
+    await engine.putPage('meetings/no-transcript-brief', {
+      type: 'meeting',
+      title: 'Meeting brief without transcript',
+      compiled_truth: '# Brief\n\nThis page has useful meeting notes but no speaker timestamp transcript lines.',
+      timeline: '',
+      frontmatter: {},
+    });
+
+    const result = await runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      types: ['meeting'],
+      slug: 'meetings/no-transcript-brief',
+      sleepMs: 0,
+    });
+
+    expect(result.pages_processed).toBe(1);
+    expect(result.pages_skipped).toBe(0);
+    expect(result.pages_zero_facts).toBe(1);
+    expect(result.facts_inserted).toBe(0);
+
+    const terminalRows = await engine.executeRaw<{ count: string | number }>(
+      `SELECT COUNT(*) AS count FROM facts WHERE source = $1 AND source_session = $2`,
+      [TERMINAL_AUDIT_SOURCE, `${TERMINAL_AUDIT_SOURCE}:meetings/no-transcript-brief`],
+    );
+    expect(Number(terminalRows[0]?.count ?? 0)).toBe(1);
   });
 
   test('honors facts.extraction_enabled kill-switch (F2)', async () => {
