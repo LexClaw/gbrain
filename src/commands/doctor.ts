@@ -3184,7 +3184,8 @@ export async function computeExtractAtomsBacklogCheck(
  * v0.42 — extract_health doctor check.
  *
  * Reads the extract_rollup_7d table (migration v106) for the last 7 days
- * and reports per-kind aggregates. Stable JSON envelope schema_version:1.
+ * and reports per-kind current health plus 7d aggregates. Stable JSON envelope
+ * schema_version:1.
  *
  * 3-state status:
  *   - OK when rollup is empty (no extractions yet) OR every per-kind
@@ -3196,7 +3197,7 @@ export async function computeExtractAtomsBacklogCheck(
  *
  * Per-kind columns (per plan A5 + D-EXTRACT-32 spec):
  *   cost_7d_usd, eval_pass_count, eval_fail_count, halt_count,
- *   round_completed_count, last_updated_at
+ *   round_completed_count, halt_rate, halt_rate_7d, last_updated_at
  *
  * The check is empty-rollup-tolerant: a brain that has never extracted
  * shows OK with `kinds: []` rather than warning. Doctor latency stays
@@ -3274,7 +3275,10 @@ export async function computeExtractHealthCheck(
       eval_fail_count: number;
       halt_count: number;
       round_completed_count: number;
+      /** Status-driving halt rate for the latest rollup bucket. */
       halt_rate: number;
+      /** Historical 7d aggregate retained for forensics. */
+      halt_rate_7d: number;
       halt_rate_recent: number;
       halt_count_recent: number;
       last_updated_at: string | null;
@@ -3287,6 +3291,11 @@ export async function computeExtractHealthCheck(
       const haltsRecent = Number(r.halt_count_recent) || 0;
       const completedRecent = Number(r.round_completed_count_recent) || 0;
       const totalRecent = haltsRecent + completedRecent;
+      const haltRate7d = total > 0 ? halts / total : 0;
+      // Recent (latest rollup bucket for this kind) halt rate. When no recent
+      // activity, fall back to the 7d rate so a kind that stopped running
+      // entirely keeps its signal.
+      const haltRateRecent = totalRecent > 0 ? haltsRecent / totalRecent : haltRate7d;
       return {
         kind: r.kind,
         cost_7d_usd: Number(r.cost_7d_usd) || 0,
@@ -3294,11 +3303,12 @@ export async function computeExtractHealthCheck(
         eval_fail_count: Number(r.eval_fail_count) || 0,
         halt_count: halts,
         round_completed_count: completed,
-        halt_rate: total > 0 ? halts / total : 0,
-        // Recent (latest rollup bucket for this kind) halt rate. When no recent
-        // activity, fall back to the 7d rate so a kind that stopped running
-        // entirely keeps its signal.
-        halt_rate_recent: totalRecent > 0 ? haltsRecent / totalRecent : (total > 0 ? halts / total : 0),
+        // Keep `halt_rate` aligned with the status-driving/current value. The
+        // historical aggregate remains visible as `halt_rate_7d`; otherwise
+        // doctor can say OK while its primary numeric field still reads red.
+        halt_rate: haltRateRecent,
+        halt_rate_7d: haltRate7d,
+        halt_rate_recent: haltRateRecent,
         halt_count_recent: haltsRecent,
         last_updated_at: r.last_updated_at
           ? new Date(r.last_updated_at).toISOString()
@@ -3312,12 +3322,13 @@ export async function computeExtractHealthCheck(
     );
 
     // High halt rates: per F-OUT-19 doctor surfaces extractor health
-    // distinctly from rollup write health. Gate on BOTH the 7d aggregate AND
-    // the latest rollup bucket so a resolved historical incident (a one-day
-    // provider/quota outage that spiked the 7d sum) clears the WARN once the
-    // extractor has recovered, instead of pinning RED for a full week.
+    // distinctly from rollup write health. Gate on the latest rollup bucket so
+    // a resolved historical incident (a one-day provider/quota outage that
+    // spiked the 7d sum) clears the WARN once the extractor has recovered,
+    // instead of pinning RED for a full week. The historical aggregate remains
+    // in details as halt_rate_7d for forensic context.
     const highHaltKinds = kinds.filter(k =>
-      k.halt_rate > 0.10 && k.halt_rate_recent > 0.10 && k.halt_count_recent >= 3,
+      k.halt_rate_recent > 0.10 && k.halt_count_recent >= 3,
     );
 
     if (highHaltKinds.length > 0) {

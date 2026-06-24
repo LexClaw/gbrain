@@ -165,9 +165,12 @@ describe('computeExtractHealthCheck — resolved-incident recency gate', () => {
     );
     const check = await computeExtractHealthCheck(engine);
     // 7d aggregate halt_rate is ~98.6% but recent (today) is 0% → OK.
+    // `halt_rate` is the status-driving current rate; `halt_rate_7d` keeps the
+    // historical spike visible for forensics.
     expect(check.status).toBe('ok');
     const atoms = (check.details as any)?.kinds.find((k: any) => k.kind === 'atoms');
-    expect(atoms.halt_rate).toBeGreaterThan(0.9);
+    expect(atoms.halt_rate).toBe(0);
+    expect(atoms.halt_rate_7d).toBeGreaterThan(0.9);
     expect(atoms.halt_rate_recent).toBe(0);
   });
 
@@ -185,7 +188,8 @@ describe('computeExtractHealthCheck — resolved-incident recency gate', () => {
     // even though the database CURRENT_DATE bucket still contains stale halts.
     expect(check.status).toBe('ok');
     const atoms = (check.details as any)?.kinds.find((k: any) => k.kind === 'atoms');
-    expect(atoms.halt_rate).toBeGreaterThan(0.1);
+    expect(atoms.halt_rate).toBe(0);
+    expect(atoms.halt_rate_7d).toBeGreaterThan(0.1);
     expect(atoms.halt_rate_recent).toBe(0);
     expect(atoms.halt_count_recent).toBe(0);
   });

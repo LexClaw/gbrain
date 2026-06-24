@@ -13,7 +13,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import { runPhaseExtractAtoms, parseAtomsResponse } from '../../src/core/cycle/extract-atoms.ts';
+import { runPhaseExtractAtoms, parseAtomsResponse, evaluateExtractedAtoms } from '../../src/core/cycle/extract-atoms.ts';
 import { runPhaseSynthesizeConcepts } from '../../src/core/cycle/synthesize-concepts.ts';
 import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import type { ChatResult, ChatOpts } from '../../src/core/ai/gateway.ts';
@@ -103,6 +103,29 @@ describe('v0.41 T5: parseAtomsResponse', () => {
   });
 });
 
+describe('extract_atoms eval gate', () => {
+  test('passes when source quotes are anchored in the source text', () => {
+    const atoms = parseAtomsResponse(`[
+      {"title":"Quote anchored","atom_type":"quote","body":"Body.","source_quote":"Enterprise buyers want tangible prototypes."}
+    ]`);
+    const result = evaluateExtractedAtoms(
+      atoms,
+      'Intro. Enterprise buyers want tangible prototypes. Outro.',
+    );
+    expect(result.pass).toBe(true);
+    expect(result.reason).toBe('source_quotes_anchored');
+  });
+
+  test('fails when valid atoms omit source quotes', () => {
+    const atoms = parseAtomsResponse(`[
+      {"title":"No quote","atom_type":"insight","body":"Body."}
+    ]`);
+    const result = evaluateExtractedAtoms(atoms, 'Body.');
+    expect(result.pass).toBe(false);
+    expect(result.reason).toBe('missing_source_quotes');
+  });
+});
+
 describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
   test('no-op when no transcripts AND no pages provided', async () => {
     // v0.41.2.1: _pages:[] suppresses page-discovery so this matches the
@@ -115,16 +138,18 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
 
   test('extracts atoms from transcript via stub chat', async () => {
     const chat = stubChat(`[
-      {"title":"Renders vs physical proof","atom_type":"insight","body":"Enterprise buyers want tangible prototypes."},
-      {"title":"Founder lesson","atom_type":"anecdote","body":"Story about a founder."}
+      {"title":"Renders vs physical proof","atom_type":"insight","body":"Enterprise buyers want tangible prototypes.","source_quote":"Enterprise buyers want tangible prototypes."},
+      {"title":"Founder lesson","atom_type":"anecdote","body":"Story about a founder.","source_quote":"Story about a founder."}
     ]`);
     const result = await runPhaseExtractAtoms(engine, {
-      _transcripts: [{ filePath: '/fake/meeting.txt', content: 'content', contentHash: 'abc123def' }],
+      _transcripts: [{ filePath: '/fake/meeting.txt', content: 'Enterprise buyers want tangible prototypes. Story about a founder.', contentHash: 'abc123def' }],
       _pages: [], // suppress page discovery — transcript-only test
       _chat: chat,
     });
     expect(result.status).toBe('ok');
     expect(result.details?.atoms_extracted).toBe(2);
+    expect(result.details?.eval_pass_count).toBe(1);
+    expect(result.details?.eval_fail_count).toBe(0);
     expect(result.details?.transcripts_processed).toBe(1);
 
     // Verify pages were written
@@ -132,6 +157,12 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
       `SELECT slug, type FROM pages WHERE type = 'atom'`,
     );
     expect(rows.length).toBe(2);
+
+    const rollup = await engine.executeRaw<{ eval_pass_count: number; eval_fail_count: number }>(
+      `SELECT eval_pass_count, eval_fail_count FROM extract_rollup_7d WHERE kind = 'atoms'`,
+    );
+    expect(rollup[0].eval_pass_count).toBe(1);
+    expect(rollup[0].eval_fail_count).toBe(0);
   });
 
   test('dry-run counts but does NOT write', async () => {

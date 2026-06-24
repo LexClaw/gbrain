@@ -141,7 +141,7 @@ export interface ExtractAtomsOpts {
   progress?: ProgressReporter;
 }
 
-interface ExtractedAtom {
+export interface ExtractedAtom {
   title: string;
   atom_type: typeof ATOM_TYPES[number];
   body: string;
@@ -149,6 +149,12 @@ interface ExtractedAtom {
   lesson?: string;
   virality_score?: number;
   emotional_register?: string;
+}
+
+export interface AtomEvalResult {
+  pass: boolean;
+  score: number;
+  reason: string;
 }
 
 const EXTRACT_PROMPT = `You extract atomic content nuggets from a transcript.
@@ -168,6 +174,36 @@ practical, controversial)}.
 atom_type MUST be one of: ${ATOM_TYPES.join(', ')}.
 
 Output ONLY the JSON array, no prose.`;
+
+function normalizeForQuoteMatch(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Deterministic eval gate for atom extraction output. Counts a source item as
+ * evaluable only when the model produced valid atoms and most source_quote
+ * values are anchored in the source text. This gives extract_health meaningful
+ * pass/fail counts without spending a second LLM call.
+ */
+export function evaluateExtractedAtoms(atoms: ExtractedAtom[], sourceText: string): AtomEvalResult {
+  if (atoms.length === 0) return { pass: false, score: 0, reason: 'no_valid_atoms' };
+
+  const source = normalizeForQuoteMatch(sourceText);
+  let anchoredQuotes = 0;
+  let quoteBearingAtoms = 0;
+  for (const atom of atoms) {
+    const quote = atom.source_quote?.trim();
+    if (!quote) continue;
+    quoteBearingAtoms++;
+    if (source.includes(normalizeForQuoteMatch(quote))) anchoredQuotes++;
+  }
+
+  if (quoteBearingAtoms === 0) return { pass: false, score: 0.5, reason: 'missing_source_quotes' };
+
+  const score = anchoredQuotes / atoms.length;
+  if (score >= 0.67) return { pass: true, score, reason: 'source_quotes_anchored' };
+  return { pass: false, score, reason: 'source_quotes_not_anchored' };
+}
 
 interface DiscoveredPage {
   slug: string;
@@ -367,6 +403,29 @@ export async function runPhaseExtractAtoms(
 ): Promise<PhaseResult> {
   const sourceId = opts.sourceId ?? 'default';
   const chat = opts._chat ?? gatewayChat;
+  if (opts._transcripts?.length === 0 && opts._pages?.length === 0) {
+    return {
+      phase: 'extract_atoms',
+      status: 'skipped',
+      duration_ms: 0,
+      summary: 'extract_atoms: no transcripts or pages to process',
+      details: {
+        reason: 'no_work',
+        source_id: sourceId,
+        atoms_extracted: 0,
+        transcripts_processed: 0,
+        transcripts_total: 0,
+        transcripts_skipped_budget: 0,
+        pages_processed: 0,
+        pages_total: 0,
+        duplicates_skipped: 0,
+        failures: [],
+        estimated_spend_usd: 0,
+        budget_usd: DEFAULT_BUDGET_USD,
+        dry_run: opts.dryRun ?? false,
+      },
+    };
+  }
   // Atom extraction is a utility/classification-style pass. Do not inherit the
   // generic `models.chat` reasoning default: one OpenAI quota outage turned every
   // item in a 50-page batch into a failure and inflated the halt-rate rollup.
@@ -546,6 +605,9 @@ export async function runPhaseExtractAtoms(
   let pagesSkipped = 0;
   const failures: Array<{ source: string; error: string }> = [];
   let providerBlocked: { source: string; error: string } | null = null;
+  let evalPassCount = 0;
+  let evalFailCount = 0;
+  const evalFailures: Array<{ source: string; reason: string; score: number }> = [];
   let estimatedSpendUsd = 0;
   const budgetCap = DEFAULT_BUDGET_USD;
 
@@ -604,9 +666,19 @@ export async function runPhaseExtractAtoms(
 
       const atoms = parseAtomsResponse(result.text);
       if (atoms.length === 0) {
+        evalFailCount++;
+        evalFailures.push({ source: originLabel, reason: 'no_valid_atoms', score: 0 });
         if (item.kind === 'transcript') transcriptsProcessed++;
         else pagesProcessed++;
         continue;
+      }
+
+      const evalResult = evaluateExtractedAtoms(atoms, item.content);
+      if (evalResult.pass) {
+        evalPassCount++;
+      } else {
+        evalFailCount++;
+        evalFailures.push({ source: originLabel, reason: evalResult.reason, score: evalResult.score });
       }
 
       if (!opts.dryRun) {
@@ -682,9 +754,15 @@ export async function runPhaseExtractAtoms(
         extracted_at: new Date().toISOString(),
         total_rows: totalAtomsExtracted,
         cost_usd: estimatedSpendUsd,
+        model_id: atomModel,
+        eval_pass: evalPassCount > 0 && evalFailCount === 0,
+        eval_score: (evalPassCount + evalFailCount) > 0
+          ? evalPassCount / (evalPassCount + evalFailCount)
+          : undefined,
         summary:
           `Extracted ${totalAtomsExtracted} atoms from ` +
-          `${transcriptsProcessed} transcripts + ${pagesProcessed} pages.`,
+          `${transcriptsProcessed} transcripts + ${pagesProcessed} pages ` +
+          `(eval pass=${evalPassCount}, fail=${evalFailCount}).`,
       });
     } catch (err) {
       console.error(`[extract_atoms] receipt write failed: ${(err as Error).message}`);
@@ -725,6 +803,8 @@ export async function runPhaseExtractAtoms(
       cost_delta: estimatedSpendUsd,
       round_completed_delta: failures.length === 0 ? 1 : 0,
       halt_delta: failures.length > 0 ? 1 : 0,
+      eval_pass_delta: evalPassCount,
+      eval_fail_delta: evalFailCount,
     });
   }
 
@@ -750,6 +830,9 @@ export async function runPhaseExtractAtoms(
       pages_skipped_budget: pagesSkipped,
       duplicates_skipped: duplicatesSkipped,
       failures,
+      eval_pass_count: evalPassCount,
+      eval_fail_count: evalFailCount,
+      eval_failures: evalFailures,
       estimated_spend_usd: estimatedSpendUsd,
       budget_usd: budgetCap,
       source_id: sourceId,
