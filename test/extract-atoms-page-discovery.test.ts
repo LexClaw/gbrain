@@ -174,6 +174,18 @@ describe('v0.41.2.1: discoverExtractablePages SQL contract', () => {
     expect(discovered.map((d) => d.slug)).toEqual(['original/normal']);
   });
 
+  test('metadata-only sources with unavailable transcripts are excluded', async () => {
+    await seedPage({ slug: 'source/normal', type: 'source' });
+    await seedPage({
+      slug: 'source/transcript-missing',
+      type: 'source',
+      compiled_truth: `${LONG_CONTENT}\n\n## Raw transcript\n\n_Transcript unavailable._`,
+    });
+
+    const discovered = await discoverExtractablePages(engine, 'default');
+    expect(discovered.map((d) => d.slug)).toEqual(['source/normal']);
+  });
+
   test('pages with NULL content_hash excluded (D9 #3 — no .slice crash)', async () => {
     await seedPage({ slug: 'meeting/with-hash', type: 'meeting' });
     await seedPage({ slug: 'meeting/no-hash', type: 'meeting', content_hash: null });

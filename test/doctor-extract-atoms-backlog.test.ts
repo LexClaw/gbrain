@@ -76,6 +76,15 @@ describe('countExtractAtomsBacklog (issue #1678)', () => {
     });
     expect(await countExtractAtomsBacklog(engine)).toBe(0);
   });
+
+  it('ignores metadata-only source pages with unavailable transcripts', async () => {
+    await engine.putPage('source/transcript-missing', {
+      type: 'source',
+      title: 'missing transcript',
+      compiled_truth: `${BODY}\n\n## Raw transcript\n\n_Transcript unavailable._`,
+    });
+    expect(await countExtractAtomsBacklog(engine)).toBe(0);
+  });
 });
 
 describe('computeExtractAtomsBacklogCheck (issue #1678)', () => {
