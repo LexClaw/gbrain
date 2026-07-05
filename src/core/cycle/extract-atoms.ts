@@ -171,9 +171,20 @@ source_quote (verbatim ≤200 chars), lesson (one sentence), virality_score
 (0-100), emotional_register (one of: shocking, inspiring, funny, sobering,
 practical, controversial)}.
 
+Do not start title, body, source_quote, or lesson with a reply-addressing
+handle like @TJ_Shedd. Remove only that leading addressee prefix.
+
 atom_type MUST be one of: ${ATOM_TYPES.join(', ')}.
 
 Output ONLY the JSON array, no prose.`;
+
+function stripLeadingHandlePrefix(s: string): string {
+  return s.replace(/^@[A-Za-z0-9_]{1,15}(?:\s*[:,-]\s*|\s+)/, '').trim();
+}
+
+function sanitizeAtomText(s: string): string {
+  return stripLeadingHandlePrefix(s);
+}
 
 function normalizeForQuoteMatch(s: string): string {
   return s.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -880,17 +891,17 @@ export function parseAtomsResponse(raw: string): ExtractedAtom[] {
   for (const item of parsed) {
     if (typeof item !== 'object' || item === null) continue;
     const obj = item as Record<string, unknown>;
-    const title = typeof obj.title === 'string' ? obj.title.slice(0, 200) : null;
+    const title = typeof obj.title === 'string' ? sanitizeAtomText(obj.title).slice(0, 200) : null;
     const atomType = typeof obj.atom_type === 'string' ? obj.atom_type : null;
-    const body = typeof obj.body === 'string' ? obj.body : null;
+    const body = typeof obj.body === 'string' ? sanitizeAtomText(obj.body) : null;
     if (!title || !atomType || !body) continue;
     if (!ATOM_TYPES.includes(atomType as typeof ATOM_TYPES[number])) continue;
     atoms.push({
       title,
       atom_type: atomType as typeof ATOM_TYPES[number],
       body,
-      source_quote: typeof obj.source_quote === 'string' ? obj.source_quote.slice(0, 500) : undefined,
-      lesson: typeof obj.lesson === 'string' ? obj.lesson : undefined,
+      source_quote: typeof obj.source_quote === 'string' ? sanitizeAtomText(obj.source_quote).slice(0, 500) : undefined,
+      lesson: typeof obj.lesson === 'string' ? sanitizeAtomText(obj.lesson) : undefined,
       virality_score:
         typeof obj.virality_score === 'number' &&
         obj.virality_score >= 0 &&

@@ -101,6 +101,14 @@ describe('v0.41 T5: parseAtomsResponse', () => {
     expect(parseAtomsResponse(`[{"title":"a","atom_type":"insight","body":"b","virality_score":-5}]`)[0].virality_score).toBeUndefined();
     expect(parseAtomsResponse(`[{"title":"a","atom_type":"insight","body":"b","virality_score":75}]`)[0].virality_score).toBe(75);
   });
+
+  test('strips leading reply handle prefixes from atom text fields', () => {
+    const atoms = parseAtomsResponse(`[{"title":"@TJ_Shedd: Build conviction","atom_type":"insight","body":"@TJ_Shedd Build conviction before scale.","source_quote":"@TJ_Shedd Build conviction before scale.","lesson":"@TJ_Shedd Conviction compounds."}]`);
+    expect(atoms[0].title).toBe('Build conviction');
+    expect(atoms[0].body).toBe('Build conviction before scale.');
+    expect(atoms[0].source_quote).toBe('Build conviction before scale.');
+    expect(atoms[0].lesson).toBe('Conviction compounds.');
+  });
 });
 
 describe('extract_atoms eval gate', () => {
