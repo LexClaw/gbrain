@@ -11,9 +11,9 @@ import { parseModelId } from './ai/model-resolver.ts';
  * RecommendationContext (doctor + autopilot) use this to build a sync
  * `resolveKey` closure without re-parsing recipes.
  *
- * Only OPENAI_API_KEY and ZEROENTROPY_API_KEY appear here because those are the
- * only embedding keys `buildGatewayConfig` (src/cli.ts) folds from config into
- * the gateway env. VOYAGE_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY are deliberately
+ * Only keys below appear here because those are the embedding keys
+ * `buildGatewayConfig` folds from config into the gateway env. VOYAGE_API_KEY /
+ * GOOGLE_GENERATIVE_AI_API_KEY are deliberately
  * absent: their config fields are NOT threaded to the gateway today, so the
  * producer closures fall through to checking `process.env` ONLY for them. That
  * matches what the gateway can actually use (the recipes read those keys from
@@ -25,6 +25,7 @@ import { parseModelId } from './ai/model-resolver.ts';
  */
 export const HOSTED_EMBED_KEY_CONFIG: Record<string, string> = {
   OPENAI_API_KEY: 'openai_api_key',
+  OPENROUTER_API_KEY: 'openrouter_api_key',
   ZEROENTROPY_API_KEY: 'zeroentropy_api_key',
 };
 

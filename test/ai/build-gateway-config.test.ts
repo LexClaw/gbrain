@@ -84,4 +84,24 @@ describe('buildGatewayConfig env-baseURL passthrough', () => {
       },
     );
   });
+
+  test('file-plane OpenRouter key folds into gateway env as fallback', async () => {
+    await withEnv({ OPENROUTER_API_KEY: undefined }, async () => {
+      const cfg = buildGatewayConfig({
+        openrouter_api_key: 'or-config-test',
+      } as unknown as GBrainConfig);
+
+      expect(cfg.env.OPENROUTER_API_KEY).toBe('or-config-test');
+    });
+  });
+
+  test('process OpenRouter key overrides file-plane fallback', async () => {
+    await withEnv({ OPENROUTER_API_KEY: 'or-env-test' }, async () => {
+      const cfg = buildGatewayConfig({
+        openrouter_api_key: 'or-config-test',
+      } as unknown as GBrainConfig);
+
+      expect(cfg.env.OPENROUTER_API_KEY).toBe('or-env-test');
+    });
+  });
 });
