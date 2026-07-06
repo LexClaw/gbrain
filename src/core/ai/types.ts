@@ -339,6 +339,12 @@ export interface Recipe {
 export interface AIGatewayConfig {
   /** Current embedding model as "provider:modelId" (e.g. "openai:text-embedding-3-large"). */
   embedding_model?: string;
+  /**
+   * Optional fallback embedding models tried only after the primary provider
+   * fails with a retryable quota/rate-limit/provider outage. Entries use the
+   * same "provider:modelId" form and must return embedding_dimensions dims.
+   */
+  embedding_fallback_chain?: string[];
   /** Target embedding dims. Gateway asserts returned embeddings match this. */
   embedding_dimensions?: number;
   /**

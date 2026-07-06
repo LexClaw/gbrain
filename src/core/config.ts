@@ -44,6 +44,13 @@ export interface GBrainConfig {
   zeroentropy_api_key?: string;
   /** AI gateway config (v0.14+). v0.36+ default: "zeroentropyai:zembed-1" / 1280 / "anthropic:claude-haiku-4-5-20251001". */
   embedding_model?: string;
+  /**
+   * Optional provider failover chain for embeddings/search-time query embeds.
+   * Tried only after the primary embedding provider returns a retryable quota,
+   * rate-limit, timeout, or provider outage error. Values are provider:model
+   * strings, for example ["openrouter:openai/text-embedding-3-large"].
+   */
+  embedding_fallback_chain?: string[];
   embedding_dimensions?: number;
   /**
    * v0.37 (D9): user opted into deferred-setup mode at init time via
@@ -514,6 +521,9 @@ export function loadConfig(): GBrainConfig | null {
     ...(process.env.ANTHROPIC_API_KEY ? { anthropic_api_key: process.env.ANTHROPIC_API_KEY } : {}),
     ...(process.env.ZEROENTROPY_API_KEY ? { zeroentropy_api_key: process.env.ZEROENTROPY_API_KEY } : {}),
     ...(process.env.GBRAIN_EMBEDDING_MODEL ? { embedding_model: process.env.GBRAIN_EMBEDDING_MODEL } : {}),
+    ...(process.env.GBRAIN_EMBEDDING_FALLBACK_CHAIN
+      ? { embedding_fallback_chain: process.env.GBRAIN_EMBEDDING_FALLBACK_CHAIN.split(',').map(s => s.trim()).filter(Boolean) }
+      : {}),
     ...(process.env.GBRAIN_EMBEDDING_DIMENSIONS ? { embedding_dimensions: parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS, 10) } : {}),
     ...(process.env.GBRAIN_EXPANSION_MODEL ? { expansion_model: process.env.GBRAIN_EXPANSION_MODEL } : {}),
     ...(process.env.GBRAIN_CHAT_MODEL ? { chat_model: process.env.GBRAIN_CHAT_MODEL } : {}),
@@ -799,6 +809,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'openai_api_key',
   'anthropic_api_key',
   'embedding_model',
+  'embedding_fallback_chain',
   'embedding_dimensions',
   'embedding_disabled',
   'expansion_model',

@@ -398,6 +398,7 @@ export function configureGateway(config: AIGatewayConfig): void {
     expansion_model: config.expansion_model ?? DEFAULT_EXPANSION_MODEL,
     chat_model: config.chat_model ?? DEFAULT_CHAT_MODEL,
     chat_fallback_chain: config.chat_fallback_chain,
+    embedding_fallback_chain: config.embedding_fallback_chain,
     // v0.35.0.0+: reranker_model stays undefined when unset — reranker is
     // opt-in and pulling DEFAULT_RERANKER_MODEL into every gateway start
     // would silently register a third-party model id on brains that never
@@ -413,6 +414,7 @@ export function configureGateway(config: AIGatewayConfig): void {
   // they aren't in the recipe's declared models: array (v0.31.12).
   for (const m of [
     _config.embedding_model,
+    ...(_config.embedding_fallback_chain ?? []),
     _config.embedding_multimodal_model,
     _config.expansion_model,
     _config.chat_model,
@@ -472,6 +474,7 @@ export async function reconfigureGatewayWithEngine(engine: BrainEngine): Promise
   _extendedModels.clear();
   for (const m of [
     _config.embedding_model,
+    ...(_config.embedding_fallback_chain ?? []),
     _config.embedding_multimodal_model,
     _config.expansion_model,
     _config.chat_model,
@@ -1356,12 +1359,68 @@ export interface EmbedOpts {
 export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32Array[]> {
   if (!texts || texts.length === 0) return [];
 
+  const primary = opts?.embeddingModel ?? getEmbeddingModel();
+  const fallbackChain = opts?.embeddingModel ? [] : embeddingFallbackChainFor(primary);
+  const targets = [primary, ...fallbackChain.filter(m => m && m !== primary)];
+  let lastErr: unknown;
+
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
+    try {
+      return await embedWithModel(texts, target, opts);
+    } catch (err) {
+      lastErr = err;
+      if (i === targets.length - 1 || !isEmbeddingFallbackEligible(err)) {
+        throw err;
+      }
+      process.stderr.write(
+        `[ai.gateway] embedding provider ${target} failed with ${embeddingErrorLabel(err)}; ` +
+        `falling back to ${targets[i + 1]}\n`,
+      );
+    }
+  }
+
+  throw lastErr;
+}
+
+function embeddingFallbackChainFor(primary: string): string[] {
+  const cfg = requireConfig();
+  const configured = cfg.embedding_fallback_chain ?? [];
+  if (configured.length > 0) return configured;
+
+  // Built-in quota fallback for the common OpenAI throttling incident path.
+  // It is inert unless the operator already has an OpenRouter key in the
+  // gateway env snapshot and the primary model is an OpenAI embedding model.
+  const parsed = (() => { try { return parseModelId(primary); } catch { return null; } })();
+  if (
+    parsed?.providerId === 'openai' &&
+    cfg.env.OPENROUTER_API_KEY &&
+    parsed.modelId.startsWith('text-embedding-')
+  ) {
+    return [`openrouter:openai/${parsed.modelId}`];
+  }
+  return [];
+}
+
+function embeddingErrorLabel(err: unknown): string {
+  if (err instanceof AITransientError) return 'transient';
+  if (err instanceof AIConfigError) return 'config';
+  const anyErr = err as { name?: string };
+  return anyErr?.name ?? 'error';
+}
+
+function isEmbeddingFallbackEligible(err: unknown): boolean {
+  if (err instanceof AITransientError) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /insufficient_quota|quota|rate.?limit|429|timeout|temporar|overloaded/i.test(msg);
+}
+
+async function embedWithModel(texts: string[], resolveTarget: string, opts?: EmbedOpts): Promise<Float32Array[]> {
   const cfg = requireConfig();
   // v0.36 (D10): caller may override the model. Used by the dynamic-embedding-
   // column path so hybridSearch can embed via the column's provider, not the
   // global default. resolveEmbeddingProvider validates the override at the
   // recipe layer — bad model strings throw AIConfigError with a clear hint.
-  const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
   const truncated = texts.map(t => (t ?? '').slice(0, MAX_CHARS));

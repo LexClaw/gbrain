@@ -16,11 +16,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   configureGateway,
+  embed,
   embedQuery,
   isAvailable,
   resetGateway,
   __setEmbedTransportForTests,
 } from '../src/core/ai/gateway.ts';
+import { AITransientError } from '../src/core/ai/errors.ts';
 
 interface TransportCall {
   modelString: string;
@@ -141,6 +143,52 @@ describe('embedQuery — { embeddingModel } override', () => {
     expect(threw).toBeTruthy();
     // Error message names the provider or model so the user knows what failed.
     expect(threw!.message.toLowerCase()).toMatch(/nonexistent|provider|recipe|model/);
+  });
+});
+
+describe('embedding fallback chain', () => {
+  test('falls back from OpenAI quota throttle to OpenRouter with matching dimensions', async () => {
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: 1536,
+      env: { OPENAI_API_KEY: 'sk-test', OPENROUTER_API_KEY: 'or-test' },
+    });
+
+    __setEmbedTransportForTests(async ({ model, values, providerOptions }: any) => {
+      const modelString = (model?.modelId ?? '<unknown>') as string;
+      calls.push({ modelString, values: [...values], providerOptions: { ...(providerOptions ?? {}) } });
+      if (calls.length === 1) {
+        throw new AITransientError('[embed(openai:text-embedding-3-large)] insufficient_quota');
+      }
+      const oc = (providerOptions?.openaiCompatible ?? {}) as Record<string, unknown>;
+      const dims = typeof oc.dimensions === 'number' ? (oc.dimensions as number) : 1536;
+      return {
+        embeddings: values.map(() => new Array(dims).fill(0.2)),
+        usage: { tokens: 0 },
+      } as any;
+    });
+
+    const vectors = await embed(['fallback probe']);
+    expect(vectors.length).toBe(1);
+    expect(vectors[0].length).toBe(1536);
+    expect(calls.map(c => c.modelString)).toEqual([
+      'text-embedding-3-large',
+      'openai/text-embedding-3-large',
+    ]);
+    expect(calls[1].providerOptions).toEqual({ openaiCompatible: { dimensions: 1536 } });
+  });
+
+  test('explicit embeddingModel override does not use the global fallback chain', async () => {
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_fallback_chain: ['openrouter:openai/text-embedding-3-large'],
+      embedding_dimensions: 1536,
+      env: { OPENAI_API_KEY: 'sk-test', OPENROUTER_API_KEY: 'or-test' },
+    });
+    installCaptureTransport(d => new Array(d).fill(0.3));
+
+    await embedQuery('override probe', { embeddingModel: 'openai:text-embedding-3-large' });
+    expect(calls.map(c => c.modelString)).toEqual(['text-embedding-3-large']);
   });
 });
 
