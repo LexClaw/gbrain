@@ -944,6 +944,24 @@ function formatResult(opName: string, result: unknown): string {
         `${e.date}  ${e.summary}${e.source ? ` [${e.source}]` : ''}`,
       ).join('\n') + '\n';
     }
+    case 'dynamic_links': {
+      const r = result as any;
+      const lines = [`${String(r.title || r.slug).toUpperCase()} , related entities`];
+      if (!Array.isArray(r.groups) || r.groups.length === 0) {
+        lines.push('No related entities.');
+        return lines.join('\n') + '\n';
+      }
+      for (const group of r.groups) {
+        lines.push(`${group.type} (${group.count})`);
+        for (const item of group.items || []) {
+          const rel = Array.isArray(item.relationships) && item.relationships.length > 0
+            ? ` (${item.relationships.join('; ')})`
+            : '';
+          lines.push(`- ${item.slug}${rel}`);
+        }
+      }
+      return lines.join('\n') + '\n';
+    }
     case 'get_versions': {
       const versions = result as any[];
       if (versions.length === 0) return 'No versions.\n';
@@ -2238,6 +2256,7 @@ LINKS
         [--link-type T] [--link-source S]   filter which edges to remove
   link-sources                       List provenances in use, with edge counts
   backlinks <slug>                   Incoming links
+  dynamic-links <slug>               Structured relationship sidebar by entity type
   graph <slug> [--depth N]           Traverse link graph (returns nodes)
   graph-query <slug> [--type T]      Edge-based traversal with type/direction filters
         [--depth N] [--direction in|out|both]

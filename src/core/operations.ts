@@ -1994,6 +1994,157 @@ const get_backlinks: Operation = {
   cliHints: { name: 'backlinks', positional: ['slug'] },
 };
 
+type DynamicLinkDirection = 'incoming' | 'outgoing';
+
+type DynamicLinkEdge = {
+  direction: DynamicLinkDirection;
+  from_slug: string;
+  to_slug: string;
+  link_type: string;
+  context: string;
+  link_source?: string | null;
+};
+
+type DynamicLinkItem = {
+  slug: string;
+  title: string;
+  type: string;
+  count: number;
+  relationships: string[];
+  edges: DynamicLinkEdge[];
+};
+
+type DynamicLinkGroup = {
+  type: string;
+  count: number;
+  items: DynamicLinkItem[];
+};
+
+type DynamicLinksResult = {
+  slug: string;
+  title: string;
+  type: string;
+  total: number;
+  groups: DynamicLinkGroup[];
+};
+
+function dynamicRelationLabel(edge: DynamicLinkEdge): string {
+  const detail = (edge.context || edge.link_type || edge.link_source || 'related').trim();
+  return `${edge.direction}: ${detail}`;
+}
+
+function dynamicTypeLabel(type: string): string {
+  const clean = (type || 'unknown').trim().toLowerCase();
+  if (!clean) return 'UNKNOWN';
+  if (clean === 'person') return 'PEOPLE';
+  if (clean.endsWith('y')) return `${clean.slice(0, -1)}ies`.toUpperCase();
+  if (clean.endsWith('s')) return clean.toUpperCase();
+  return `${clean}s`.toUpperCase();
+}
+
+const dynamic_links: Operation = {
+  name: 'dynamic_links',
+  description: 'Structured relationship sidebar for an entity. Groups direct incoming and outgoing links by related page type so agents can answer who/what/history questions without scanning flat backlinks.',
+  params: {
+    slug: { type: 'string', required: true, description: 'Entity page slug' },
+  },
+  handler: async (ctx, p): Promise<DynamicLinksResult> => {
+    const slug = p.slug as string;
+    validatePageSlug(slug);
+
+    const scope = sourceScopeOpts(ctx);
+    if (scope.sourceIds && !scope.sourceId) {
+      throw new OperationError(
+        'invalid_params',
+        'dynamic_links currently requires a single source scope',
+        'Set GBRAIN_SOURCE or use a client scoped to one source.',
+      );
+    }
+    const sourceOpts = scope.sourceId ? { sourceId: scope.sourceId } : {};
+    const page = await ctx.engine.getPage(slug, sourceOpts);
+    if (!page) {
+      throw new OperationError('page_not_found', `Page not found: ${slug}`);
+    }
+
+    const [outgoing, incoming] = await Promise.all([
+      ctx.engine.getLinks(slug, sourceOpts),
+      ctx.engine.getBacklinks(slug, sourceOpts),
+    ]);
+
+    const bySlug = new Map<string, DynamicLinkEdge[]>();
+    for (const edge of outgoing) {
+      const related = edge.to_slug;
+      if (!bySlug.has(related)) bySlug.set(related, []);
+      bySlug.get(related)!.push({
+        direction: 'outgoing',
+        from_slug: edge.from_slug,
+        to_slug: edge.to_slug,
+        link_type: edge.link_type || '',
+        context: edge.context || '',
+        link_source: edge.link_source,
+      });
+    }
+    for (const edge of incoming) {
+      const related = edge.from_slug;
+      if (!bySlug.has(related)) bySlug.set(related, []);
+      bySlug.get(related)!.push({
+        direction: 'incoming',
+        from_slug: edge.from_slug,
+        to_slug: edge.to_slug,
+        link_type: edge.link_type || '',
+        context: edge.context || '',
+        link_source: edge.link_source,
+      });
+    }
+
+    const items: DynamicLinkItem[] = [];
+    for (const [relatedSlug, edges] of bySlug.entries()) {
+      const relatedPage = await ctx.engine.getPage(relatedSlug, sourceOpts);
+      const relationshipCounts = new Map<string, number>();
+      for (const edge of edges) {
+        const label = dynamicRelationLabel(edge);
+        relationshipCounts.set(label, (relationshipCounts.get(label) ?? 0) + 1);
+      }
+      const relationships = [...relationshipCounts.entries()]
+        .map(([label, count]) => count > 1 ? `${label} x${count}` : label)
+        .sort((a, b) => a.localeCompare(b));
+      items.push({
+        slug: relatedSlug,
+        title: relatedPage?.title || relatedSlug,
+        type: relatedPage?.type || 'unknown',
+        count: edges.length,
+        relationships,
+        edges: edges.sort((a, b) => dynamicRelationLabel(a).localeCompare(dynamicRelationLabel(b))),
+      });
+    }
+
+    const grouped = new Map<string, DynamicLinkItem[]>();
+    for (const item of items) {
+      const label = dynamicTypeLabel(item.type);
+      if (!grouped.has(label)) grouped.set(label, []);
+      grouped.get(label)!.push(item);
+    }
+
+    const groups = [...grouped.entries()]
+      .map(([type, groupItems]) => ({
+        type,
+        count: groupItems.length,
+        items: groupItems.sort((a, b) => a.slug.localeCompare(b.slug)),
+      }))
+      .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
+
+    return {
+      slug,
+      title: page.title || slug,
+      type: page.type || 'unknown',
+      total: items.length,
+      groups,
+    };
+  },
+  scope: 'read',
+  cliHints: { name: 'dynamic-links', positional: ['slug'] },
+};
+
 const list_link_sources: Operation = {
   name: 'list_link_sources',
   // v114 (#1941): the read-side counterpart to link-add/link-rm. Since
@@ -4818,7 +4969,7 @@ export const operations: Operation[] = [
   // Tags
   add_tag, remove_tag, get_tags,
   // Links
-  add_link, remove_link, get_links, get_backlinks, list_link_sources, traverse_graph,
+  add_link, remove_link, get_links, get_backlinks, dynamic_links, list_link_sources, traverse_graph,
   // Timeline
   add_timeline_entry, get_timeline,
   // Admin

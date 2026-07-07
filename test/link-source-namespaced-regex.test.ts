@@ -288,7 +288,6 @@ describe('CLI aliases + help (OV10 + OV11)', () => {
       }
     }
   });
-
   test('printOpHelp shows the invoked alias name, not the primary (OV10)', () => {
     const op = operationsByName['add_link'];
     const lines: string[] = [];
@@ -304,3 +303,41 @@ describe('CLI aliases + help (OV10 + OV11)', () => {
     expect(out).not.toContain('Usage: gbrain link ');
   });
 });
+
+describe('dynamic_links op - structured relationship sidebar', () => {
+  test('op declaration: read scope, dynamic-links CLI name, exposed to tools', () => {
+    const op = operationsByName['dynamic_links'];
+    expect(op).toBeDefined();
+    expect(op.scope).toBe('read');
+    expect(op.localOnly).not.toBe(true);
+    expect(op.cliHints?.name).toBe('dynamic-links');
+    expect(operations.map(o => o.name)).toContain('dynamic_links');
+  });
+
+  test('groups direct incoming and outgoing links by related page type', async () => {
+    await engine.putPage('dl-john', { type: 'person', title: 'John Doe', compiled_truth: 'john', timeline: '', frontmatter: {} });
+    await engine.putPage('dl-jane', { type: 'person', title: 'Jane Smith', compiled_truth: 'jane', timeline: '', frontmatter: {} });
+    await engine.putPage('dl-acme', { type: 'company', title: 'Acme', compiled_truth: 'acme', timeline: '', frontmatter: {} });
+    await engine.putPage('dl-decision', { type: 'decision', title: 'Ship It', compiled_truth: 'decision', timeline: '', frontmatter: {} });
+
+    await engine.addLink('dl-jane', 'dl-john', 'co-attended 3 meetings', 'co-attended', 'manual');
+    await engine.addLink('dl-john', 'dl-acme', 'works at', 'works_at', 'manual');
+    await engine.addLink('dl-decision', 'dl-john', '', 'subject-of', 'manual');
+
+    const op = operationsByName['dynamic_links'];
+    const result = await op.handler(makeCtx({ sourceId: 'default' } as any), { slug: 'dl-john' }) as any;
+
+    expect(result.title).toBe('John Doe');
+    expect(result.total).toBe(3);
+    expect(result.groups.map((g: any) => g.type)).toEqual(['COMPANIES', 'DECISIONS', 'PEOPLE']);
+
+    const people = result.groups.find((g: any) => g.type === 'PEOPLE');
+    expect(people.items[0].slug).toBe('dl-jane');
+    expect(people.items[0].relationships).toContain('incoming: co-attended 3 meetings');
+
+    const companies = result.groups.find((g: any) => g.type === 'COMPANIES');
+    expect(companies.items[0].slug).toBe('dl-acme');
+    expect(companies.items[0].relationships).toContain('outgoing: works at');
+  });
+});
+
