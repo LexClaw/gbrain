@@ -435,10 +435,11 @@ def backfill_channel(channel: ChannelConfig, cursors: dict[str, ChannelCursor], 
 
             transcript_path = None
             transcript_text = None
+            transcript_source = "skip"
             if not dry_run:
                 video_workdir = workdir_base / v.video_id
                 try:
-                    transcript_path, transcript_text = fetch_transcript(
+                    transcript_path, transcript_text, transcript_source = fetch_transcript(
                         v, fallback=channel.transcript_fallback, workdir=video_workdir,
                     )
                 except (DownloadError, TranscriptUnavailable, OSError) as e:
@@ -447,7 +448,10 @@ def backfill_channel(channel: ChannelConfig, cursors: dict[str, ChannelCursor], 
                 if transcript_text is None:
                     summary["transcript_failures"].append(v.video_id)
 
-            slug, content = build_page(v, channel, transcript_text, ingested_at=ingested_at)
+            slug, content = build_page(
+                v, channel, transcript_text, ingested_at=ingested_at,
+                transcript_source=transcript_source,
+            )
             if dry_run:
                 log(f"[dry-run] would write {slug}")
                 summary["videos_ingested"] += 1
@@ -674,18 +678,18 @@ def vtt_to_plain_text(vtt_path: Path) -> str:
     return "\n".join(lines)
 
 
-def fetch_transcript(video: Video, *, fallback: str = "skip", workdir: Optional[Path] = None) -> tuple[Optional[Path], Optional[str]]:
-    """Tiered transcript fetch. Returns (vtt_path, plain_text) or (None, None).
+def fetch_transcript(video: Video, *, fallback: str = "skip", workdir: Optional[Path] = None) -> tuple[Optional[Path], Optional[str], str]:
+    """Tiered transcript fetch. Returns (vtt_path, plain_text, transcript_source).
 
-    Tier 1: auto-CC. Tier 2: manual CC. Tier 3: whisper (opt-in only, default off).
-    Empty VTT (< MIN_CUES) treated as miss and falls through.
+    transcript_source is always one of: yt-dlp-auto-cc, yt-dlp-manual-cc,
+    whisper, skip. Empty VTT (< MIN_CUES) treated as miss and falls through.
     """
     workdir = workdir or Path(tempfile.mkdtemp(prefix="yt-channel-"))
     # Tier 1: auto
     try:
         vtt = _run_yt_dlp_subs(video.url, lang="en", auto=True, out_dir=workdir)
         if vtt and count_cues(vtt) >= MIN_CUES:
-            return vtt, vtt_to_plain_text(vtt)
+            return vtt, vtt_to_plain_text(vtt), "yt-dlp-auto-cc"
         if vtt:
             try:
                 vtt.unlink()
@@ -698,7 +702,7 @@ def fetch_transcript(video: Video, *, fallback: str = "skip", workdir: Optional[
     try:
         vtt = _run_yt_dlp_subs(video.url, lang="en", auto=False, out_dir=workdir)
         if vtt and count_cues(vtt) >= MIN_CUES:
-            return vtt, vtt_to_plain_text(vtt)
+            return vtt, vtt_to_plain_text(vtt), "yt-dlp-manual-cc"
         if vtt:
             try:
                 vtt.unlink()
@@ -715,9 +719,9 @@ def fetch_transcript(video: Video, *, fallback: str = "skip", workdir: Optional[
             )
         # Real implementation would download audio + run whisper. v1: deferred.
         log(f"whisper fallback configured but not implemented in v1 for {video.video_id}", level="WARN")
-        return None, None
+        return None, None, "skip"
 
-    return None, None
+    return None, None, "skip"
 
 
 # ---------- Page writer ----------
@@ -729,7 +733,8 @@ def _slugify(s: str) -> str:
     return s.strip("-") or "untitled"
 
 
-def build_page(video: Video, channel: ChannelConfig, transcript: Optional[str], *, ingested_at: str) -> tuple[str, str]:
+def build_page(video: Video, channel: ChannelConfig, transcript: Optional[str], *,
+               ingested_at: str, transcript_source: Optional[str] = None) -> tuple[str, str]:
     """Build (slug, markdown) for a video page.
 
     Slug shape: sources/youtube/<channel-slug>/<YYYY-MM-DD>-<video-id>-<title-slug>
@@ -743,6 +748,7 @@ def build_page(video: Video, channel: ChannelConfig, transcript: Optional[str], 
     slug = f"sources/youtube/{channel.author_slug}/{pub_date}-{vid_for_slug}-{title_slug}"
 
     status = "pending_enrichment" if transcript else "transcript_unavailable"
+    transcript_source = transcript_source or ("yt-dlp-auto-cc" if transcript else "skip")
     fm_lines = [
         "---",
         f'title: "{_yaml_str(video.title)}"',
@@ -755,6 +761,7 @@ def build_page(video: Video, channel: ChannelConfig, transcript: Optional[str], 
         f"duration_seconds: {int(video.duration_seconds)}",
         f'published: "{video.published}"',
         f'ingested: "{ingested_at}"',
+        f'transcript_source: "{transcript_source}"',
         f"author: people/{channel.author_slug}",
         f"status: {status}",
         "tags: [youtube, source, video]",
@@ -1060,16 +1067,20 @@ def poll_channel(channel: ChannelConfig, cursors: dict[str, ChannelCursor], *,
             ingested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             transcript_path = None
             transcript_text = None
+            transcript_source = "skip"
             if not dry_run:
                 video_workdir = workdir_base / v.video_id
                 try:
-                    transcript_path, transcript_text = fetch_transcript(
+                    transcript_path, transcript_text, transcript_source = fetch_transcript(
                         v, fallback=channel.transcript_fallback, workdir=video_workdir,
                     )
                 except (DownloadError, TranscriptUnavailable, OSError) as e:
                     log(f"transcript fetch failed for {v.video_id}: {e}", level="WARN")
 
-            slug, content = build_page(v, channel, transcript_text, ingested_at=ingested_at)
+            slug, content = build_page(
+                v, channel, transcript_text, ingested_at=ingested_at,
+                transcript_source=transcript_source,
+            )
 
             if dry_run:
                 log(f"[dry-run] would write {slug}")
