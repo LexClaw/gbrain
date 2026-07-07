@@ -144,7 +144,7 @@ def test_backfill_channel_reuses_ingest_and_dedups(isolate_state, monkeypatch):
     }
     monkeypatch.setattr(yl, "fetch_uploads_flat", lambda channel_id, **kw: flat)
     monkeypatch.setattr(yl, "fetch_video_metadata", lambda video_id: metadata[video_id])
-    monkeypatch.setattr(yl, "fetch_transcript", lambda v, **kw: (None, "transcript"))
+    monkeypatch.setattr(yl, "fetch_transcript", lambda v, **kw: (None, "transcript", "yt-dlp-auto-cc"))
     monkeypatch.setattr(yl, "video_slug_exists", lambda slug: "old" in slug)
     monkeypatch.setattr(yl, "ensure_author_page", lambda *a, **k: None)
     monkeypatch.setattr(yl, "gbrain_upload_raw", lambda *a, **k: True)
@@ -293,9 +293,10 @@ def test_fetch_transcript_tier1_success(isolate_state, monkeypatch, tmp_path):
     monkeypatch.setattr(yl.subprocess, "run", fake_run)
     v = yl.Video(video_id="vid111", title="t", url="https://yt/v?vid111",
                  published="2026-01-01T00:00:00+00:00", channel_id="UCx")
-    path, text = yl.fetch_transcript(v, workdir=workdir)
+    path, text, source = yl.fetch_transcript(v, workdir=workdir)
     assert path is not None
     assert "acquisitions" in (text or "").lower()
+    assert source == "yt-dlp-auto-cc"
 
 
 def test_fetch_transcript_all_tiers_miss_returns_none(isolate_state, monkeypatch, tmp_path):
@@ -310,8 +311,9 @@ def test_fetch_transcript_all_tiers_miss_returns_none(isolate_state, monkeypatch
     monkeypatch.setattr(yl.subprocess, "run", fake_run)
     v = yl.Video(video_id="vid222", title="t", url="https://yt/v?vid222",
                  published="2026-01-01T00:00:00+00:00", channel_id="UCx")
-    path, text = yl.fetch_transcript(v, workdir=tmp_path / "wd")
+    path, text, source = yl.fetch_transcript(v, workdir=tmp_path / "wd")
     assert path is None and text is None
+    assert source == "skip"
 
 
 def test_fetch_transcript_whisper_missing_raises(isolate_state, monkeypatch, tmp_path):
@@ -343,6 +345,7 @@ def test_build_page_with_transcript(isolate_state):
     # slug must be all-lowercase (gbrain put rejects uppercase as tag names)
     assert slug == slug.lower()
     assert "pending_enrichment" in body
+    assert 'transcript_source: "yt-dlp-auto-cc"' in body
     assert "transcript here" in body
     assert "[[people/alex-hormozi]]" in body
 
@@ -353,6 +356,7 @@ def test_build_page_without_transcript(isolate_state):
     ch = yl.ChannelConfig(handle="@h", channel_id="UCx", author_slug="h")
     slug, body = yl.build_page(v, ch, None, ingested_at="2026-05-15T00:00:00+00:00")
     assert "transcript_unavailable" in body
+    assert 'transcript_source: "skip"' in body
     assert "Transcript unavailable" in body
 
 
@@ -388,7 +392,7 @@ def test_poll_channel_first_poll_ingests_all(isolate_state, monkeypatch):
     )
 
     # Stub transcript fetch to return None,None (don't actually run yt-dlp)
-    monkeypatch.setattr(yl, "fetch_transcript", lambda v, **kw: (None, None))
+    monkeypatch.setattr(yl, "fetch_transcript", lambda v, **kw: (None, None, "skip"))
     # Stub gbrain put/upload/get
     put_calls = []
 
