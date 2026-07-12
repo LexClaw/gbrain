@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { assertSyncSourceRootGuard, performSync } from '../src/commands/sync.ts';
+import { assertSyncSourceRootGuard, performSync, syncOneSource } from '../src/commands/sync.ts';
 
 let engine: PGLiteEngine;
 
@@ -185,6 +185,100 @@ describe('sync source safety guard', () => {
         `SELECT reason, candidate_count, result FROM sync_reconciliation_audit`,
       );
       expect(audits.some((r) => r.reason === 'incremental_deleted' && r.candidate_count === 1 && r.result === 'applied')).toBe(true);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('direct syncOneSource boundary carries parser-proven source provenance', async () => {
+    const repo = makeRepo();
+    try {
+      await setSourcePath('default', repo);
+      const { result } = await syncOneSource(engine, {
+        id: 'default',
+        name: 'default',
+        local_path: repo,
+        config: {},
+      }, {
+        dryRun: false,
+        full: false,
+        noPull: true,
+        noEmbed: true,
+        noExtract: true,
+        skipFailed: false,
+        retryFailed: false,
+        concurrency: undefined,
+      });
+      expect(result.status).toBe('first_sync');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('migration-backed reconciliation role policy is present on fresh schema', async () => {
+    const fresh = new PGLiteEngine();
+    await fresh.connect({});
+    try {
+      await fresh.initSchema();
+      const rows = await fresh.executeRaw<{
+        role_name: string;
+        can_normal_sync: boolean;
+        can_apply_reconciliation: boolean;
+        can_repair_source_root: boolean;
+        can_hard_purge: boolean;
+      }>(
+        `SELECT role_name, can_normal_sync, can_apply_reconciliation, can_repair_source_root, can_hard_purge
+         FROM sync_reconciliation_role_policy ORDER BY role_name`,
+      );
+      expect(rows).toEqual([
+        { role_name: 'gbrain_hard_purge', can_normal_sync: false, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: true },
+        { role_name: 'gbrain_normal_sync', can_normal_sync: true, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: false },
+        { role_name: 'gbrain_reconciliation_apply', can_normal_sync: false, can_apply_reconciliation: true, can_repair_source_root: false, can_hard_purge: false },
+        { role_name: 'gbrain_source_repair', can_normal_sync: false, can_apply_reconciliation: false, can_repair_source_root: true, can_hard_purge: false },
+      ]);
+    } finally {
+      await fresh.disconnect();
+    }
+  });
+
+  test('reconciliation threshold rejection aborts without checkpointing or tombstoning', async () => {
+    const repo = makeRepo(3);
+    try {
+      await setSourcePath('default', repo);
+      const first = await performSync(engine, {
+        repoPath: repo,
+        sourceId: 'default',
+        explicitSourceArg: true,
+        sourceResolutionTier: 'flag',
+        noPull: true,
+        noEmbed: true,
+        noExtract: true,
+      });
+      expect(first.status).toBe('first_sync');
+
+      for (const name of ['alpha', 'extra-1']) rmSync(join(repo, 'notes', `${name}.md`));
+      git(repo, 'git add -A');
+      git(repo, 'git commit -q -m remove-too-many');
+
+      await expect(performSync(engine, {
+        repoPath: repo,
+        sourceId: 'default',
+        explicitSourceArg: true,
+        sourceResolutionTier: 'flag',
+        noPull: true,
+        noEmbed: true,
+        noExtract: true,
+      })).rejects.toThrow(/exceeds thresholds/);
+
+      const rows = await engine.executeRaw<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM pages WHERE source_id = 'default' AND deleted_at IS NOT NULL`,
+      );
+      expect(Number(rows[0].n)).toBe(0);
+
+      const audits = await engine.executeRaw<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM sync_reconciliation_audit WHERE result = 'applied'`,
+      );
+      expect(Number(audits[0].n)).toBe(0);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

@@ -278,8 +278,16 @@ describe('buildSyncManifest edge cases', () => {
 // ────────────────────────────────────────────────────────────────
 
 describe('performSync dry-run never writes', () => {
+  const EXPLICIT_DEFAULT_SOURCE = { sourceId: 'default', explicitSourceArg: true, sourceResolutionTier: 'flag' } as const;
   let engine: PGLiteEngine;
   let repoPath: string;
+
+  async function defaultLastCommit(): Promise<string | null> {
+    const rows = await engine.executeRaw<{ last_commit: string | null }>(
+      `SELECT last_commit FROM sources WHERE id = 'default'`,
+    );
+    return rows[0]?.last_commit ?? null;
+  }
 
   // One PGLite per file — beforeEach wipes data only. Each test still gets a
   // fresh git repo via mkdtempSync, but skips the ~20s PGLite cold-start.
@@ -317,6 +325,7 @@ describe('performSync dry-run never writes', () => {
       'Bob is another person.',
     ].join('\n'));
     execSync('git add -A && git commit -m "initial"', { cwd: repoPath, stdio: 'pipe' });
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = 'default'`, [repoPath]);
   });
 
   afterEach(() => {
@@ -327,6 +336,7 @@ describe('performSync dry-run never writes', () => {
     const { performSync } = await import('../src/commands/sync.ts');
     const result = await performSync(engine, {
       repoPath,
+      ...EXPLICIT_DEFAULT_SOURCE,
       dryRun: true,
       noPull: true,
       noEmbed: true,
@@ -343,8 +353,7 @@ describe('performSync dry-run never writes', () => {
     expect(await engine.getPage('people/bob')).toBeNull();
 
     // Bookmark NOT set — this is the regression the guard enforces.
-    expect(await engine.getConfig('sync.last_commit')).toBeNull();
-    expect(await engine.getConfig('sync.repo_path')).toBeNull();
+    expect(await defaultLastCommit()).toBeNull();
   });
 
   test('first sync without origin skips git pull noise and uses local working tree', async () => {
@@ -355,6 +364,7 @@ describe('performSync dry-run never writes', () => {
     try {
       const result = await performSync(engine, {
         repoPath,
+        ...EXPLICIT_DEFAULT_SOURCE,
         noEmbed: true,
       });
       expect(result.status).toBe('first_sync');
@@ -372,11 +382,12 @@ describe('performSync dry-run never writes', () => {
     // First do a real sync to seed the bookmark.
     const real = await performSync(engine, {
       repoPath,
+      ...EXPLICIT_DEFAULT_SOURCE,
       noPull: true,
       noEmbed: true,
     });
     expect(real.status).toBe('first_sync');
-    const bookmarkAfterReal = await engine.getConfig('sync.last_commit');
+    const bookmarkAfterReal = await defaultLastCommit();
     expect(bookmarkAfterReal).not.toBeNull();
 
     // Add a third file.
@@ -393,6 +404,7 @@ describe('performSync dry-run never writes', () => {
     // Incremental sync in dry-run mode.
     const result = await performSync(engine, {
       repoPath,
+      ...EXPLICIT_DEFAULT_SOURCE,
       dryRun: true,
       noPull: true,
       noEmbed: true,
@@ -410,21 +422,22 @@ describe('performSync dry-run never writes', () => {
     expect(await engine.getPage('people/bob')).not.toBeNull();
 
     // Bookmark unchanged — still at the pre-carol commit.
-    const bookmarkAfterDry = await engine.getConfig('sync.last_commit');
+    const bookmarkAfterDry = await defaultLastCommit();
     expect(bookmarkAfterDry).toBe(bookmarkAfterReal);
   });
 
   test('full-sync (--full) dry-run does NOT write to DB or advance the bookmark', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
     // Seed the bookmark so we hit the full-sync-with-bookmark path when --full is set.
-    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    await performSync(engine, { repoPath, ...EXPLICIT_DEFAULT_SOURCE, noPull: true, noEmbed: true });
     // Clear DB so we can observe that a --full dry-run doesn't re-import.
     await (engine as any).db.exec(`DELETE FROM content_chunks; DELETE FROM pages;`);
-    const bookmarkBefore = await engine.getConfig('sync.last_commit');
+    const bookmarkBefore = await defaultLastCommit();
     expect(bookmarkBefore).not.toBeNull();
 
     const result = await performSync(engine, {
       repoPath,
+      ...EXPLICIT_DEFAULT_SOURCE,
       full: true,        // force full-sync path
       dryRun: true,
       noPull: true,
@@ -440,7 +453,7 @@ describe('performSync dry-run never writes', () => {
     expect(await engine.getPage('people/bob')).toBeNull();
 
     // Bookmark unchanged.
-    const bookmarkAfter = await engine.getConfig('sync.last_commit');
+    const bookmarkAfter = await defaultLastCommit();
     expect(bookmarkAfter).toBe(bookmarkBefore);
   });
 
@@ -448,6 +461,7 @@ describe('performSync dry-run never writes', () => {
     const { performSync } = await import('../src/commands/sync.ts');
     const result = await performSync(engine, {
       repoPath,
+      ...EXPLICIT_DEFAULT_SOURCE,
       dryRun: true,
       noPull: true,
       noEmbed: true,
@@ -460,6 +474,7 @@ describe('performSync dry-run never writes', () => {
     const { performSync } = await import('../src/commands/sync.ts');
     const seeded = await performSync(engine, {
       repoPath,
+      ...EXPLICIT_DEFAULT_SOURCE,
       noPull: true,
       noEmbed: true,
       noExtract: true,
@@ -485,6 +500,7 @@ describe('performSync dry-run never writes', () => {
     try {
       const result = await performSync(engine, {
         repoPath,
+        ...EXPLICIT_DEFAULT_SOURCE,
         noEmbed: true,
         noExtract: true,
       });
@@ -508,6 +524,7 @@ describe('performSync dry-run never writes', () => {
     const { performSync } = await import('../src/commands/sync.ts');
     const seeded = await performSync(engine, {
       repoPath,
+      ...EXPLICIT_DEFAULT_SOURCE,
       noPull: true,
       noEmbed: true,
       noExtract: true,
@@ -526,6 +543,7 @@ describe('performSync dry-run never writes', () => {
 
     const result = await performSync(engine, {
       repoPath,
+      ...EXPLICIT_DEFAULT_SOURCE,
       noPull: true,
       noEmbed: true,
       noExtract: true,
@@ -709,7 +727,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
   }
 
   /** Create a temp git repo seeded with the given files + an initial commit. */
-  function mkRepo(files: Record<string, string>): string {
+  async function mkRepo(files: Record<string, string>): Promise<string> {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-1970-'));
     repos.push(dir);
     execSync('git init', { cwd: dir, stdio: 'pipe' });
@@ -720,10 +738,11 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
       writeFileSync(join(dir, rel), content);
     }
     execSync('git add -A && git commit -m "initial"', { cwd: dir, stdio: 'pipe' });
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = 'default'`, [dir]);
     return dir;
   }
 
-  const SYNC_OPTS = { noPull: true, noEmbed: true, noExtract: true, sourceId: 'default' } as const;
+  const SYNC_OPTS = { noPull: true, noEmbed: true, noExtract: true, sourceId: 'default', explicitSourceArg: true, sourceResolutionTier: 'flag' } as const;
 
   async function bookmark(): Promise<string | null> {
     const rows = await engine.executeRaw<{ last_commit: string | null }>(
@@ -744,9 +763,20 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     }
   }
 
+  async function withReconcileOverride<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON;
+    process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON = 'unit-test-small-fixture-delete';
+    try {
+      return await fn();
+    } finally {
+      if (prev === undefined) delete process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON;
+      else process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON = prev;
+    }
+  }
+
   test('orphan-present (not an ancestor): diffs tree-to-tree, imports only the delta, advances bookmark', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = mkRepo({
+    const repo = await mkRepo({
       'people/alice.md': personMd('Alice', 'Alice is a person.'),
       'people/bob.md': personMd('Bob', 'Bob is a person.'),
     });
@@ -783,7 +813,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
 
   test('orphan-absent (object gc\'d): falls back to a full reconcile', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = mkRepo({ 'people/alice.md': personMd('Alice', 'Alice is a person.') });
+    const repo = await mkRepo({ 'people/alice.md': personMd('Alice', 'Alice is a person.') });
 
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
     // Simulate an orphaned-AND-pruned bookmark: a valid-shaped SHA with no object.
@@ -803,7 +833,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
 
   test('divergence: a file present in the orphan tree but dropped from HEAD is deleted', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = mkRepo({
+    const repo = await mkRepo({
       'people/alice.md': personMd('Alice', 'Alice is a person.'),
       'people/bob.md': personMd('Bob', 'Bob is a person.'),
     });
@@ -815,7 +845,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     writeFileSync(join(repo, 'people/alice.md'), personMd('Alice', 'Alice was corrected.'));
     execSync('git add -A && git commit --amend -m "drop bob, edit alice"', { cwd: repo, stdio: 'pipe' });
 
-    const result = await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+    const result = await withReconcileOverride(() => performSync(engine, { repoPath: repo, ...SYNC_OPTS }));
     expect(result.status).toBe('synced');
     expect(await engine.getPage('people/bob')).toBeNull();          // deleted
     const alice = await engine.getPage('people/alice');
@@ -824,7 +854,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
 
   test('F-C: a rename whose destination is unsyncable deletes the old page', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = mkRepo({ 'people/carol.md': personMd('Carol', 'Carol is a person.') });
+    const repo = await mkRepo({ 'people/carol.md': personMd('Carol', 'Carol is a person.') });
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
     expect(await engine.getPage('people/carol')).not.toBeNull();
 
@@ -834,14 +864,14 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     execSync('git mv people/carol.md people/carol.txt', { cwd: repo, stdio: 'pipe' });
     execSync('git commit -m "rename carol to txt"', { cwd: repo, stdio: 'pipe' });
 
-    const result = await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+    const result = await withReconcileOverride(() => performSync(engine, { repoPath: repo, ...SYNC_OPTS }));
     expect(result.status).toBe('synced');
     expect(await engine.getPage('people/carol')).toBeNull();
   });
 
   test('F-A: full reconcile purges stale file-backed pages but spares manual + metafile pages', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = mkRepo({
+    const repo = await mkRepo({
       'people/alice.md': personMd('Alice', 'Alice is a person.'),
       'people/bob.md': personMd('Bob', 'Bob is a person.'),
     });
@@ -873,7 +903,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
 
   test('F-B: an undiffable-but-present bookmark falls back to a full reconcile instead of throwing', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = mkRepo({ 'people/alice.md': personMd('Alice', 'Alice is a person.') });
+    const repo = await mkRepo({ 'people/alice.md': personMd('Alice', 'Alice is a person.') });
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
 
     // A blob SHA: cat-file -t succeeds ("blob", so objectPresent=true), but
@@ -890,7 +920,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
 
   test('convergence: after orphan recovery, a later commit syncs incrementally to up_to_date', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = mkRepo({ 'people/alice.md': personMd('Alice', 'Alice is a person.') });
+    const repo = await mkRepo({ 'people/alice.md': personMd('Alice', 'Alice is a person.') });
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
 
     // Orphan + recover.

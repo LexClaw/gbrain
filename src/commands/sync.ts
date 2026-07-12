@@ -708,9 +708,15 @@ export async function resolveSlugByPathOrSourcePath(
       );
       if (rows.length > 0 && rows[0].slug) return rows[0].slug;
     }
-  } catch {
-    // Fall through — best-effort. Pre-migration brains or query errors
-    // shouldn't break delete/rename for path-derived pages.
+  } catch (e) {
+    if (sourceId) {
+      throw new Error(
+        `Unsafe sync: source_path lookup failed while resolving removal for ${path}: ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    // Legacy unscoped fallback only. Modern source-scoped sync fails closed
+    // rather than converting DB/schema/permission errors into path-derived slugs.
   }
   return resolveSlugForPath(path);
 }
@@ -1768,7 +1774,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         });
         slog(`  Tombstoned un-syncable page: ${slug}`);
       }
-    } catch { /* ignore */ }
+    } catch (e) {
+      throw new Error(
+        `Unsafe sync: un-syncable reconciliation failed for ${path}: ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   const totalChanges = filtered.added.length + filtered.modified.length +
@@ -2045,37 +2056,27 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         let pathSlugMap: Map<string, string>;
         try {
           pathSlugMap = await engine.resolveSlugsByPaths(batch, deleteScopedOpts);
-        } catch {
-          // Resolve failure: fall back to empty map; per-path fallback
-          // below will use resolveSlugForPath. Best-effort, matches the
-          // existing resolveSlugByPathOrSourcePath swallow-and-fallback
-          // semantics.
-          pathSlugMap = new Map();
+        } catch (e) {
+          throw new Error(
+            `Unsafe sync: batch source_path lookup failed while resolving filesystem removals: ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+          );
         }
         const slugs = batch.map(p => pathSlugMap.get(p) ?? resolveSlugForPath(p));
 
         // Phase B: reconcile filesystem-derived removals through the single manifest service.
-        try {
-          const deleted = await reconcileFilesystemRemovals(engine, slugs, {
-            sourceId: sid,
-            repoPath,
-            reason: 'incremental_deleted',
-          });
-          // D6: only push slugs that were actually deleted. Filters phantom
-          // slugs (paths in filtered.deleted but with no DB row) so
-          // downstream extract/embed don't waste lookups.
-          pagesAffected.push(...deleted);
-          // v0.42.x (#1794): the whole batch is handled (deleted or already
-          // gone); checkpoint every path so a resume skips it.
-          for (const p of batch) await markCompleted(p);
-        } catch (err) {
-          for (const path of batch) {
-            failedFiles.push({
-              path,
-              error: `delete failed: ${err instanceof Error ? err.message : String(err)}`,
-            });
-          }
-        }
+        const deleted = await reconcileFilesystemRemovals(engine, slugs, {
+          sourceId: sid,
+          repoPath,
+          reason: 'incremental_deleted',
+        });
+        // D6: only push slugs that were actually deleted. Filters phantom
+        // slugs (paths in filtered.deleted but with no DB row) so
+        // downstream extract/embed don't waste lookups.
+        pagesAffected.push(...deleted);
+        // v0.42.x (#1794): the whole batch is handled (deleted or already
+        // gone); checkpoint every path so a resume skips it.
+        for (const p of batch) await markCompleted(p);
         progress.tick(batch.length, `deletes ${Math.min(i + DELETE_BATCH_SIZE, deletesToDo.length)}/${deletesToDo.length}`);
         await maybeYield();
       }
@@ -3981,6 +3982,8 @@ export async function syncOneSource(
     retryFailed: shared.retryFailed,
     noSchemaPack: shared.noSchemaPack,
     sourceId: src.id,
+    explicitSourceArg: true,
+    sourceResolutionTier: 'flag',
     strategy: cfg.strategy,
     concurrency: shared.concurrency,
     // lockId defaults to `gbrain-sync:${src.id}` via the invariant in

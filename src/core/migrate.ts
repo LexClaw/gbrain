@@ -5232,6 +5232,125 @@ export const MIGRATIONS: Migration[] = [
         ON code_edges_chunk (from_symbol_qualified);
     `,
   },
+  {
+    version: 117,
+    name: 'sync_reconciliation_audit_and_roles',
+    // Sync-safety pre-rehearsal gate: make reconciliation audit and privilege
+    // intent migration-backed instead of ad-hoc runtime DDL. Real Postgres gets
+    // dedicated roles and grants; PGLite records the same role matrix and the
+    // application guard fails closed where role switching is unsupported.
+    idempotent: true,
+    sql: '',
+    sqlFor: {
+      postgres: `
+        CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
+          operation_id text PRIMARY KEY,
+          manifest_hash text NOT NULL,
+          source_id text NOT NULL,
+          actor text NOT NULL,
+          role text NOT NULL,
+          reason text NOT NULL,
+          candidate_count integer NOT NULL,
+          population_count integer NOT NULL,
+          threshold_absolute integer NOT NULL,
+          threshold_percentage double precision NOT NULL,
+          authorized boolean NOT NULL,
+          override_reason text,
+          before_state jsonb NOT NULL,
+          after_state jsonb,
+          result text NOT NULL,
+          failure text,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          completed_at timestamptz
+        );
+        CREATE INDEX IF NOT EXISTS sync_reconciliation_audit_source_idx
+          ON sync_reconciliation_audit (source_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS sync_reconciliation_role_policy (
+          role_name text PRIMARY KEY,
+          can_normal_sync boolean NOT NULL DEFAULT false,
+          can_apply_reconciliation boolean NOT NULL DEFAULT false,
+          can_repair_source_root boolean NOT NULL DEFAULT false,
+          can_hard_purge boolean NOT NULL DEFAULT false,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        INSERT INTO sync_reconciliation_role_policy
+          (role_name, can_normal_sync, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
+        VALUES
+          ('gbrain_normal_sync', true, false, false, false),
+          ('gbrain_reconciliation_apply', false, true, false, false),
+          ('gbrain_source_repair', false, false, true, false),
+          ('gbrain_hard_purge', false, false, false, true)
+        ON CONFLICT (role_name) DO UPDATE SET
+          can_normal_sync = EXCLUDED.can_normal_sync,
+          can_apply_reconciliation = EXCLUDED.can_apply_reconciliation,
+          can_repair_source_root = EXCLUDED.can_repair_source_root,
+          can_hard_purge = EXCLUDED.can_hard_purge;
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_normal_sync') THEN
+            CREATE ROLE gbrain_normal_sync NOLOGIN;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_reconciliation_apply') THEN
+            CREATE ROLE gbrain_reconciliation_apply NOLOGIN;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_source_repair') THEN
+            CREATE ROLE gbrain_source_repair NOLOGIN;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_hard_purge') THEN
+            CREATE ROLE gbrain_hard_purge NOLOGIN;
+          END IF;
+        END $$;
+        GRANT SELECT, INSERT, UPDATE ON sync_reconciliation_audit TO gbrain_reconciliation_apply;
+        GRANT SELECT ON sync_reconciliation_audit TO gbrain_normal_sync;
+        GRANT SELECT ON sync_reconciliation_role_policy TO gbrain_normal_sync, gbrain_reconciliation_apply, gbrain_source_repair, gbrain_hard_purge;
+        REVOKE DELETE ON sync_reconciliation_audit FROM gbrain_normal_sync;
+      `,
+      pglite: `
+        CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
+          operation_id text PRIMARY KEY,
+          manifest_hash text NOT NULL,
+          source_id text NOT NULL,
+          actor text NOT NULL,
+          role text NOT NULL,
+          reason text NOT NULL,
+          candidate_count integer NOT NULL,
+          population_count integer NOT NULL,
+          threshold_absolute integer NOT NULL,
+          threshold_percentage double precision NOT NULL,
+          authorized boolean NOT NULL,
+          override_reason text,
+          before_state jsonb NOT NULL,
+          after_state jsonb,
+          result text NOT NULL,
+          failure text,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          completed_at timestamptz
+        );
+        CREATE INDEX IF NOT EXISTS sync_reconciliation_audit_source_idx
+          ON sync_reconciliation_audit (source_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS sync_reconciliation_role_policy (
+          role_name text PRIMARY KEY,
+          can_normal_sync boolean NOT NULL DEFAULT false,
+          can_apply_reconciliation boolean NOT NULL DEFAULT false,
+          can_repair_source_root boolean NOT NULL DEFAULT false,
+          can_hard_purge boolean NOT NULL DEFAULT false,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        INSERT INTO sync_reconciliation_role_policy
+          (role_name, can_normal_sync, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
+        VALUES
+          ('gbrain_normal_sync', true, false, false, false),
+          ('gbrain_reconciliation_apply', false, true, false, false),
+          ('gbrain_source_repair', false, false, true, false),
+          ('gbrain_hard_purge', false, false, false, true)
+        ON CONFLICT (role_name) DO UPDATE SET
+          can_normal_sync = EXCLUDED.can_normal_sync,
+          can_apply_reconciliation = EXCLUDED.can_apply_reconciliation,
+          can_repair_source_root = EXCLUDED.can_repair_source_root,
+          can_hard_purge = EXCLUDED.can_hard_purge;
+      `,
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
