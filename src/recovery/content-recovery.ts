@@ -3,16 +3,56 @@ import { realpathSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 
+export const RECOVERY_SCHEMA_VERSION = 'recovery_v3_pre_rehearsal_1';
+
 export const MANIFEST_COLUMNS = [
-  'run_id','source_id','source_uuid','slug','source_path','type','title','pre_delete_identity_class','pre_delete_evidence_kind','pre_delete_content_hash','pre_delete_page_version_id','pre_delete_updated_at','pre_delete_export_commit','live_present','live_page_id','live_version','live_content_hash','live_updated_at','live_source_id','post_incident_identity_class','post_incident_write','conflict_class','restore_action','restore_source','confidence','gap_code','notes',
+  'run_id','batch_id','source_id','source_uuid','slug','source_path','type','title','pre_delete_identity_class','pre_delete_evidence_kind','pre_delete_content_hash','pre_delete_page_version_id','pre_delete_updated_at','pre_delete_export_commit','recovery_payload_hash','payload_bundle_hash','approval_hash','tool_commit','target_identity','allowlist_hash','live_present','live_page_id','live_version','live_content_hash','live_updated_at','live_source_id','post_incident_identity_class','post_incident_write','conflict_class','restore_action','restore_source','confidence','gap_code','notes',
 ] as const;
 
 export type ManifestColumn = typeof MANIFEST_COLUMNS[number];
 export type ManifestRow = Record<ManifestColumn, string>;
+export type RecoveryPayload = {
+  source_id: string;
+  source_uuid: string;
+  slug: string;
+  source_path: string;
+  type: string;
+  title: string;
+  compiled_truth: string;
+  frontmatter: unknown;
+  timeline?: string;
+  pre_delete_export_commit: string;
+};
+export type RecoveryPayloadBundle = {
+  schema_version: 'recovery_payload_bundle_v1';
+  run_id: string;
+  payloads: Record<string, RecoveryPayload>;
+};
+export type ApprovalArtifact = {
+  schema_version: 'recovery_approval_v1';
+  run_id: string;
+  batch_id: string;
+  manifest_hash: string;
+  payload_bundle_hash: string;
+  row_action_hash: string;
+  tool_commit: string;
+  target_identity: string;
+  allowlist_hash: string;
+  approved_at: string;
+  expires_at: string;
+  signer: string;
+  signature: string;
+};
 export type ManifestInput = {
-  predelete: Array<Partial<ManifestRow> & { compiled_truth?: string }>;
+  predelete: Array<Partial<ManifestRow> & { compiled_truth?: string; frontmatter?: unknown; timeline?: string }>;
   live: Array<Partial<ManifestRow> & { compiled_truth?: string }>;
   gaps?: Array<Partial<ManifestRow>>;
+  batchId?: string;
+  payloadBundleHash?: string;
+  approvalHash?: string;
+  toolCommit?: string;
+  targetIdentity?: string;
+  allowlistHash?: string;
 };
 export type Allowlist = {
   allowed_worktrees: Record<string, { realpath: string; immutable_base_commit: string; branch: string }>;
@@ -32,6 +72,7 @@ type PageRow = {
   type: string;
   title: string;
   compiled_truth: string;
+  timeline?: string;
   frontmatter: unknown;
   content_hash: string | null;
   generation: number;
@@ -69,26 +110,89 @@ function rowKey(row: Partial<ManifestRow>): string {
   return `${row.source_id ?? ''}\u0000${row.slug ?? ''}\u0000${row.pre_delete_identity_class ?? ''}\u0000${row.pre_delete_content_hash ?? ''}`;
 }
 
+function sourceSlug(row: Partial<ManifestRow>): string {
+  return `${row.source_id ?? ''}\u0000${row.slug ?? ''}`;
+}
+
+function isSha256(value: string): boolean {
+  return /^[a-f0-9]{64}$/.test(value);
+}
+
 function boolString(value: unknown): string {
   if (value === true || value === 'true') return 'true';
   if (value === false || value === 'false') return 'false';
   return '';
 }
 
+export function payloadHash(payload: RecoveryPayload): string {
+  return sha256(canonicalJson({ ...payload, compiled_truth: normalizeContent(payload.compiled_truth) }));
+}
+
+export function createRecoveryPayloadBundle(runId: string, rows: Array<Partial<ManifestRow> & { compiled_truth?: string; frontmatter?: unknown; timeline?: string }>): RecoveryPayloadBundle {
+  const payloads: Record<string, RecoveryPayload> = {};
+  for (const row of rows) {
+    if (!row.compiled_truth) continue;
+    const payload: RecoveryPayload = {
+      source_id: String(row.source_id ?? ''),
+      source_uuid: String(row.source_uuid ?? ''),
+      slug: String(row.slug ?? ''),
+      source_path: String(row.source_path ?? ''),
+      type: String(row.type ?? 'note'),
+      title: String(row.title ?? row.slug ?? ''),
+      compiled_truth: normalizeContent(row.compiled_truth),
+      frontmatter: row.frontmatter ?? {},
+      timeline: row.timeline ?? '',
+      pre_delete_export_commit: String(row.pre_delete_export_commit ?? ''),
+    };
+    payloads[payloadHash(payload)] = payload;
+  }
+  return { schema_version: 'recovery_payload_bundle_v1', run_id: runId, payloads };
+}
+
+export function payloadBundleHash(bundle: RecoveryPayloadBundle): string {
+  return sha256(canonicalJson(bundle));
+}
+
+export function manifestHash(rows: ManifestRow[]): string {
+  // Approval hashes bind to the manifest but cannot include themselves.
+  // Keep the committed CSV shape while zeroing the approval field for the binding hash.
+  return sha256(toCsv(rows.map(row => ({ ...row, approval_hash: '' }))));
+}
+
+export function rowActionHash(rows: ManifestRow[]): string {
+  return sha256(canonicalJson(rows.map(row => ({ run_id: row.run_id, batch_id: row.batch_id, source_id: row.source_id, slug: row.slug, action: row.restore_action, payload_hash: row.recovery_payload_hash })).sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)))));
+}
+
+export function approvalHash(approval: ApprovalArtifact): string {
+  return sha256(canonicalJson(approval));
+}
+
 export function buildManifest(input: ManifestInput, runId: string): ManifestRow[] {
   const liveBySourceSlug = new Map<string, Partial<ManifestRow> & { compiled_truth?: string }>();
   for (const live of input.live ?? []) liveBySourceSlug.set(`${live.source_id ?? ''}\u0000${live.slug ?? ''}`, live);
+  const bundle = createRecoveryPayloadBundle(runId, input.predelete ?? []);
+  const computedPayloadBundleHash = input.payloadBundleHash || payloadBundleHash(bundle);
 
   const rows: ManifestRow[] = [];
-  const seenIdentity = new Map<string, number>();
   for (const pre of input.predelete ?? []) {
     const row = emptyRow();
     row.run_id = runId;
+    row.batch_id = input.batchId ?? row.batch_id;
+    row.payload_bundle_hash = computedPayloadBundleHash;
+    row.approval_hash = input.approvalHash ?? row.approval_hash;
+    row.tool_commit = input.toolCommit ?? row.tool_commit;
+    row.target_identity = input.targetIdentity ?? row.target_identity;
+    row.allowlist_hash = input.allowlistHash ?? row.allowlist_hash;
     for (const key of MANIFEST_COLUMNS) {
       const value = pre[key];
       if (value != null) row[key] = String(value);
     }
-    if (!row.pre_delete_content_hash && pre.compiled_truth) row.pre_delete_content_hash = contentHash(pre.compiled_truth);
+    if (pre.compiled_truth) {
+      row.pre_delete_content_hash ||= contentHash(pre.compiled_truth);
+      const payload = createRecoveryPayloadBundle(runId, [pre]).payloads;
+      row.recovery_payload_hash ||= Object.keys(payload)[0] ?? '';
+      row.restore_source ||= 'recovery_payload_bundle_v1';
+    }
     if (!row.pre_delete_identity_class) row.pre_delete_identity_class = classifyIdentity(row);
     const live = liveBySourceSlug.get(`${row.source_id}\u0000${row.slug}`);
     row.live_present = live ? 'true' : 'false';
@@ -101,14 +205,22 @@ export function buildManifest(input: ManifestInput, runId: string): ManifestRow[
       row.live_source_id = String(live.live_source_id ?? live.source_id ?? '');
       row.post_incident_write = boolString(live.post_incident_write) || row.post_incident_write;
     }
-    row.conflict_class = classifyConflict(row, seenIdentity);
-    row.restore_action = chooseRestoreAction(row);
     rows.push(row);
+  }
+
+  const duplicateGroups = new Set<string>();
+  const counts = new Map<string, number>();
+  for (const row of rows) counts.set(sourceSlug(row), (counts.get(sourceSlug(row)) ?? 0) + 1);
+  for (const [key, count] of counts) if (key !== '\u0000' && count > 1) duplicateGroups.add(key);
+  for (const row of rows) {
+    row.conflict_class = classifyConflict(row, duplicateGroups);
+    row.restore_action = chooseRestoreAction(row);
   }
 
   for (const gap of input.gaps ?? []) {
     const row = emptyRow();
     row.run_id = runId;
+    row.batch_id = input.batchId ?? '';
     for (const key of MANIFEST_COLUMNS) {
       const value = gap[key];
       if (value != null) row[key] = String(value);
@@ -119,23 +231,18 @@ export function buildManifest(input: ManifestInput, runId: string): ManifestRow[
     rows.push(row);
   }
 
-  return rows.sort((a, b) => rowKey(a).localeCompare(rowKey(b)));
+  return rows.sort((a, b) => rowKey(a).localeCompare(rowKey(b)) || a.title.localeCompare(b.title));
 }
 
 export function classifyIdentity(row: ManifestRow): string {
-  const hasSource = Boolean(row.source_id || row.source_uuid);
-  const hasHashOrVersion = Boolean(row.pre_delete_content_hash || row.pre_delete_page_version_id);
-  if (hasSource && row.slug && hasHashOrVersion) return 'exact_predelete';
-  if (row.slug && row.pre_delete_content_hash) return 'strong_probable';
+  if (row.source_id && row.source_uuid && row.slug && row.pre_delete_content_hash && row.recovery_payload_hash && row.pre_delete_export_commit) return 'exact_predelete';
+  if (row.slug && row.pre_delete_content_hash && row.recovery_payload_hash) return 'strong_probable';
   if (row.slug || row.pre_delete_content_hash || row.source_path) return 'weak_probable';
   return 'unrecoverable_gap';
 }
 
-function classifyConflict(row: ManifestRow, seenIdentity: Map<string, number>): string {
-  const sourceSlug = `${row.source_id}\u0000${row.slug}`;
-  const count = seenIdentity.get(sourceSlug) ?? 0;
-  seenIdentity.set(sourceSlug, count + 1);
-  if (count > 0) return 'duplicate_source_slug';
+function classifyConflict(row: ManifestRow, duplicateGroups: Set<string>): string {
+  if (duplicateGroups.has(sourceSlug(row))) return 'duplicate_source_slug';
   if (row.live_present === 'true' && row.live_content_hash && row.pre_delete_content_hash && row.live_content_hash !== row.pre_delete_content_hash) return 'hash_divergence';
   if (row.live_present === 'true' && row.live_source_id && row.source_id && row.live_source_id !== row.source_id) return 'source_identity_collision';
   return 'none';
@@ -147,29 +254,62 @@ function chooseRestoreAction(row: ManifestRow): string {
   if (row.pre_delete_identity_class !== 'exact_predelete') return 'quarantine_probable';
   if (row.post_incident_write === 'true') return 'skip_live_newer';
   if (row.live_present === 'false') return 'add_exact';
-  if (row.live_present === 'true') {
-    if (row.live_content_hash && row.pre_delete_content_hash && row.live_content_hash !== row.pre_delete_content_hash) return 'skip_live_newer';
-    return 'merge_exact';
-  }
+  if (row.live_present === 'true') return 'merge_exact';
   return 'quarantine_probable';
 }
 
+const ENUMS = {
+  pre_delete_identity_class: new Set(['exact_predelete', 'strong_probable', 'weak_probable', 'unrecoverable_gap']),
+  restore_action: new Set(['add_exact', 'merge_exact', 'skip_live_newer', 'quarantine_conflict', 'quarantine_probable', 'unrecoverable']),
+  conflict_class: new Set(['none', 'duplicate_source_slug', 'hash_divergence', 'source_identity_collision']),
+  live_present: new Set(['true', 'false']),
+  post_incident_write: new Set(['', 'true', 'false']),
+};
+
 export function validateManifest(rows: ManifestRow[]): string[] {
   const errors: string[] = [];
+  if (rows.length === 0) errors.push('manifest is empty');
+  const runIds = new Set(rows.map(row => row.run_id));
+  if (runIds.size !== 1 || runIds.has('')) errors.push('manifest must contain exactly one non-empty run_id');
   const seen = new Set<string>();
+  const groups = new Map<string, ManifestRow[]>();
   rows.forEach((row, i) => {
     for (const col of MANIFEST_COLUMNS) if (!(col in row)) errors.push(`row ${i + 1}: missing column ${col}`);
+    for (const col of ['pre_delete_content_hash', 'recovery_payload_hash', 'payload_bundle_hash', 'approval_hash', 'allowlist_hash'] as const) {
+      if (row[col] && !isSha256(row[col])) errors.push(`row ${i + 1}: malformed sha256 ${col}`);
+    }
     const key = `${row.run_id}\u0000${row.source_id}\u0000${row.slug}\u0000${row.pre_delete_content_hash}`;
     if (seen.has(key)) errors.push(`row ${i + 1}: duplicate manifest identity`);
     seen.add(key);
+    groups.set(sourceSlug(row), [...(groups.get(sourceSlug(row)) ?? []), row]);
+    if (!ENUMS.pre_delete_identity_class.has(row.pre_delete_identity_class)) errors.push(`row ${i + 1}: unknown identity class ${row.pre_delete_identity_class}`);
+    if (!ENUMS.restore_action.has(row.restore_action)) errors.push(`row ${i + 1}: unknown restore action ${row.restore_action}`);
+    if (!ENUMS.conflict_class.has(row.conflict_class || 'none')) errors.push(`row ${i + 1}: unknown conflict class ${row.conflict_class}`);
+    if (row.live_present && !ENUMS.live_present.has(row.live_present)) errors.push(`row ${i + 1}: unknown live_present ${row.live_present}`);
+    if (!ENUMS.post_incident_write.has(row.post_incident_write)) errors.push(`row ${i + 1}: unknown post_incident_write ${row.post_incident_write}`);
     if (row.pre_delete_identity_class === 'exact_predelete') {
-      if (!row.source_id && !row.source_uuid) errors.push(`row ${i + 1}: exact_predelete missing source identity`);
+      if (!row.source_id) errors.push(`row ${i + 1}: exact_predelete missing source_id`);
+      if (!row.source_uuid) errors.push(`row ${i + 1}: exact_predelete missing source_uuid`);
       if (!row.slug) errors.push(`row ${i + 1}: exact_predelete missing slug`);
-      if (!row.pre_delete_content_hash && !row.pre_delete_page_version_id) errors.push(`row ${i + 1}: exact_predelete missing hash or version evidence`);
+      if (!row.pre_delete_content_hash) errors.push(`row ${i + 1}: exact_predelete missing verified content hash`);
+      if (!row.recovery_payload_hash) errors.push(`row ${i + 1}: exact_predelete missing authenticated payload`);
+      if (!row.pre_delete_export_commit) errors.push(`row ${i + 1}: exact_predelete missing export commit`);
+    }
+    if (['add_exact', 'merge_exact'].includes(row.restore_action)) {
+      for (const col of ['run_id','batch_id','source_id','source_uuid','slug','pre_delete_content_hash','recovery_payload_hash','payload_bundle_hash','approval_hash','tool_commit','target_identity','allowlist_hash'] as const) {
+        if (!row[col]) errors.push(`row ${i + 1}: ${row.restore_action} missing ${col}`);
+      }
+    }
+    if (row.restore_action === 'merge_exact') {
+      for (const col of ['live_page_id','live_version','live_content_hash'] as const) if (!row[col]) errors.push(`row ${i + 1}: merge_exact missing CAS field ${col}`);
     }
     if (row.pre_delete_identity_class !== 'exact_predelete' && ['add_exact', 'merge_exact'].includes(row.restore_action)) errors.push(`row ${i + 1}: non-exact row cannot use exact restore action`);
     if (row.post_incident_write === 'true' && ['add_exact', 'merge_exact'].includes(row.restore_action)) errors.push(`row ${i + 1}: post-incident write protected from automatic mutation`);
   });
+  for (const [key, group] of groups) {
+    if (key === '\u0000' || group.length <= 1) continue;
+    for (const row of group) if (row.restore_action !== 'quarantine_conflict') errors.push(`row ${rows.indexOf(row) + 1}: duplicate group member not quarantined`);
+  }
   return errors;
 }
 
@@ -196,10 +336,16 @@ export function parseCsv(text: string): ManifestRow[] {
   }
   if (cell || row.length) { row.push(cell); records.push(row); }
   const [header, ...body] = records.filter(r => r.length > 1 || r[0] !== '');
-  if (!header) return [];
+  if (!header) throw new Error('manifest CSV is empty');
+  const missing = MANIFEST_COLUMNS.filter(col => !header.includes(col));
   const unknown = header.filter(h => !MANIFEST_COLUMNS.includes(h as ManifestColumn));
+  const duplicates = header.filter((h, i) => header.indexOf(h) !== i);
+  if (missing.length) throw new Error(`missing manifest columns: ${missing.join(', ')}`);
   if (unknown.length) throw new Error(`unknown manifest columns: ${unknown.join(', ')}`);
+  if (duplicates.length) throw new Error(`duplicate manifest columns: ${[...new Set(duplicates)].join(', ')}`);
+  if (body.length === 0) throw new Error('manifest CSV has no rows');
   return body.map(values => {
+    if (values.length !== MANIFEST_COLUMNS.length) throw new Error(`manifest row has ${values.length} columns, expected ${MANIFEST_COLUMNS.length}`);
     const out = emptyRow();
     header.forEach((h, i) => { out[h as ManifestColumn] = values[i] ?? ''; });
     return out;
@@ -210,51 +356,84 @@ export function loadAllowlist(path: string): Allowlist {
   return JSON.parse(readFileSync(path, 'utf8')) as Allowlist;
 }
 
-export function assertAllowlistedEnvironment(allowlist: Allowlist, opts: { worktree: string; expectedHead: string; env?: NodeJS.ProcessEnv }): { worktreeRealpath: string; dbIdentity: string } {
+export function assertAllowlistedEnvironment(allowlist: Allowlist, opts: { worktree: string; expectedHead: string; actualHead: string; branch: string; env?: NodeJS.ProcessEnv; targetIdentity?: string; clean?: boolean }): { worktreeRealpath: string; dbIdentity: string } {
   const env = opts.env ?? process.env;
   const worktreeRealpath = realpathSync(opts.worktree);
-  const allowed = Object.values(allowlist.allowed_worktrees).find(w => w.realpath === worktreeRealpath);
-  if (!allowed) throw new Error(`worktree realpath is not allowlisted: ${worktreeRealpath}`);
+  const allowed = Object.values(allowlist.allowed_worktrees).find(w => w.realpath === worktreeRealpath && w.branch === opts.branch);
+  if (!allowed) throw new Error(`worktree realpath and branch are not allowlisted: ${worktreeRealpath} ${opts.branch}`);
   if (allowed.immutable_base_commit !== opts.expectedHead) throw new Error(`base commit mismatch: expected ${allowed.immutable_base_commit}, got ${opts.expectedHead}`);
-  const db = allowlist.reserved_isolated_database_targets[0];
+  if (opts.actualHead !== opts.expectedHead) throw new Error(`actual git HEAD mismatch: expected ${opts.expectedHead}, got ${opts.actualHead}`);
+  if (opts.clean === false) throw new Error('worktree must be clean before rehearsal tooling mutates data');
+  if (!env.GBRAIN_HOME) throw new Error('GBRAIN_HOME is required for recovery tooling');
+  for (const blocked of ['DATABASE_URL', 'POSTGRES_URL', 'SUPABASE_DB_URL']) if (env[blocked]) throw new Error(`${blocked} must be unset for recovery tooling`);
+  const homeRealpath = realpathSync(resolve(env.GBRAIN_HOME));
+  const matches = allowlist.reserved_isolated_database_targets.filter(db => db.realpath === homeRealpath && (!opts.targetIdentity || db.identity_fingerprint === opts.targetIdentity));
+  if (matches.length !== 1) throw new Error(`expected exactly one allowlisted isolated database target, found ${matches.length}`);
+  const db = matches[0];
   for (const key of db.environment_contract.unset) if (env[key]) throw new Error(`${key} must be unset for recovery tooling`);
-  for (const [key, value] of Object.entries(db.environment_contract.set)) {
-    if (env[key] !== value) throw new Error(`${key} must equal allowlisted value`);
-  }
-  const homeRealpath = realpathSync(resolve(env.GBRAIN_HOME ?? ''));
-  if (homeRealpath !== db.realpath) throw new Error(`GBRAIN_HOME realpath mismatch: ${homeRealpath}`);
+  for (const [key, value] of Object.entries(db.environment_contract.set)) if (env[key] !== value) throw new Error(`${key} must equal allowlisted value`);
   const dbIdentity = db.identity_fingerprint;
   if (!allowlist.explicitly_permitted_fixture_identities.includes(dbIdentity)) throw new Error(`database identity not permitted: ${dbIdentity}`);
   return { worktreeRealpath, dbIdentity };
 }
 
-export async function ensureRecoveryTables(engine: BrainEngine): Promise<void> {
-  await engine.executeRaw(`
+export function recoverySchemaSql(): string {
+  return `
+    CREATE TABLE IF NOT EXISTS recovery_schema_version (
+      version TEXT PRIMARY KEY,
+      installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    INSERT INTO recovery_schema_version (version) VALUES ('${RECOVERY_SCHEMA_VERSION}') ON CONFLICT DO NOTHING;
+    CREATE TABLE IF NOT EXISTS recovery_audit_batches (
+      run_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL,
+      payload_bundle_hash TEXT NOT NULL,
+      approval_hash TEXT NOT NULL,
+      tool_commit TEXT NOT NULL,
+      target_identity TEXT NOT NULL,
+      allowlist_hash TEXT NOT NULL,
+      batch_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY(run_id, batch_id)
+    );
     CREATE TABLE IF NOT EXISTS recovery_audit_rows (
       id SERIAL PRIMARY KEY,
       run_id TEXT NOT NULL,
       batch_id TEXT NOT NULL,
       row_key TEXT NOT NULL,
       action TEXT NOT NULL,
-      before_image JSONB NOT NULL DEFAULT '{}'::jsonb,
-      after_image JSONB NOT NULL DEFAULT '{}'::jsonb,
-      cas_predicate JSONB NOT NULL DEFAULT '{}'::jsonb,
+      canonical_manifest_row JSONB NOT NULL,
+      before_image JSONB NOT NULL,
+      after_image JSONB NOT NULL,
+      cas_predicate JSONB NOT NULL,
+      payload_hash TEXT NOT NULL,
       approval_hash TEXT NOT NULL,
       row_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE(run_id, batch_id, row_key)
-    )
-  `);
-  await engine.executeRaw(`
+    );
     CREATE TABLE IF NOT EXISTS recovery_apply_state (
       run_id TEXT NOT NULL,
       batch_id TEXT NOT NULL,
       row_key TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('committed','rolled_back')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY(run_id, batch_id, row_key)
-    )
-  `);
+    );
+  `;
+}
+
+export async function provisionRecoverySchema(engine: BrainEngine): Promise<void> {
+  for (const statement of recoverySchemaSql().split(';').map(s => s.trim()).filter(Boolean)) {
+    await engine.executeRaw(statement);
+  }
+}
+
+async function assertRecoverySchema(engine: BrainEngine): Promise<void> {
+  const rows = await engine.executeRaw<{ version: string }>('SELECT version FROM recovery_schema_version WHERE version = $1', [RECOVERY_SCHEMA_VERSION]);
+  if (rows.length !== 1) throw new Error(`recovery schema ${RECOVERY_SCHEMA_VERSION} is not provisioned`);
 }
 
 async function getSource(engine: BrainEngine, sourceId: string): Promise<SourceRow | null> {
@@ -263,7 +442,7 @@ async function getSource(engine: BrainEngine, sourceId: string): Promise<SourceR
 }
 
 async function getPage(engine: BrainEngine, sourceId: string, slug: string): Promise<PageRow | null> {
-  const rows = await engine.executeRaw<PageRow>(`SELECT id, source_id, slug, type, title, compiled_truth, frontmatter, content_hash, generation, updated_at, source_path, deleted_at FROM pages WHERE source_id = $1 AND slug = $2`, [sourceId, slug]);
+  const rows = await engine.executeRaw<PageRow>(`SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at FROM pages WHERE source_id = $1 AND slug = $2`, [sourceId, slug]);
   return rows[0] ?? null;
 }
 
@@ -275,17 +454,48 @@ function sourceUuid(source: SourceRow | null): string {
 
 function assertSourceIdentity(row: ManifestRow, source: SourceRow | null): void {
   if (!source) throw new Error(`missing source identity for ${row.source_id}`);
-  if (row.source_uuid && sourceUuid(source) && row.source_uuid !== sourceUuid(source)) throw new Error(`source uuid mismatch for ${row.source_id}`);
-  if (row.source_path && source.local_path && row.source_path !== source.local_path) throw new Error(`source path mismatch for ${row.source_id}`);
+  const uuid = sourceUuid(source);
+  if (!uuid) throw new Error(`database source uuid missing for ${row.source_id}`);
+  if (row.source_uuid !== uuid) throw new Error(`source uuid mismatch for ${row.source_id}`);
+  if (!source.local_path) throw new Error(`database source path missing for ${row.source_id}`);
+  if (row.source_path && row.source_path !== source.local_path) throw new Error(`source path mismatch for ${row.source_id}`);
+}
+
+function assertPayload(row: ManifestRow, bundle: RecoveryPayloadBundle): RecoveryPayload {
+  if (bundle.schema_version !== 'recovery_payload_bundle_v1') throw new Error('unsupported payload bundle schema');
+  if (bundle.run_id !== row.run_id) throw new Error(`payload bundle run mismatch for ${row.source_id}/${row.slug}`);
+  if (payloadBundleHash(bundle) !== row.payload_bundle_hash) throw new Error(`payload bundle hash mismatch for ${row.source_id}/${row.slug}`);
+  const payload = bundle.payloads[row.recovery_payload_hash];
+  if (!payload) throw new Error(`missing recovery payload for ${row.source_id}/${row.slug}`);
+  if (payloadHash(payload) !== row.recovery_payload_hash) throw new Error(`recovery payload hash mismatch for ${row.source_id}/${row.slug}`);
+  if (payload.source_id !== row.source_id || payload.source_uuid !== row.source_uuid || payload.slug !== row.slug) throw new Error(`recovery payload identity mismatch for ${row.source_id}/${row.slug}`);
+  if (contentHash(payload.compiled_truth) !== row.pre_delete_content_hash) throw new Error(`recovery payload content hash mismatch for ${row.source_id}/${row.slug}`);
+  return payload;
+}
+
+function assertApproval(rows: ManifestRow[], opts: ApplyOptions): void {
+  if (!opts.approval) throw new Error('signed approval artifact is required');
+  const approval = opts.approval;
+  const hash = approvalHash(approval);
+  if (hash !== opts.approvalHash) throw new Error('approval hash argument does not match approval artifact');
+  if (rows.some(row => row.approval_hash !== hash)) throw new Error('manifest row approval hash is not bound to approval artifact');
+  if (approval.batch_id !== opts.batchId) throw new Error('approval batch mismatch');
+  if (approval.run_id !== rows[0]?.run_id) throw new Error('approval run mismatch');
+  if (approval.manifest_hash !== manifestHash(rows)) throw new Error('approval manifest hash mismatch');
+  if (approval.payload_bundle_hash !== payloadBundleHash(opts.payloadBundle)) throw new Error('approval payload bundle hash mismatch');
+  if (approval.row_action_hash !== rowActionHash(rows)) throw new Error('approval row action hash mismatch');
+  if (new Date(approval.expires_at).getTime() <= Date.now()) throw new Error('approval artifact is expired');
+  if (!approval.signer || !approval.signature) throw new Error('approval artifact missing signer or signature');
 }
 
 export type ApplyResult = { applied: number; skipped: number; quarantined: number; dryRun: boolean; auditRows: number };
-export type ApplyOptions = { batchId: string; approvalHash: string; dryRun?: boolean; crashAfter?: 'before_audit' | 'after_before_image' | 'after_cas' | 'after_mutation_before_commit' | 'after_commit_before_jsonl' };
+export type ApplyOptions = { batchId: string; approvalHash: string; approval: ApprovalArtifact; payloadBundle: RecoveryPayloadBundle; dryRun?: boolean; crashAfter?: 'before_audit' | 'after_before_image' | 'after_cas' | 'after_mutation_before_commit' | 'after_commit_before_jsonl' };
 
 export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestRow[], opts: ApplyOptions): Promise<ApplyResult> {
-  await ensureRecoveryTables(engine);
+  await assertRecoverySchema(engine);
   const errors = validateManifest(rows);
   if (errors.length) throw new Error(errors.join('\n'));
+  assertApproval(rows, opts);
   const result: ApplyResult = { applied: 0, skipped: 0, quarantined: 0, dryRun: Boolean(opts.dryRun), auditRows: 0 };
   if (opts.crashAfter === 'before_audit') throw new Error('fault injection: before_audit');
   if (opts.dryRun) {
@@ -299,49 +509,69 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
 
   await engine.executeRaw('BEGIN');
   try {
+    const batchHash = sha256(canonicalJson({ manifest_hash: manifestHash(rows), payload_bundle_hash: payloadBundleHash(opts.payloadBundle), approval_hash: opts.approvalHash, row_action_hash: rowActionHash(rows) }));
+    await engine.executeRaw(`
+      INSERT INTO recovery_audit_batches (run_id, batch_id, manifest_hash, payload_bundle_hash, approval_hash, tool_commit, target_identity, allowlist_hash, batch_hash)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      ON CONFLICT (run_id, batch_id) DO NOTHING
+    `, [rows[0].run_id, opts.batchId, manifestHash(rows), payloadBundleHash(opts.payloadBundle), opts.approvalHash, opts.approval.tool_commit, opts.approval.target_identity, opts.approval.allowlist_hash, batchHash]);
+
     for (const row of rows) {
-      const rowKeyValue = sha256(`${row.run_id}:${row.source_id}:${row.slug}:${row.pre_delete_content_hash}`);
+      const rowKeyValue = sha256(canonicalJson({ run_id: row.run_id, batch_id: row.batch_id, source_id: row.source_id, slug: row.slug, payload_hash: row.recovery_payload_hash, action: row.restore_action }));
       if (!['add_exact', 'merge_exact'].includes(row.restore_action)) {
         if (row.restore_action.startsWith('quarantine')) result.quarantined++;
         else result.skipped++;
         continue;
       }
+      const payload = assertPayload(row, opts.payloadBundle);
       const source = await getSource(engine, row.source_id);
       assertSourceIdentity(row, source);
       const live = await getPage(engine, row.source_id, row.slug);
       if (opts.crashAfter === 'after_before_image') throw new Error('fault injection: after_before_image');
-      if (row.restore_action === 'add_exact' && live) throw new Error(`CAS failed: expected absence for ${row.source_id}/${row.slug}`);
-      if (row.restore_action === 'merge_exact') {
-        if (!live) throw new Error(`CAS failed: expected live row for ${row.source_id}/${row.slug}`);
-        if (row.live_page_id && String(live.id) !== row.live_page_id) throw new Error(`CAS failed: page id mismatch for ${row.source_id}/${row.slug}`);
-        if (row.live_version && String(live.generation) !== row.live_version) throw new Error(`CAS failed: version mismatch for ${row.source_id}/${row.slug}`);
-        if (row.live_content_hash && (live.content_hash ?? contentHash(live.compiled_truth)) !== row.live_content_hash) throw new Error(`CAS failed: content hash mismatch for ${row.source_id}/${row.slug}`);
-      }
       if (opts.crashAfter === 'after_cas') throw new Error('fault injection: after_cas');
       const beforeImage = live ? canonicalJson(live) : '{}';
       let afterRows: PageRow[];
+      let cas: Record<string, unknown>;
       if (row.restore_action === 'add_exact') {
+        cas = { source_id: row.source_id, slug: row.slug, expected_absent: true };
         afterRows = await engine.executeRaw<PageRow>(`
-          INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, content_hash, frontmatter)
-          VALUES ($1, $2, $3, 'markdown', $4, $5, $6, '{}'::jsonb)
-          RETURNING id, source_id, slug, type, title, compiled_truth, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
-        `, [row.source_id, row.slug, row.type || 'note', row.title || row.slug, row.notes || '', row.pre_delete_content_hash]);
+          INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, content_hash, frontmatter)
+          SELECT $1, $2, $3, 'markdown', $4, $5, $6, $7, $8::jsonb
+          WHERE NOT EXISTS (SELECT 1 FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL)
+          RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
+        `, [row.source_id, row.slug, payload.type || 'note', payload.title || row.slug, normalizeContent(payload.compiled_truth), payload.timeline ?? '', row.pre_delete_content_hash, canonicalJson(payload.frontmatter ?? {})]);
       } else {
+        if (!live) throw new Error(`CAS failed: expected live row for ${row.source_id}/${row.slug}`);
+        cas = { id: Number(row.live_page_id), source_id: row.source_id, slug: row.slug, generation: Number(row.live_version), content_hash: row.live_content_hash, deleted_at: null };
         afterRows = await engine.executeRaw<PageRow>(`
           UPDATE pages
-             SET frontmatter = CASE WHEN frontmatter = '{}'::jsonb THEN '{}'::jsonb ELSE frontmatter END
-           WHERE source_id = $1 AND slug = $2
-           RETURNING id, source_id, slug, type, title, compiled_truth, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
-        `, [row.source_id, row.slug]);
+             SET type = $6,
+                 title = $7,
+                 compiled_truth = $8,
+                 timeline = $9,
+                 content_hash = $10,
+                 frontmatter = $11::jsonb,
+                 deleted_at = NULL
+           WHERE id = $1
+             AND source_id = $2
+             AND slug = $3
+             AND generation = $4
+             AND content_hash = $5
+             AND deleted_at IS NULL
+           RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
+        `, [Number(row.live_page_id), row.source_id, row.slug, Number(row.live_version), row.live_content_hash, payload.type || row.type || 'note', payload.title || row.title || row.slug, normalizeContent(payload.compiled_truth), payload.timeline ?? '', row.pre_delete_content_hash, canonicalJson(payload.frontmatter ?? {})]);
       }
-      const afterImage = canonicalJson(afterRows[0] ?? {});
+      if (afterRows.length !== 1) throw new Error(`CAS failed: expected exactly one affected row for ${row.source_id}/${row.slug}, got ${afterRows.length}`);
+      if (contentHash(afterRows[0].compiled_truth) !== row.pre_delete_content_hash || afterRows[0].content_hash !== row.pre_delete_content_hash) throw new Error(`stored content hash verification failed for ${row.source_id}/${row.slug}`);
+      const afterImage = canonicalJson(afterRows[0]);
       if (opts.crashAfter === 'after_mutation_before_commit') throw new Error('fault injection: after_mutation_before_commit');
-      const cas = canonicalJson({ source_id: row.source_id, slug: row.slug, live_page_id: row.live_page_id, live_version: row.live_version, live_content_hash: row.live_content_hash });
-      const rowHash = sha256(`${beforeImage}\n${afterImage}\n${cas}`);
+      const casJson = canonicalJson(cas);
+      const manifestRowJson = canonicalJson(row);
+      const rowHash = sha256(canonicalJson({ manifest_row: row, before_image: JSON.parse(beforeImage), after_image: JSON.parse(afterImage), cas, payload_hash: row.recovery_payload_hash, approval_hash: opts.approvalHash, batch_hash: batchHash }));
       await engine.executeRaw(`
-        INSERT INTO recovery_audit_rows (run_id, batch_id, row_key, action, before_image, after_image, cas_predicate, approval_hash, row_hash)
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9)
-      `, [row.run_id, opts.batchId, rowKeyValue, row.restore_action, beforeImage, afterImage, cas, opts.approvalHash, rowHash]);
+        INSERT INTO recovery_audit_rows (run_id, batch_id, row_key, action, canonical_manifest_row, before_image, after_image, cas_predicate, payload_hash, approval_hash, row_hash)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11)
+      `, [row.run_id, opts.batchId, rowKeyValue, row.restore_action, manifestRowJson, beforeImage, afterImage, casJson, row.recovery_payload_hash, opts.approvalHash, rowHash]);
       await engine.executeRaw(`
         INSERT INTO recovery_apply_state (run_id, batch_id, row_key, status)
         VALUES ($1, $2, $3, 'committed')
@@ -358,29 +588,56 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
   return result;
 }
 
+function assertLiveEqualsAfter(live: PageRow, after: Record<string, unknown>): void {
+  const expectedHash = String(after.content_hash ?? '');
+  if (String(live.id) !== String(after.id)) throw new Error(`rollback CAS failed: page id changed for ${after.source_id}/${after.slug}`);
+  if (String(live.generation) !== String(after.generation)) throw new Error(`rollback CAS failed: generation changed for ${after.source_id}/${after.slug}`);
+  if ((live.content_hash ?? '') !== expectedHash) throw new Error(`rollback CAS failed: content hash changed for ${after.source_id}/${after.slug}`);
+  if (contentHash(live.compiled_truth) !== expectedHash) throw new Error(`rollback CAS failed: body changed for ${after.source_id}/${after.slug}`);
+}
+
 export async function rollbackBatch(engine: BrainEngine, runId: string, batchId: string): Promise<{ rolledBack: number }> {
-  await ensureRecoveryTables(engine);
-  const audits = await engine.executeRaw<{ row_key: string; action: string; before_image: Record<string, unknown>; after_image: Record<string, unknown> }>(
-    'SELECT row_key, action, before_image, after_image FROM recovery_audit_rows WHERE run_id = $1 AND batch_id = $2 ORDER BY id DESC',
+  await assertRecoverySchema(engine);
+  const audits = await engine.executeRaw<{ row_key: string; action: string; before_image: Record<string, unknown>; after_image: Record<string, unknown>; row_hash: string }>(
+    'SELECT row_key, action, before_image, after_image, row_hash FROM recovery_audit_rows WHERE run_id = $1 AND batch_id = $2 ORDER BY id DESC',
     [runId, batchId],
   );
   let rolledBack = 0;
   await engine.executeRaw('BEGIN');
   try {
     for (const audit of audits) {
+      const state = await engine.executeRaw<{ status: string }>('SELECT status FROM recovery_apply_state WHERE run_id = $1 AND batch_id = $2 AND row_key = $3', [runId, batchId, audit.row_key]);
+      if (state[0]?.status === 'rolled_back') continue;
       const after = audit.after_image ?? {};
       const before = audit.before_image ?? {};
       const sourceId = String(after.source_id ?? before.source_id ?? '');
       const slug = String(after.slug ?? before.slug ?? '');
       const live = await getPage(engine, sourceId, slug);
       if (!live) throw new Error(`rollback CAS failed: live row missing for ${sourceId}/${slug}`);
-      if (String(live.id) !== String(after.id)) throw new Error(`rollback CAS failed: page id changed for ${sourceId}/${slug}`);
+      assertLiveEqualsAfter(live, after);
+      let changed: PageRow[] = [];
       if (audit.action === 'add_exact') {
-        await engine.executeRaw('DELETE FROM pages WHERE id = $1', [live.id]);
+        changed = await engine.executeRaw<PageRow>(`
+          UPDATE pages SET deleted_at = now()
+           WHERE id = $1 AND generation = $2 AND content_hash = $3 AND deleted_at IS NULL
+           RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
+        `, [live.id, Number(after.generation), String(after.content_hash)]);
       } else if (audit.action === 'merge_exact') {
-        await engine.executeRaw('UPDATE pages SET frontmatter = $2::jsonb WHERE id = $1', [live.id, canonicalJson(before.frontmatter ?? {})]);
+        changed = await engine.executeRaw<PageRow>(`
+          UPDATE pages
+             SET type = $4,
+                 title = $5,
+                 compiled_truth = $6,
+                 timeline = $7,
+                 content_hash = $8,
+                 frontmatter = $9::jsonb,
+                 deleted_at = $10::timestamptz
+           WHERE id = $1 AND generation = $2 AND content_hash = $3 AND deleted_at IS NULL
+           RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
+        `, [live.id, Number(after.generation), String(after.content_hash), before.type, before.title, before.compiled_truth, before.timeline ?? '', before.content_hash, canonicalJson(before.frontmatter ?? {}), before.deleted_at ?? null]);
       }
-      await engine.executeRaw('UPDATE recovery_apply_state SET status = $3 WHERE run_id = $1 AND batch_id = $2 AND row_key = $4', [runId, batchId, 'rolled_back', audit.row_key]);
+      if (changed.length !== 1) throw new Error(`rollback CAS failed: expected exactly one affected row for ${sourceId}/${slug}, got ${changed.length}`);
+      await engine.executeRaw('UPDATE recovery_apply_state SET status = $3, updated_at = now() WHERE run_id = $1 AND batch_id = $2 AND row_key = $4', [runId, batchId, 'rolled_back', audit.row_key]);
       rolledBack++;
     }
     await engine.executeRaw('COMMIT');
@@ -391,33 +648,59 @@ export async function rollbackBatch(engine: BrainEngine, runId: string, batchId:
   return { rolledBack };
 }
 
-export async function verifyRecovery(engine: BrainEngine, rows: ManifestRow[], runId: string): Promise<Record<string, { pass: boolean; count: number }>> {
-  await ensureRecoveryTables(engine);
-  const approved = new Set(rows.filter(r => ['add_exact', 'merge_exact'].includes(r.restore_action)).map(r => `${r.source_id}\u0000${r.slug}`));
-  const changed = await engine.executeRaw<{ source_id: string; slug: string }>(`
-    SELECT DISTINCT (after_image->>'source_id') AS source_id, (after_image->>'slug') AS slug
-      FROM recovery_audit_rows WHERE run_id = $1
-  `, [runId]);
-  const outside = changed.filter(r => !approved.has(`${r.source_id}\u0000${r.slug}`)).length;
-  const auditCount = await engine.executeRaw<{ count: string }>('SELECT COUNT(*)::text AS count FROM recovery_audit_rows WHERE run_id = $1', [runId]);
-  const deleteCount = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM recovery_audit_rows WHERE run_id = $1 AND action LIKE 'delete%'`, [runId]);
+export async function verifyRecovery(engine: BrainEngine, rows: ManifestRow[], runId: string, opts: { batchId: string; payloadBundle: RecoveryPayloadBundle; approvalHash: string }): Promise<Record<string, { pass: boolean; count: number }>> {
+  await assertRecoverySchema(engine);
+  const approvedRows = rows.filter(r => ['add_exact', 'merge_exact'].includes(r.restore_action));
+  const auditRows = await engine.executeRaw<{ row_key: string; action: string; after_image: Record<string, unknown>; payload_hash: string; approval_hash: string; row_hash: string }>(
+    'SELECT row_key, action, after_image, payload_hash, approval_hash, row_hash FROM recovery_audit_rows WHERE run_id = $1 AND batch_id = $2',
+    [runId, opts.batchId],
+  );
+  let storedHashFailures = 0;
+  for (const row of approvedRows) {
+    const page = await getPage(engine, row.source_id, row.slug);
+    if (!page || page.content_hash !== row.pre_delete_content_hash || contentHash(page.compiled_truth) !== row.pre_delete_content_hash) storedHashFailures++;
+  }
+  const approvedKeys = new Set(approvedRows.map(r => `${r.source_id}\u0000${r.slug}`));
+  const auditedKeys = new Set(auditRows.map(r => `${String(r.after_image.source_id)}\u0000${String(r.after_image.slug)}`));
+  const outOfManifest = [...auditedKeys].filter(k => !approvedKeys.has(k)).length;
+  const missingAudit = [...approvedKeys].filter(k => !auditedKeys.has(k)).length;
+  const quarantinedAudits = auditRows.filter(a => rows.find(r => r.source_id === a.after_image.source_id && r.slug === a.after_image.slug)?.restore_action.startsWith('quarantine')).length;
+  const deleteCount = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM recovery_audit_rows WHERE run_id = $1 AND batch_id = $2 AND action LIKE 'delete%'`, [runId, opts.batchId]);
+  const hardDeletes = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM recovery_audit_rows a WHERE run_id = $1 AND batch_id = $2 AND action = 'add_exact' AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = ((a.after_image->>'id')::int))`, [runId, opts.batchId]);
   const dupes = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM (SELECT source_id, slug FROM pages WHERE deleted_at IS NULL GROUP BY source_id, slug HAVING COUNT(*) > 1) d`);
-  const quarantinedLanded = changed.filter(r => rows.find(row => row.source_id === r.source_id && row.slug === r.slug)?.restore_action.startsWith('quarantine')).length;
+  const approvalMismatches = auditRows.filter(a => a.approval_hash !== opts.approvalHash || !opts.payloadBundle.payloads[a.payload_hash]).length;
+  const derivedChanged = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM content_chunks c JOIN recovery_audit_rows a ON c.page_id = ((a.after_image->>'id')::int) WHERE a.run_id = $1 AND a.batch_id = $2`, [runId, opts.batchId]);
   return {
-    manifest_approved_identities_only: { pass: outside === 0, count: outside },
-    audit_completeness: { pass: Number(auditCount[0]?.count ?? 0) >= changed.length, count: Number(auditCount[0]?.count ?? 0) },
-    delete_denial: { pass: Number(deleteCount[0]?.count ?? 0) === 0, count: Number(deleteCount[0]?.count ?? 0) },
+    manifest_approved_identities_only: { pass: outOfManifest === 0, count: outOfManifest },
+    audit_completeness: { pass: auditRows.length === approvedRows.length && missingAudit === 0, count: auditRows.length },
+    stored_content_hashes: { pass: storedHashFailures === 0, count: storedHashFailures },
+    approval_and_payload_binding: { pass: approvalMismatches === 0, count: approvalMismatches },
+    delete_denial: { pass: Number(deleteCount[0]?.count ?? 0) === 0 && Number(hardDeletes[0]?.count ?? 0) === 0, count: Number(deleteCount[0]?.count ?? 0) + Number(hardDeletes[0]?.count ?? 0) },
     duplicate_identity: { pass: Number(dupes[0]?.count ?? 0) === 0, count: Number(dupes[0]?.count ?? 0) },
-    quarantine_handling: { pass: quarantinedLanded === 0, count: quarantinedLanded },
-    no_derived_data_mutation: { pass: true, count: 0 },
+    quarantine_handling: { pass: quarantinedAudits === 0, count: quarantinedAudits },
+    no_derived_data_mutation: { pass: Number(derivedChanged[0]?.count ?? 0) === 0, count: Number(derivedChanged[0]?.count ?? 0) },
   };
 }
 
 export function gapLedger(rows: ManifestRow[]): string {
-  const counts = new Map<string, number>();
+  const lines = ['# Recovery Manifest Gap Ledger', '', '| identity | gap_code | missing_evidence | class | confidence | disposition | owner_status | mutation_blocked |', '|---|---|---|---|---:|---|---|---|'];
+  let mutationBlocked = 0;
   for (const row of rows) {
-    const code = row.gap_code || (row.pre_delete_identity_class === 'unrecoverable_gap' ? 'unrecoverable_gap' : row.pre_delete_identity_class);
-    counts.set(code, (counts.get(code) ?? 0) + 1);
+    const blocked = !['add_exact', 'merge_exact'].includes(row.restore_action);
+    if (blocked) mutationBlocked++;
+    const missing = [
+      !row.source_id && 'source_id',
+      !row.source_uuid && 'source_uuid',
+      !row.slug && 'slug',
+      !row.pre_delete_content_hash && 'content_hash',
+      !row.recovery_payload_hash && 'payload',
+      !row.live_page_id && row.restore_action === 'merge_exact' && 'live_page_id',
+      !row.live_version && row.restore_action === 'merge_exact' && 'live_version',
+    ].filter(Boolean).join(';') || 'none';
+    const identity = `${row.source_id || '?'}:${row.slug || '?'}`;
+    const code = row.gap_code || (row.conflict_class !== 'none' ? row.conflict_class : row.pre_delete_identity_class);
+    lines.push(`| ${identity} | ${code} | ${missing} | ${row.pre_delete_identity_class} | ${row.confidence || '0'} | ${row.restore_action} | ${row.notes || 'unassigned/open'} | ${blocked ? 'true' : 'false'} |`);
   }
-  return ['# Recovery Manifest Gap Ledger', '', '| gap_code | count |', '|---|---:|', ...[...counts.entries()].sort().map(([k, v]) => `| ${k} | ${v} |`), ''].join('\n');
+  lines.push('', `Totals: manifest_rows=${rows.length}; mutable=${rows.length - mutationBlocked}; mutation_blocked=${mutationBlocked}`);
+  return lines.join('\n') + '\n';
 }
