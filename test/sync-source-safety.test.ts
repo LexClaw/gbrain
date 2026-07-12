@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
@@ -376,6 +376,28 @@ describe('sync source safety guard', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
+  });
+
+  test('apply recovery rejects zero and negative lease seconds before touching state', async () => {
+    await grantCurrentUser('can_apply_reconciliation');
+    await expect(recoverAbandonedSyncReconciliation(engine, 'missing-op', { leaseSeconds: 0 }))
+      .rejects.toThrow(/positive integer/);
+    await expect(recoverAbandonedSyncReconciliation(engine, 'missing-op', { leaseSeconds: -1 }))
+      .rejects.toThrow(/positive integer/);
+  });
+
+  test('DBA guard SQL pins lease, generation, OID, ACL, and owner-role posture invariants', () => {
+    const sql = readFileSync(join(import.meta.dir, '..', 'artifacts/dba/sync-reconciliation-roles.sql'), 'utf8');
+    const capabilities = readFileSync(join(import.meta.dir, '..', 'src/commands/capabilities.ts'), 'utf8');
+    expect(sql).toContain("OLD.applying_claimed_at < now() - interval '15 minutes'");
+    expect(sql).toContain('NEW.registration_generation <> OLD.registration_generation + 1');
+    expect(sql).toContain('sources.registration_generation may only change with local_path');
+    expect(sql).toContain('SET search_path = pg_catalog, public');
+    expect(sql).toContain('NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS');
+    expect(capabilities).toContain("'public.sync_reconciliation_audit'::regclass");
+    expect(capabilities).toContain("'public.gbrain_guard_sync_reconciliation_audit_update()'::regprocedure");
+    expect(capabilities).toContain('apply_before_state_forbidden');
+    expect(capabilities).toContain('owner_memberships_ok');
   });
 
   test('gbrain capabilities exposes exact sync-safety tokens from schema support', async () => {

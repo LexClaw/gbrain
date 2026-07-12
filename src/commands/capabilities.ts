@@ -18,6 +18,11 @@ const RECONCILIATION_ROLES = [
   'gbrain_hard_purge',
 ] as const;
 
+const RECONCILIATION_CLUSTER_ROLES = [
+  'gbrain_reconciliation_owner',
+  ...RECONCILIATION_ROLES,
+] as const;
+
 const REQUIRED_SCHEMA_VERSION = 118;
 
 const EXPECTED_POLICY: Record<string, Record<string, boolean>> = {
@@ -111,77 +116,131 @@ async function roleFacts(engine: BrainEngine): Promise<Record<string, unknown>[]
   return await engine.executeRaw<Record<string, unknown>>(
     `SELECT r.rolname AS role_name,
             r.rolcanlogin AS can_login,
+            r.rolsuper AS superuser,
+            r.rolcreatedb AS createdb,
+            r.rolcreaterole AS createrole,
+            r.rolreplication AS replication,
+            r.rolbypassrls AS bypassrls,
             pg_has_role(current_user, r.oid, 'USAGE') AS reachable_from_current_user
      FROM pg_roles r
      WHERE r.rolname = ANY($1)
      ORDER BY r.rolname`,
-    [RECONCILIATION_ROLES],
+    [RECONCILIATION_CLUSTER_ROLES],
   );
 }
 
 async function postgresSafetyChecks(engine: BrainEngine): Promise<Record<string, unknown>> {
-  if (engine.kind !== 'postgres') return { role_privileges_ok: false, guard_ok: false };
+  if (engine.kind !== 'postgres') return { role_privileges_ok: false, guard_ok: false, owner_role_ok: false };
   const rows = await engine.executeRaw<Record<string, unknown>>(
-    `WITH guard AS (
+    `WITH oid AS (
+       SELECT
+         'public.sync_reconciliation_audit'::regclass AS audit_rel,
+         'public.sync_reconciliation_role_policy'::regclass AS policy_rel,
+         'public.sources'::regclass AS sources_rel,
+         'public.pages'::regclass AS pages_rel,
+         'public.gbrain_guard_sync_reconciliation_audit_update()'::regprocedure AS audit_fn,
+         'public.gbrain_guard_sources_generation_update()'::regprocedure AS sources_fn
+     ), guard AS (
        SELECT
          EXISTS (
-           SELECT 1 FROM pg_trigger t
-           JOIN pg_class c ON c.oid = t.tgrelid
-           WHERE c.relname = 'sync_reconciliation_audit'
+           SELECT 1 FROM pg_trigger t, oid
+           WHERE t.tgrelid = oid.audit_rel
+             AND t.tgfoid = oid.audit_fn
              AND t.tgname = 'gbrain_guard_sync_reconciliation_audit_update'
              AND NOT t.tgisinternal
              AND t.tgenabled = 'O'
          ) AS audit_trigger_exists,
          EXISTS (
-           SELECT 1 FROM pg_proc p
-           JOIN pg_namespace n ON n.oid = p.pronamespace
-           JOIN pg_roles owner ON owner.oid = p.proowner
-           WHERE n.nspname = 'public'
-             AND p.proname = 'gbrain_guard_sync_reconciliation_audit_update'
-             AND owner.rolname = 'gbrain_reconciliation_owner'
-         ) AS audit_function_owned,
-         EXISTS (
-           SELECT 1 FROM pg_trigger t
-           JOIN pg_class c ON c.oid = t.tgrelid
-           WHERE c.relname = 'sources'
+           SELECT 1 FROM pg_trigger t, oid
+           WHERE t.tgrelid = oid.sources_rel
+             AND t.tgfoid = oid.sources_fn
              AND t.tgname = 'gbrain_guard_sources_generation_update'
              AND NOT t.tgisinternal
              AND t.tgenabled = 'O'
          ) AS sources_trigger_exists,
          EXISTS (
-           SELECT 1 FROM pg_class c
-           JOIN pg_roles owner ON owner.oid = c.relowner
-           WHERE c.relname IN ('sync_reconciliation_audit', 'sources')
-           GROUP BY owner.rolname
-           HAVING owner.rolname = 'gbrain_reconciliation_owner' AND COUNT(*) = 2
+           SELECT 1 FROM pg_proc p
+           JOIN pg_roles owner ON owner.oid = p.proowner
+           JOIN pg_language lang ON lang.oid = p.prolang
+           JOIN oid ON p.oid = oid.audit_fn
+           WHERE owner.rolname = 'gbrain_reconciliation_owner'
+             AND lang.lanname = 'plpgsql'
+             AND p.prosecdef IS FALSE
+             AND p.proconfig @> ARRAY['search_path=pg_catalog, public']::text[]
+         ) AS audit_function_posture_ok,
+         EXISTS (
+           SELECT 1 FROM pg_proc p
+           JOIN pg_roles owner ON owner.oid = p.proowner
+           JOIN pg_language lang ON lang.oid = p.prolang
+           JOIN oid ON p.oid = oid.sources_fn
+           WHERE owner.rolname = 'gbrain_reconciliation_owner'
+             AND lang.lanname = 'plpgsql'
+             AND p.prosecdef IS FALSE
+             AND p.proconfig @> ARRAY['search_path=pg_catalog, public']::text[]
+         ) AS sources_function_posture_ok,
+         NOT EXISTS (
+           SELECT 1
+           FROM pg_class c, oid
+           WHERE c.oid IN (oid.audit_rel, oid.policy_rel, oid.sources_rel)
+             AND c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = 'gbrain_reconciliation_owner')
          ) AS guarded_tables_owned
      ), privs AS (
        SELECT
-         has_table_privilege('gbrain_normal_sync', 'pages', 'SELECT') AS normal_pages_select,
-         has_table_privilege('gbrain_normal_sync', 'pages', 'INSERT') AS normal_pages_insert,
-         has_column_privilege('gbrain_normal_sync', 'sources', 'local_path', 'UPDATE') = false AS normal_sources_local_path_forbidden,
-         has_column_privilege('gbrain_reconciliation_approve', 'sync_reconciliation_audit', 'authorized', 'UPDATE') AS approve_authorized_update,
-         has_column_privilege('gbrain_reconciliation_approve', 'sync_reconciliation_audit', 'result', 'UPDATE') AS approve_result_update,
-         has_table_privilege('gbrain_reconciliation_approve', 'pages', 'UPDATE') = false AS approve_pages_update_forbidden,
-         has_column_privilege('gbrain_reconciliation_apply', 'pages', 'deleted_at', 'UPDATE') AS apply_pages_deleted_update,
-         has_column_privilege('gbrain_reconciliation_apply', 'sync_reconciliation_audit', 'authorized', 'UPDATE') = false AS apply_authorized_forbidden,
-         has_column_privilege('gbrain_reconciliation_apply', 'sync_reconciliation_audit', 'manifest_hash', 'UPDATE') = false AS apply_manifest_hash_forbidden,
-         has_column_privilege('gbrain_source_repair', 'sources', 'local_path', 'UPDATE') AS repair_sources_local_path_update,
-         has_column_privilege('gbrain_source_repair', 'sources', 'registration_generation', 'UPDATE') AS repair_sources_generation_update,
-         has_table_privilege('gbrain_source_repair', 'pages', 'UPDATE') = false AS repair_pages_update_forbidden,
-         has_table_privilege('gbrain_hard_purge', 'pages', 'DELETE') AS purge_pages_delete,
-         has_column_privilege('gbrain_hard_purge', 'sync_reconciliation_audit', 'manifest_hash', 'UPDATE') = false AS purge_manifest_hash_forbidden
+         has_table_privilege('gbrain_normal_sync', oid.pages_rel, 'SELECT') AS normal_pages_select,
+         has_table_privilege('gbrain_normal_sync', oid.pages_rel, 'INSERT') AS normal_pages_insert,
+         has_column_privilege('gbrain_normal_sync', oid.sources_rel, 'local_path', 'UPDATE') = false AS normal_sources_local_path_forbidden,
+         has_column_privilege('gbrain_normal_sync', oid.pages_rel, 'deleted_at', 'UPDATE') = false AS normal_pages_deleted_forbidden,
+         has_column_privilege('gbrain_reconciliation_approve', oid.audit_rel, 'authorized', 'UPDATE') AS approve_authorized_update,
+         has_column_privilege('gbrain_reconciliation_approve', oid.audit_rel, 'result', 'UPDATE') AS approve_result_update,
+         has_table_privilege('gbrain_reconciliation_approve', oid.pages_rel, 'UPDATE') = false AS approve_pages_update_forbidden,
+         has_table_privilege('gbrain_reconciliation_approve', oid.policy_rel, 'UPDATE') = false AS approve_policy_update_forbidden,
+         has_column_privilege('gbrain_reconciliation_apply', oid.pages_rel, 'deleted_at', 'UPDATE') AS apply_pages_deleted_update,
+         has_column_privilege('gbrain_reconciliation_apply', oid.audit_rel, 'authorized', 'UPDATE') = false AS apply_authorized_forbidden,
+         has_column_privilege('gbrain_reconciliation_apply', oid.audit_rel, 'manifest_hash', 'UPDATE') = false AS apply_manifest_hash_forbidden,
+         has_column_privilege('gbrain_reconciliation_apply', oid.audit_rel, 'before_state', 'UPDATE') = false AS apply_before_state_forbidden,
+         has_column_privilege('gbrain_reconciliation_apply', oid.audit_rel, 'source_id', 'UPDATE') = false AS apply_source_id_forbidden,
+         has_table_privilege('gbrain_reconciliation_apply', oid.sources_rel, 'UPDATE') = false AS apply_sources_update_forbidden,
+         has_column_privilege('gbrain_source_repair', oid.sources_rel, 'local_path', 'UPDATE') AS repair_sources_local_path_update,
+         has_column_privilege('gbrain_source_repair', oid.sources_rel, 'registration_generation', 'UPDATE') AS repair_sources_generation_update,
+         has_table_privilege('gbrain_source_repair', oid.pages_rel, 'UPDATE') = false AS repair_pages_update_forbidden,
+         has_table_privilege('gbrain_source_repair', oid.audit_rel, 'UPDATE') = false AS repair_audit_update_forbidden,
+         has_table_privilege('gbrain_hard_purge', oid.pages_rel, 'DELETE') AS purge_pages_delete,
+         has_column_privilege('gbrain_hard_purge', oid.audit_rel, 'manifest_hash', 'UPDATE') = false AS purge_manifest_hash_forbidden,
+         has_table_privilege('gbrain_hard_purge', oid.sources_rel, 'UPDATE') = false AS purge_sources_update_forbidden
+       FROM oid
+     ), role_posture AS (
+       SELECT
+         bool_and(NOT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls) AS cluster_roles_normalized,
+         EXISTS (
+           SELECT 1 FROM pg_roles
+           WHERE rolname = 'gbrain_reconciliation_owner'
+             AND NOT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls
+         ) AS owner_flags_ok,
+         NOT EXISTS (
+           SELECT 1
+           FROM pg_auth_members m
+           JOIN pg_roles owner ON owner.oid = m.roleid OR owner.oid = m.member
+           WHERE owner.rolname = 'gbrain_reconciliation_owner'
+         ) AS owner_memberships_ok
+       FROM pg_roles
+       WHERE rolname = ANY($1)
      )
      SELECT *,
-       (audit_trigger_exists AND audit_function_owned AND sources_trigger_exists AND guarded_tables_owned) AS guard_ok,
+       (audit_trigger_exists AND sources_trigger_exists AND audit_function_posture_ok
+        AND sources_function_posture_ok AND guarded_tables_owned) AS guard_ok,
        (normal_pages_select AND normal_pages_insert AND normal_sources_local_path_forbidden
-        AND approve_authorized_update AND approve_result_update AND approve_pages_update_forbidden
+        AND normal_pages_deleted_forbidden AND approve_authorized_update AND approve_result_update
+        AND approve_pages_update_forbidden AND approve_policy_update_forbidden
         AND apply_pages_deleted_update AND apply_authorized_forbidden AND apply_manifest_hash_forbidden
-        AND repair_sources_local_path_update AND repair_sources_generation_update AND repair_pages_update_forbidden
-        AND purge_pages_delete AND purge_manifest_hash_forbidden) AS role_privileges_ok
-     FROM guard, privs`,
+        AND apply_before_state_forbidden AND apply_source_id_forbidden AND apply_sources_update_forbidden
+        AND repair_sources_local_path_update AND repair_sources_generation_update
+        AND repair_pages_update_forbidden AND repair_audit_update_forbidden
+        AND purge_pages_delete AND purge_manifest_hash_forbidden AND purge_sources_update_forbidden) AS role_privileges_ok,
+       (cluster_roles_normalized AND owner_flags_ok AND owner_memberships_ok) AS owner_role_ok
+     FROM guard, privs, role_posture`,
+    [RECONCILIATION_CLUSTER_ROLES],
   );
-  return rows[0] ?? { role_privileges_ok: false, guard_ok: false };
+  return rows[0] ?? { role_privileges_ok: false, guard_ok: false, owner_role_ok: false };
 }
 
 export async function getCapabilities(engine: BrainEngine): Promise<Record<string, unknown>> {
@@ -200,10 +259,12 @@ export async function getCapabilities(engine: BrainEngine): Promise<Record<strin
 
   const pgRoleNames = new Set(pgRoles.map((row) => String(row.role_name)));
   const hasPgRoles = engine.kind === 'postgres' && RECONCILIATION_ROLES.every((role) => pgRoleNames.has(role));
+  const hasClusterRoles = engine.kind === 'postgres' && RECONCILIATION_CLUSTER_ROLES.every((role) => pgRoleNames.has(role));
   const hasExactPolicyRows = policyIsExact(policies);
   const hasExactSchema = hasAudit && hasPolicy && hasGeneration && hasApplyAttempt && hasApplyLease && hasApproveColumn && configVersion === REQUIRED_SCHEMA_VERSION;
   const guardsOk = postgresChecks.guard_ok === true;
   const rolePrivilegesOk = postgresChecks.role_privileges_ok === true;
+  const ownerRoleOk = postgresChecks.owner_role_ok === true;
   const identity = await checked(
     diagnostics,
     'identity',
@@ -212,7 +273,7 @@ export async function getCapabilities(engine: BrainEngine): Promise<Record<strin
     ))[0] ?? { current_user: 'unknown', session_user: 'unknown' },
     { current_user: 'unknown', session_user: 'unknown' },
   );
-  const supported = hasExactSchema && hasPgRoles && hasExactPolicyRows && guardsOk && rolePrivilegesOk && diagnostics.length === 0;
+  const supported = hasExactSchema && hasClusterRoles && hasExactPolicyRows && guardsOk && rolePrivilegesOk && ownerRoleOk && diagnostics.length === 0;
 
   return {
     schema_version: 1,

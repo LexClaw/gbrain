@@ -938,15 +938,18 @@ export async function recoverAbandonedSyncReconciliation(
   await assertReconciliationSchema(engine);
   await assertRoleCapability(engine, 'can_apply_reconciliation');
   const leaseSeconds = opts.leaseSeconds ?? SYNC_RECONCILE_APPLY_LEASE_SECONDS;
+  if (!Number.isInteger(leaseSeconds) || leaseSeconds <= 0) {
+    throw new Error('Unsafe reconciliation: apply recovery lease must be a positive integer number of seconds.');
+  }
   const rows = await engine.executeRaw<{ operation_id: string }>(
     `UPDATE sync_reconciliation_audit
      SET result = 'failed', failure = 'abandoned applying lease recovered', completed_at = now()
      WHERE operation_id = $1
        AND result = 'applying'
        AND applying_claimed_at IS NOT NULL
-       AND applying_claimed_at < now() - ($2::text || ' seconds')::interval
+       AND applying_claimed_at < now() - ($2::int * interval '1 second')
      RETURNING operation_id`,
-    [operationId, String(leaseSeconds)],
+    [operationId, leaseSeconds],
   );
   return rows.length === 1;
 }

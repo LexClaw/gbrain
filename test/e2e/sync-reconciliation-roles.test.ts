@@ -125,7 +125,12 @@ async function expectDenied(promise: Promise<unknown>) {
     await promise;
   } catch (error) {
     const message = String(error);
-    if (message.includes('permission denied') || message.includes('is not allowed')) return;
+    if (
+      message.includes('permission denied') ||
+      message.includes('is not allowed') ||
+      message.includes('must increment') ||
+      message.includes('may only change')
+    ) return;
   }
   throw new Error('expected permission denial');
 }
@@ -223,6 +228,56 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
     await sql.unsafe('RESET ROLE');
   }, 30_000);
 
+  test('source repair role rejects generation-only and non-plus-one root tamper', async () => {
+    await sql.unsafe('RESET ROLE');
+    await sql`UPDATE sources SET local_path = '/tmp/base-root', registration_generation = 10 WHERE id = 'default'`;
+    await sql.unsafe('SET ROLE gbrain_source_repair');
+    await expectDenied(sql`UPDATE sources SET registration_generation = registration_generation + 1 WHERE id = 'default'`);
+    await expectDenied(sql`UPDATE sources SET local_path = '/tmp/bad-root', registration_generation = registration_generation + 2 WHERE id = 'default'`);
+    await sql`UPDATE sources SET local_path = '/tmp/good-root', registration_generation = registration_generation + 1 WHERE id = 'default'`;
+    await sql.unsafe('RESET ROLE');
+  }, 30_000);
+
+  test('apply role cannot recover applying rows before the fixed DB lease', async () => {
+    await sql.unsafe('RESET ROLE');
+    await sql.unsafe(`DELETE FROM sync_reconciliation_audit WHERE operation_id = 'role-test-lease'`);
+    await sql`
+      INSERT INTO sync_reconciliation_audit
+        (operation_id, manifest_hash, source_id, actor, role, reason, candidate_count, population_count,
+         threshold_absolute, threshold_percentage, authorized, before_state, result, applying_claimed_at)
+      VALUES
+        ('role-test-lease', 'hash', 'default', 'owner', 'owner', 'incremental_deleted', 1, 10,
+         100, 0.25, true, '{}'::jsonb, 'applying', now())
+    `;
+    await sql.unsafe('SET ROLE gbrain_reconciliation_apply');
+    await expectDenied(sql`
+      UPDATE sync_reconciliation_audit
+      SET result = 'failed', failure = 'abandoned applying lease recovered', completed_at = now()
+      WHERE operation_id = 'role-test-lease'
+    `);
+    await sql.unsafe('RESET ROLE');
+  }, 30_000);
+
+  test('capability attestation rejects decoy schema, extra grants, and owner drift', async () => {
+    await sql.unsafe('RESET ROLE');
+    await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS sync_decoy`);
+    await sql.unsafe(`CREATE TABLE IF NOT EXISTS sync_decoy.sync_reconciliation_audit (id int)`);
+    await sql.unsafe(`GRANT UPDATE (manifest_hash) ON sync_reconciliation_audit TO gbrain_reconciliation_apply`);
+    let caps = await getCapabilities(engine) as any;
+    expect(caps.sync_safety.postgres_checks.role_privileges_ok).toBe(false);
+    await sql.unsafe(`REVOKE UPDATE (manifest_hash) ON sync_reconciliation_audit FROM gbrain_reconciliation_apply`);
+
+    await sql.unsafe(`ALTER ROLE gbrain_reconciliation_owner LOGIN`);
+    caps = await getCapabilities(engine) as any;
+    expect(caps.sync_safety.postgres_checks.owner_role_ok).toBe(false);
+    await sql.unsafe(`ALTER ROLE gbrain_reconciliation_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
+
+    caps = await getCapabilities(engine) as any;
+    expect(caps.sync_safety.postgres_checks.guard_ok).toBe(true);
+    expect(caps.sync_safety.postgres_checks.role_privileges_ok).toBe(true);
+    expect(caps.sync_safety.postgres_checks.owner_role_ok).toBe(true);
+  }, 30_000);
+
   test('capabilities reports PostgreSQL roles and current session facts', async () => {
     await sql.unsafe('RESET ROLE');
     const caps = await getCapabilities(engine) as any;
@@ -233,11 +288,13 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
     expect(caps.sync_safety.supported).toBe(true);
     expect(caps.sync_safety.postgres_checks.guard_ok).toBe(true);
     expect(caps.sync_safety.postgres_checks.role_privileges_ok).toBe(true);
+    expect(caps.sync_safety.postgres_checks.owner_role_ok).toBe(true);
     expect(caps.sync_safety.roles.map((row: any) => row.role_name).sort()).toEqual([
       'gbrain_hard_purge',
       'gbrain_normal_sync',
       'gbrain_reconciliation_apply',
       'gbrain_reconciliation_approve',
+      'gbrain_reconciliation_owner',
       'gbrain_source_repair',
     ]);
   });

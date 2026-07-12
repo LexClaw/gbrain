@@ -4,24 +4,31 @@
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_reconciliation_owner') THEN
-    CREATE ROLE gbrain_reconciliation_owner NOLOGIN;
+    CREATE ROLE gbrain_reconciliation_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_normal_sync') THEN
-    CREATE ROLE gbrain_normal_sync NOLOGIN;
+    CREATE ROLE gbrain_normal_sync NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_reconciliation_approve') THEN
-    CREATE ROLE gbrain_reconciliation_approve NOLOGIN;
+    CREATE ROLE gbrain_reconciliation_approve NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_reconciliation_apply') THEN
-    CREATE ROLE gbrain_reconciliation_apply NOLOGIN;
+    CREATE ROLE gbrain_reconciliation_apply NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_source_repair') THEN
-    CREATE ROLE gbrain_source_repair NOLOGIN;
+    CREATE ROLE gbrain_source_repair NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_hard_purge') THEN
-    CREATE ROLE gbrain_hard_purge NOLOGIN;
+    CREATE ROLE gbrain_hard_purge NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
   END IF;
 END $$;
+
+ALTER ROLE gbrain_reconciliation_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE gbrain_normal_sync NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE gbrain_reconciliation_approve NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE gbrain_reconciliation_apply NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE gbrain_source_repair NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE gbrain_hard_purge NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 
 GRANT USAGE ON SCHEMA public TO gbrain_normal_sync, gbrain_reconciliation_approve, gbrain_reconciliation_apply, gbrain_source_repair, gbrain_hard_purge;
 
@@ -57,6 +64,7 @@ GRANT UPDATE (after_state, result, completed_at) ON sync_reconciliation_audit TO
 CREATE OR REPLACE FUNCTION public.gbrain_guard_sync_reconciliation_audit_update()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF current_user = 'gbrain_reconciliation_approve' THEN
@@ -67,7 +75,15 @@ BEGIN
     IF OLD.result IN ('approved', 'failed') AND NEW.result = 'applying' AND OLD.authorized IS TRUE AND NEW.authorized IS TRUE THEN
       RETURN NEW;
     END IF;
-    IF OLD.result = 'applying' AND NEW.result IN ('applied', 'failed') AND NEW.authorized = OLD.authorized THEN
+    IF OLD.result = 'applying' AND NEW.result = 'applied' AND NEW.authorized = OLD.authorized THEN
+      RETURN NEW;
+    END IF;
+    IF OLD.result = 'applying' AND NEW.result = 'failed' AND NEW.authorized = OLD.authorized
+       AND NEW.failure IS DISTINCT FROM OLD.failure
+       AND (
+         NEW.failure IS DISTINCT FROM 'abandoned applying lease recovered'
+         OR OLD.applying_claimed_at < now() - interval '15 minutes'
+       ) THEN
       RETURN NEW;
     END IF;
   ELSIF current_user = 'gbrain_hard_purge' THEN
@@ -82,12 +98,15 @@ $$;
 CREATE OR REPLACE FUNCTION public.gbrain_guard_sources_generation_update()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF OLD.local_path IS DISTINCT FROM NEW.local_path THEN
-    IF NEW.registration_generation <= OLD.registration_generation THEN
-      RAISE EXCEPTION 'sources.local_path changes must increment registration_generation' USING ERRCODE = '23514';
+    IF NEW.registration_generation <> OLD.registration_generation + 1 THEN
+      RAISE EXCEPTION 'sources.local_path changes must increment registration_generation exactly once' USING ERRCODE = '23514';
     END IF;
+  ELSIF OLD.registration_generation IS DISTINCT FROM NEW.registration_generation THEN
+    RAISE EXCEPTION 'sources.registration_generation may only change with local_path' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
