@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { generateKeyPairSync } from 'crypto';
-import { mkdtempSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -311,5 +311,52 @@ describe('content recovery applicator', () => {
       expectedState: { schema_version: 'recovery_expected_state_v1', run_id: 'run-test', batch_id: 'b1', manifest_hash: manifestHash(approval.rows), payload_bundle_hash: payloadBundleHash(bundle), approval_hash: approval.approvalHashValue, expected_pages: [{ source_id: 'src-a', slug: 'alpha', content_hash: row.pre_delete_content_hash, action: 'add_exact' }], expected_audit_rows: 1 },
     });
     expect(acceptance.expected_state.pass).toBe(true);
+  });
+
+  test('multi-row apply is atomic when a later row fails CAS', async () => {
+    const live = await seedPage('live body', 'beta');
+    const predelete = [
+      { source_id: 'src-a', source_uuid: 'uuid-a', slug: 'alpha', source_path: '/isolated/source-a', type: 'note', title: 'Alpha', compiled_truth: 'Recovered alpha', frontmatter: {}, pre_delete_export_commit: 'export-sha' },
+      { source_id: 'src-a', source_uuid: 'uuid-a', slug: 'beta', source_path: '/isolated/source-a', type: 'note', title: 'Beta', compiled_truth: 'Recovered beta', frontmatter: {}, pre_delete_export_commit: 'export-sha' },
+    ];
+    const bundle = createRecoveryPayloadBundle('run-test', predelete);
+    const rows = buildManifest({ predelete, live: [], batchId: 'b1', payloadBundleHash: payloadBundleHash(bundle), toolCommit: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378', targetIdentity: 'isolated-db', allowlistHash: 'a'.repeat(64) }, 'run-test');
+    rows[1].restore_action = 'merge_exact';
+    rows[1].live_present = 'true';
+    rows[1].live_page_id = String(live.id);
+    rows[1].live_version = String(live.generation + 1);
+    rows[1].live_content_hash = live.hash;
+    const approval = approved(rows, bundle);
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY })).rejects.toThrow('CAS failed');
+    const pages = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM pages WHERE source_id='src-a' AND slug='alpha'`);
+    expect(pages[0]?.count ?? '0').toBe('0');
+  });
+
+  test('artifact bytes are deterministic across clean subprocesses and locales', async () => {
+    const inputPath = join(dir, 'manifest-input.json');
+    const outA = join(dir, 'manifest-a');
+    const outB = join(dir, 'manifest-b');
+    writeFileSync(inputPath, JSON.stringify({ predelete: [{ source_id: 'src-a', source_uuid: 'uuid-a', slug: 'alpha', source_path: '/isolated/source-a', type: 'note', title: 'Alpha', compiled_truth: 'Recovered body', frontmatter: { recovered: true }, pre_delete_export_commit: 'export-sha' }], live: [], batchId: 'b1', toolCommit: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378', targetIdentity: 'isolated-db', allowlistHash: 'a'.repeat(64) }));
+    const run = (out: string, locale: string) => Bun.spawnSync({ cmd: ['bun', 'run', 'src/cli.ts', 'recovery', 'manifest', '--run-id', 'run-test', '--input', inputPath, '--out-dir', out, '--json'], cwd: process.cwd(), env: { ...process.env, LC_ALL: locale, LANG: locale, NODE_ENV: 'test' } });
+    const a = run(outA, 'C');
+    const b = run(outB, 'en_US.UTF-8');
+    expect(a.exitCode).toBe(0);
+    expect(b.exitCode).toBe(0);
+    for (const name of ['manifest.csv', 'payload-bundle.json', 'gap-ledger.md']) {
+      expect(readFileSync(join(outA, name), 'utf8')).toBe(readFileSync(join(outB, name), 'utf8'));
+    }
+  });
+
+  test('CLI manifest writes atomic content-addressed receipt', async () => {
+    const inputPath = join(dir, 'manifest-input-receipt.json');
+    const outDir = join(dir, 'manifest-receipt');
+    const receiptDir = join(dir, 'receipts');
+    writeFileSync(inputPath, JSON.stringify({ predelete: [{ source_id: 'src-a', source_uuid: 'uuid-a', slug: 'alpha', source_path: '/isolated/source-a', type: 'note', title: 'Alpha', compiled_truth: 'Recovered body', frontmatter: {}, pre_delete_export_commit: 'export-sha' }], live: [], batchId: 'b1' }));
+    const proc = Bun.spawnSync({ cmd: ['bun', 'run', 'src/cli.ts', 'recovery', 'manifest', '--run-id', 'run-test', '--input', inputPath, '--out-dir', outDir, '--receipt-dir', receiptDir, '--json'], cwd: process.cwd(), env: { ...process.env, NODE_ENV: 'test' } });
+    expect(proc.exitCode).toBe(0);
+    const stdout = proc.stdout.toString();
+    const receiptPath = JSON.parse(stdout).receipt_path;
+    expect(existsSync(receiptPath)).toBe(true);
+    expect(readFileSync(receiptPath, 'utf8')).toContain('recovery_cli_receipt_v1');
   });
 });

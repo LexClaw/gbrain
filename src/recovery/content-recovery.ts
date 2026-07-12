@@ -109,6 +109,7 @@ export function contentHash(text: string): string {
 }
 
 export function canonicalJson(value: unknown): string {
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
@@ -660,6 +661,7 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
       if (opts.crashAfter === 'after_before_image') throw new Error('fault injection: after_before_image');
       if (opts.crashAfter === 'after_cas') throw new Error('fault injection: after_cas');
       const beforeImage = live ? canonicalJson(live) : '{}';
+      const beforeImageObj = JSON.parse(beforeImage);
       let afterRows: PageRow[];
       let cas: Record<string, unknown>;
       if (row.restore_action === 'add_exact') {
@@ -669,7 +671,7 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
           SELECT $1, $2, $3, 'markdown', $4, $5, $6, $7, $8::jsonb
           WHERE NOT EXISTS (SELECT 1 FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL)
           RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
-        `, [row.source_id, row.slug, payload.type || 'note', payload.title || row.slug, normalizeContent(payload.compiled_truth), payload.timeline ?? '', row.pre_delete_content_hash, canonicalJson(payload.frontmatter ?? {})]);
+        `, [row.source_id, row.slug, payload.type || 'note', payload.title || row.slug, normalizeContent(payload.compiled_truth), payload.timeline ?? '', row.pre_delete_content_hash, payload.frontmatter ?? {}]);
       } else {
         if (!live) throw new Error(`CAS failed: expected live row for ${row.source_id}/${row.slug}`);
         cas = { id: Number(row.live_page_id), source_id: row.source_id, slug: row.slug, generation: Number(row.live_version), content_hash: row.live_content_hash, deleted_at: null };
@@ -689,20 +691,19 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
              AND content_hash = $5
              AND deleted_at IS NULL
            RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
-        `, [Number(row.live_page_id), row.source_id, row.slug, Number(row.live_version), row.live_content_hash, payload.type || row.type || 'note', payload.title || row.title || row.slug, normalizeContent(payload.compiled_truth), payload.timeline ?? '', row.pre_delete_content_hash, canonicalJson(payload.frontmatter ?? {})]);
+        `, [Number(row.live_page_id), row.source_id, row.slug, Number(row.live_version), row.live_content_hash, payload.type || row.type || 'note', payload.title || row.title || row.slug, normalizeContent(payload.compiled_truth), payload.timeline ?? '', row.pre_delete_content_hash, payload.frontmatter ?? {}]);
       }
       if (afterRows.length !== 1) throw new Error(`CAS failed: expected exactly one affected row for ${row.source_id}/${row.slug}, got ${afterRows.length}`);
       if (contentHash(afterRows[0].compiled_truth) !== row.pre_delete_content_hash || afterRows[0].content_hash !== row.pre_delete_content_hash) throw new Error(`stored content hash verification failed for ${row.source_id}/${row.slug}`);
       const afterImage = canonicalJson(afterRows[0]);
+      const afterImageObj = JSON.parse(afterImage);
       if (opts.crashAfter === 'after_mutation_before_commit') throw new Error('fault injection: after_mutation_before_commit');
-      const casJson = canonicalJson(cas);
-      const manifestRowJson = canonicalJson(row);
-      const rowHash = sha256(canonicalJson({ manifest_row: row, before_image: JSON.parse(beforeImage), after_image: JSON.parse(afterImage), cas, payload_hash: row.recovery_payload_hash, approval_hash: opts.approvalHash, batch_hash: batchHash }));
+      const rowHash = sha256(canonicalJson({ manifest_row: row, before_image: beforeImageObj, after_image: afterImageObj, cas, payload_hash: row.recovery_payload_hash, approval_hash: opts.approvalHash, batch_hash: batchHash }));
       if (opts.crashAfter === 'audit_write_failure') throw new Error('fault injection: audit_write_failure');
       await engine.executeRaw(`
         INSERT INTO recovery_audit_rows (run_id, batch_id, row_key, action, canonical_manifest_row, before_image, after_image, cas_predicate, payload_hash, approval_hash, row_hash)
         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11)
-      `, [row.run_id, opts.batchId, rowKeyValue, row.restore_action, manifestRowJson, beforeImage, afterImage, casJson, row.recovery_payload_hash, opts.approvalHash, rowHash]);
+      `, [row.run_id, opts.batchId, rowKeyValue, row.restore_action, row, beforeImageObj, afterImageObj, cas, row.recovery_payload_hash, opts.approvalHash, rowHash]);
       await engine.executeRaw(`
         INSERT INTO recovery_apply_state (run_id, batch_id, row_key, status)
         VALUES ($1, $2, $3, 'committed')
@@ -768,7 +769,7 @@ export async function rollbackBatch(engine: BrainEngine, runId: string, batchId:
                  deleted_at = $10::timestamptz
            WHERE id = $1 AND generation = $2 AND content_hash = $3 AND deleted_at IS NULL
            RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
-        `, [live.id, Number(after.generation), String(after.content_hash), before.type, before.title, before.compiled_truth, before.timeline ?? '', before.content_hash, canonicalJson(before.frontmatter ?? {}), before.deleted_at ?? null]);
+        `, [live.id, Number(after.generation), String(after.content_hash), before.type, before.title, before.compiled_truth, before.timeline ?? '', before.content_hash, before.frontmatter ?? {}, before.deleted_at ?? null]);
       }
       if (changed.length !== 1) throw new Error(`rollback CAS failed: expected exactly one affected row for ${sourceId}/${slug}, got ${changed.length}`);
       await engine.executeRaw('UPDATE recovery_apply_state SET status = $3, updated_at = now() WHERE run_id = $1 AND batch_id = $2 AND row_key = $4', [runId, batchId, 'rolled_back', audit.row_key]);
