@@ -5243,7 +5243,6 @@ export const MIGRATIONS: Migration[] = [
     sql: '',
     sqlFor: {
       postgres: `
-        ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
         CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
           operation_id text PRIMARY KEY,
           manifest_hash text NOT NULL,
@@ -5292,7 +5291,6 @@ export const MIGRATIONS: Migration[] = [
         -- separately reviewed DBA bootstrap lifecycle.
       `,
       pglite: `
-        ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
         CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
           operation_id text PRIMARY KEY,
           manifest_hash text NOT NULL,
@@ -5335,6 +5333,36 @@ export const MIGRATIONS: Migration[] = [
           can_apply_reconciliation = EXCLUDED.can_apply_reconciliation,
           can_repair_source_root = EXCLUDED.can_repair_source_root,
           can_hard_purge = EXCLUDED.can_hard_purge;
+      `,
+    },
+  },
+  {
+    version: 118,
+    name: 'sync_reconciliation_generation_and_approval_role',
+    idempotent: true,
+    sql: '',
+    sqlFor: {
+      postgres: `
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
+        ALTER TABLE sync_reconciliation_role_policy ADD COLUMN IF NOT EXISTS can_approve_reconciliation boolean NOT NULL DEFAULT false;
+        INSERT INTO sync_reconciliation_role_policy
+          (role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
+        VALUES
+          ('gbrain_reconciliation_approve', false, true, false, false, false)
+        ON CONFLICT (role_name) DO UPDATE SET
+          can_approve_reconciliation = EXCLUDED.can_approve_reconciliation,
+          can_apply_reconciliation = EXCLUDED.can_apply_reconciliation;
+      `,
+      pglite: `
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
+        ALTER TABLE sync_reconciliation_role_policy ADD COLUMN IF NOT EXISTS can_approve_reconciliation boolean NOT NULL DEFAULT false;
+        INSERT INTO sync_reconciliation_role_policy
+          (role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
+        VALUES
+          ('gbrain_reconciliation_approve', false, true, false, false, false)
+        ON CONFLICT (role_name) DO UPDATE SET
+          can_approve_reconciliation = EXCLUDED.can_approve_reconciliation,
+          can_apply_reconciliation = EXCLUDED.can_apply_reconciliation;
       `,
     },
   },

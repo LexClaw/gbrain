@@ -1,4 +1,5 @@
 import type { BrainEngine } from '../core/engine.ts';
+import { LATEST_VERSION } from '../core/migrate.ts';
 import { VERSION } from '../version.ts';
 
 const REQUIRED_SYNC_TOKENS = [
@@ -11,10 +12,22 @@ const REQUIRED_SYNC_TOKENS = [
 
 const RECONCILIATION_ROLES = [
   'gbrain_normal_sync',
+  'gbrain_reconciliation_approve',
   'gbrain_reconciliation_apply',
   'gbrain_source_repair',
   'gbrain_hard_purge',
 ] as const;
+
+const REQUIRED_SCHEMA_VERSION = 118;
+
+async function checked<T>(diagnostics: string[], label: string, fn: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    diagnostics.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+    return fallback;
+  }
+}
 
 async function tableExists(engine: BrainEngine, table: string): Promise<boolean> {
   const rows = await engine.executeRaw<{ n: number }>(
@@ -34,50 +47,38 @@ async function columnExists(engine: BrainEngine, table: string, column: string):
   return Number(rows[0]?.n ?? 0) === 1;
 }
 
-async function scalar<T>(engine: BrainEngine, sql: string, params: unknown[] = [], fallback: T): Promise<T> {
-  try {
-    const rows = await engine.executeRaw<Record<string, T>>(sql, params);
-    const first = rows[0];
-    if (!first) return fallback;
-    return Object.values(first)[0] as T ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-async function rolePolicyRows(engine: BrainEngine): Promise<Record<string, unknown>[]> {
+async function rolePolicyRows(engine: BrainEngine, hasApproveColumn: boolean): Promise<Record<string, unknown>[]> {
   if (!(await tableExists(engine, 'sync_reconciliation_role_policy'))) return [];
+  const approveExpr = hasApproveColumn ? 'can_approve_reconciliation' : 'false AS can_approve_reconciliation';
   return await engine.executeRaw<Record<string, unknown>>(
-    `SELECT role_name, can_normal_sync, can_apply_reconciliation, can_repair_source_root, can_hard_purge
+    `SELECT role_name, can_normal_sync, ${approveExpr}, can_apply_reconciliation, can_repair_source_root, can_hard_purge
      FROM sync_reconciliation_role_policy ORDER BY role_name`,
   );
 }
 
 async function objectPrivileges(engine: BrainEngine): Promise<Record<string, unknown>> {
-  const checks = [
-    ['pages_select', 'pages', 'SELECT'],
-    ['pages_insert', 'pages', 'INSERT'],
-    ['pages_update', 'pages', 'UPDATE'],
-    ['pages_delete', 'pages', 'DELETE'],
-    ['audit_select', 'sync_reconciliation_audit', 'SELECT'],
-    ['audit_insert', 'sync_reconciliation_audit', 'INSERT'],
-    ['audit_update', 'sync_reconciliation_audit', 'UPDATE'],
-    ['audit_delete', 'sync_reconciliation_audit', 'DELETE'],
-    ['policy_select', 'sync_reconciliation_role_policy', 'SELECT'],
-    ['policy_update', 'sync_reconciliation_role_policy', 'UPDATE'],
-  ] as const;
-  const out: Record<string, unknown> = {};
-  for (const [key, table, privilege] of checks) {
-    out[key] = await scalar<boolean>(engine, `SELECT has_table_privilege(current_user, $1, $2) AS ok`, [table, privilege], false);
-  }
-  return out;
+  if (engine.kind !== 'postgres') return {};
+  const rows = await engine.executeRaw<Record<string, unknown>>(
+    `SELECT
+       has_table_privilege(current_user, 'pages', 'SELECT') AS pages_select,
+       has_table_privilege(current_user, 'pages', 'INSERT') AS pages_insert,
+       has_table_privilege(current_user, 'pages', 'DELETE') AS pages_delete,
+       has_column_privilege(current_user, 'pages', 'deleted_at', 'UPDATE') AS pages_deleted_at_update,
+       has_column_privilege(current_user, 'sync_reconciliation_audit', 'authorized', 'UPDATE') AS audit_authorized_update,
+       has_column_privilege(current_user, 'sync_reconciliation_audit', 'result', 'UPDATE') AS audit_result_update,
+       has_column_privilege(current_user, 'sync_reconciliation_audit', 'manifest_hash', 'UPDATE') AS audit_manifest_hash_update,
+       has_table_privilege(current_user, 'sync_reconciliation_role_policy', 'SELECT') AS policy_select,
+       has_table_privilege(current_user, 'sync_reconciliation_role_policy', 'UPDATE') AS policy_update`,
+  );
+  return rows[0] ?? {};
 }
 
 async function roleFacts(engine: BrainEngine): Promise<Record<string, unknown>[]> {
   if (engine.kind !== 'postgres') return [];
   return await engine.executeRaw<Record<string, unknown>>(
     `SELECT r.rolname AS role_name,
-            pg_has_role(current_user, r.oid, 'USAGE') AS can_set_role
+            r.rolcanlogin AS can_login,
+            pg_has_role(current_user, r.oid, 'USAGE') AS reachable_from_current_user
      FROM pg_roles r
      WHERE r.rolname = ANY($1)
      ORDER BY r.rolname`,
@@ -86,27 +87,31 @@ async function roleFacts(engine: BrainEngine): Promise<Record<string, unknown>[]
 }
 
 export async function getCapabilities(engine: BrainEngine): Promise<Record<string, unknown>> {
-  const hasAudit = await tableExists(engine, 'sync_reconciliation_audit');
-  const hasPolicy = await tableExists(engine, 'sync_reconciliation_role_policy');
-  const hasGeneration = await columnExists(engine, 'sources', 'registration_generation');
-  const hasSchemaV2Shape = hasAudit && hasPolicy && hasGeneration;
-  const policies = await rolePolicyRows(engine);
-  const pgRoles = await roleFacts(engine);
+  const diagnostics: string[] = [];
+  const hasAudit = await checked(diagnostics, 'table.sync_reconciliation_audit', () => tableExists(engine, 'sync_reconciliation_audit'), false);
+  const hasPolicy = await checked(diagnostics, 'table.sync_reconciliation_role_policy', () => tableExists(engine, 'sync_reconciliation_role_policy'), false);
+  const hasGeneration = await checked(diagnostics, 'column.sources.registration_generation', () => columnExists(engine, 'sources', 'registration_generation'), false);
+  const hasApproveColumn = await checked(diagnostics, 'column.sync_reconciliation_role_policy.can_approve_reconciliation', () => columnExists(engine, 'sync_reconciliation_role_policy', 'can_approve_reconciliation'), false);
+  const policies = await checked(diagnostics, 'role_policy', () => rolePolicyRows(engine, hasApproveColumn), [] as Record<string, unknown>[]);
+  const pgRoles = await checked(diagnostics, 'pg_roles', () => roleFacts(engine), [] as Record<string, unknown>[]);
+  const privileges = await checked(diagnostics, 'object_privileges', () => objectPrivileges(engine), {} as Record<string, unknown>);
+  const configVersionRaw = await checked(diagnostics, 'config.version', () => engine.getConfig('version'), null as string | null);
+  const configVersion = Number(configVersionRaw ?? 0);
+
   const pgRoleNames = new Set(pgRoles.map((row) => String(row.role_name)));
   const policyRoleNames = new Set(policies.map((row) => String(row.role_name)));
   const hasPgRoles = engine.kind === 'postgres' && RECONCILIATION_ROLES.every((role) => pgRoleNames.has(role));
   const hasPolicyRows = RECONCILIATION_ROLES.every((role) => policyRoleNames.has(role));
-  const identity = {
-    current_user: await scalar<string>(engine, `SELECT current_user::text AS value`, [], 'unknown'),
-    session_user: await scalar<string>(engine, `SELECT session_user::text AS value`, [], 'unknown'),
-  };
-  const privileges = await objectPrivileges(engine);
-  const schemaMigrationVersion = await scalar<number | null>(
-    engine,
-    `SELECT MAX(version)::int AS value FROM schema_migrations`,
-    [],
-    null,
+  const hasExactSchema = hasAudit && hasPolicy && hasGeneration && hasApproveColumn && configVersion >= REQUIRED_SCHEMA_VERSION;
+  const identity = await checked(
+    diagnostics,
+    'identity',
+    async () => (await engine.executeRaw<{ current_user: string; session_user: string }>(
+      `SELECT current_user::text AS current_user, session_user::text AS session_user`,
+    ))[0] ?? { current_user: 'unknown', session_user: 'unknown' },
+    { current_user: 'unknown', session_user: 'unknown' },
   );
+
   return {
     schema_version: 1,
     gbrain_version: VERSION,
@@ -114,21 +119,23 @@ export async function getCapabilities(engine: BrainEngine): Promise<Record<strin
     database: {
       current_user: identity.current_user,
       session_user: identity.session_user,
-      schema_migration_version: schemaMigrationVersion,
+      schema_version: Number.isFinite(configVersion) ? configVersion : null,
+      required_sync_safety_schema_version: Math.min(REQUIRED_SCHEMA_VERSION, LATEST_VERSION),
     },
     sync_safety: {
-      supported: hasSchemaV2Shape && hasPgRoles && hasPolicyRows,
+      supported: hasExactSchema && hasPgRoles && hasPolicyRows && diagnostics.length === 0,
       required_tokens: REQUIRED_SYNC_TOKENS,
       capabilities: {
-        explicit_source: hasGeneration,
-        root_identity: hasGeneration,
+        explicit_source: hasExactSchema,
+        root_identity: hasExactSchema,
         reconciliation_manifest: hasAudit,
         db_roles: hasPgRoles,
-        schema_v2: hasSchemaV2Shape,
+        schema_v2: hasExactSchema,
       },
       role_policy: policies,
       roles: pgRoles,
       object_privileges: privileges,
+      diagnostics,
     },
   };
 }

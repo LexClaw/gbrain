@@ -6,6 +6,9 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_normal_sync') THEN
     CREATE ROLE gbrain_normal_sync NOLOGIN;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_reconciliation_approve') THEN
+    CREATE ROLE gbrain_reconciliation_approve NOLOGIN;
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_reconciliation_apply') THEN
     CREATE ROLE gbrain_reconciliation_apply NOLOGIN;
   END IF;
@@ -17,10 +20,10 @@ BEGIN
   END IF;
 END $$;
 
-GRANT USAGE ON SCHEMA public TO gbrain_normal_sync, gbrain_reconciliation_apply, gbrain_source_repair, gbrain_hard_purge;
+GRANT USAGE ON SCHEMA public TO gbrain_normal_sync, gbrain_reconciliation_approve, gbrain_reconciliation_apply, gbrain_source_repair, gbrain_hard_purge;
 
 REVOKE ALL PRIVILEGES ON pages, content_chunks, ingest_log, sources, sync_reconciliation_audit, sync_reconciliation_role_policy
-  FROM gbrain_normal_sync, gbrain_reconciliation_apply, gbrain_source_repair, gbrain_hard_purge;
+  FROM gbrain_normal_sync, gbrain_reconciliation_approve, gbrain_reconciliation_apply, gbrain_source_repair, gbrain_hard_purge;
 
 GRANT SELECT, INSERT ON pages, content_chunks, ingest_log TO gbrain_normal_sync;
 GRANT UPDATE (slug, type, page_kind, title, compiled_truth, frontmatter, timeline, raw_path, source_path, content_hash, embedding, embedding_voyage, embedding_model, embedding_dimensions, updated_at, effective_date, contextual_retrieval_mode, corpus_generation, generation)
@@ -30,9 +33,12 @@ GRANT UPDATE (last_commit, last_sync_at, newest_content_at, chunker_version) ON 
 GRANT SELECT, INSERT ON sync_reconciliation_audit TO gbrain_normal_sync;
 GRANT SELECT ON sync_reconciliation_role_policy TO gbrain_normal_sync;
 
+GRANT SELECT ON sync_reconciliation_audit, sync_reconciliation_role_policy TO gbrain_reconciliation_approve;
+GRANT UPDATE (authorized, after_state, result) ON sync_reconciliation_audit TO gbrain_reconciliation_approve;
+
 GRANT SELECT ON pages, sources, sync_reconciliation_audit, sync_reconciliation_role_policy TO gbrain_reconciliation_apply;
 GRANT UPDATE (deleted_at, updated_at) ON pages TO gbrain_reconciliation_apply;
-GRANT UPDATE (authorized, after_state, result, failure, completed_at) ON sync_reconciliation_audit TO gbrain_reconciliation_apply;
+GRANT UPDATE (after_state, result, failure, completed_at) ON sync_reconciliation_audit TO gbrain_reconciliation_apply;
 
 GRANT SELECT ON pages, sources, sync_reconciliation_audit, sync_reconciliation_role_policy TO gbrain_source_repair;
 GRANT UPDATE (deleted_at, updated_at) ON pages TO gbrain_source_repair;
@@ -41,6 +47,42 @@ GRANT UPDATE (after_state, result, failure, completed_at) ON sync_reconciliation
 
 GRANT SELECT ON pages, sync_reconciliation_audit, sync_reconciliation_role_policy TO gbrain_hard_purge;
 GRANT DELETE ON pages TO gbrain_hard_purge;
-GRANT UPDATE (after_state, result, failure, completed_at) ON sync_reconciliation_audit TO gbrain_hard_purge;
+GRANT UPDATE (after_state, result, completed_at) ON sync_reconciliation_audit TO gbrain_hard_purge;
 
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO gbrain_normal_sync, gbrain_reconciliation_apply, gbrain_source_repair, gbrain_hard_purge;
+CREATE OR REPLACE FUNCTION public.gbrain_guard_sync_reconciliation_audit_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF current_user = 'gbrain_reconciliation_approve' THEN
+    IF OLD.result = 'proposed' AND NEW.result = 'approved' AND NEW.authorized IS TRUE THEN
+      RETURN NEW;
+    END IF;
+  ELSIF current_user = 'gbrain_reconciliation_apply' THEN
+    IF OLD.result IN ('approved', 'failed') AND NEW.result = 'applying' AND NEW.authorized = OLD.authorized THEN
+      RETURN NEW;
+    END IF;
+    IF OLD.result = 'applying' AND NEW.result IN ('applied', 'failed') AND NEW.authorized = OLD.authorized THEN
+      RETURN NEW;
+    END IF;
+  ELSIF current_user = 'gbrain_source_repair' THEN
+    IF NEW.authorized = OLD.authorized AND NEW.result IN ('rolling_back', 'rolled_back', OLD.result) THEN
+      RETURN NEW;
+    END IF;
+  ELSIF current_user = 'gbrain_hard_purge' THEN
+    IF NEW.authorized = OLD.authorized AND ((OLD.result = 'applied' AND NEW.result = 'purging') OR (OLD.result = 'purging' AND NEW.result = 'purged')) THEN
+      RETURN NEW;
+    END IF;
+  ELSE
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'sync reconciliation transition % -> % is not allowed for %', OLD.result, NEW.result, current_user USING ERRCODE = '42501';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS gbrain_guard_sync_reconciliation_audit_update ON sync_reconciliation_audit;
+CREATE TRIGGER gbrain_guard_sync_reconciliation_audit_update
+BEFORE UPDATE ON sync_reconciliation_audit
+FOR EACH ROW EXECUTE FUNCTION public.gbrain_guard_sync_reconciliation_audit_update();
+
+REVOKE ALL ON FUNCTION public.gbrain_guard_sync_reconciliation_audit_update() FROM PUBLIC;

@@ -16,6 +16,29 @@ describe('migrate', () => {
     expect(typeof runMigrations).toBe('function');
   });
 
+  test('registration_generation upgrade is forward migration after sync reconciliation v117', async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    try {
+      await engine.initSchema();
+      await engine.setConfig('version', '117');
+      await engine.executeRaw(`ALTER TABLE sources DROP COLUMN IF EXISTS registration_generation`);
+      await engine.executeRaw(`ALTER TABLE sync_reconciliation_role_policy DROP COLUMN IF EXISTS can_approve_reconciliation`);
+      const result = await runMigrations(engine);
+      expect(result.applied).toBeGreaterThanOrEqual(1);
+      const generation = await engine.executeRaw<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM information_schema.columns WHERE table_name = 'sources' AND column_name = 'registration_generation'`,
+      );
+      const approve = await engine.executeRaw<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM information_schema.columns WHERE table_name = 'sync_reconciliation_role_policy' AND column_name = 'can_approve_reconciliation'`,
+      );
+      expect(Number(generation[0].n)).toBe(1);
+      expect(Number(approve[0].n)).toBe(1);
+    } finally {
+      await engine.disconnect();
+    }
+  }, 30000);
+
   // Integration tests for actual migration execution require DATABASE_URL
   // and are covered in the E2E suite (test/e2e/mechanical.test.ts)
 });

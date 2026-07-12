@@ -95,20 +95,23 @@ async function initRoleBoundarySchema(engine: PostgresEngine, sql: any) {
     CREATE TABLE IF NOT EXISTS sync_reconciliation_role_policy (
       role_name text PRIMARY KEY,
       can_normal_sync boolean NOT NULL DEFAULT false,
+      can_approve_reconciliation boolean NOT NULL DEFAULT false,
       can_apply_reconciliation boolean NOT NULL DEFAULT false,
       can_repair_source_root boolean NOT NULL DEFAULT false,
       can_hard_purge boolean NOT NULL DEFAULT false,
       created_at timestamptz NOT NULL DEFAULT now()
     );
     INSERT INTO sync_reconciliation_role_policy
-      (role_name, can_normal_sync, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
+      (role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
     VALUES
-      ('gbrain_normal_sync', true, false, false, false),
-      ('gbrain_reconciliation_apply', false, true, false, false),
-      ('gbrain_source_repair', false, false, true, false),
-      ('gbrain_hard_purge', false, false, false, true)
+      ('gbrain_normal_sync', true, false, false, false, false),
+      ('gbrain_reconciliation_approve', false, true, false, false, false),
+      ('gbrain_reconciliation_apply', false, false, true, false, false),
+      ('gbrain_source_repair', false, false, false, true, false),
+      ('gbrain_hard_purge', false, false, false, false, true)
     ON CONFLICT (role_name) DO UPDATE SET
       can_normal_sync = EXCLUDED.can_normal_sync,
+      can_approve_reconciliation = EXCLUDED.can_approve_reconciliation,
       can_apply_reconciliation = EXCLUDED.can_apply_reconciliation,
       can_repair_source_root = EXCLUDED.can_repair_source_root,
       can_hard_purge = EXCLUDED.can_hard_purge;
@@ -119,8 +122,8 @@ async function expectDenied(promise: Promise<unknown>) {
   try {
     await promise;
   } catch (error) {
-    expect(String(error)).toContain('permission denied');
-    return;
+    const message = String(error);
+    if (message.includes('permission denied') || message.includes('is not allowed')) return;
   }
   throw new Error('expected permission denial');
 }

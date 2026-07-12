@@ -560,7 +560,7 @@ export async function assertSyncSourceRootGuard(
 }
 
 type SyncReconciliationReason = 'incremental_deleted' | 'unsyncable_modified' | 'full_stale';
-type SyncReconciliationStatus = 'proposed' | 'approved' | 'applying' | 'applied' | 'failed' | 'rolling_back' | 'rolled_back' | 'purged';
+type SyncReconciliationStatus = 'proposed' | 'approved' | 'applying' | 'applied' | 'failed' | 'rolling_back' | 'rolled_back' | 'purging' | 'purged';
 
 const SYNC_RECONCILE_MAX_ABSOLUTE = 100;
 const SYNC_RECONCILE_MAX_PERCENT = 0.25;
@@ -591,7 +591,7 @@ async function assertReconciliationSchema(engine: BrainEngine): Promise<void> {
 
 async function assertRoleCapability(
   engine: BrainEngine,
-  capability: 'can_normal_sync' | 'can_apply_reconciliation' | 'can_repair_source_root' | 'can_hard_purge',
+  capability: 'can_normal_sync' | 'can_approve_reconciliation' | 'can_apply_reconciliation' | 'can_repair_source_root' | 'can_hard_purge',
 ): Promise<DbIdentity> {
   const identity = await currentDbIdentity(engine);
   const rows = await engine.executeRaw<{ ok: boolean }>(
@@ -671,6 +671,31 @@ async function sourceRegistrationGeneration(engine: BrainEngine, sourceId: strin
     throw new Error(`Unsafe reconciliation: source ${sourceId} has no durable registration_generation.`);
   }
   return generation;
+}
+
+export async function repairSourceRootRegistration(
+  engine: BrainEngine,
+  sourceId: string,
+  repoPath: string,
+): Promise<{ source_id: string; local_path: string; registration_generation: number }> {
+  await assertReconciliationSchema(engine);
+  await assertRoleCapability(engine, 'can_repair_source_root');
+  const root = canonicalRoot(repoPath);
+  const rows = await engine.executeRaw<{ source_id: string; local_path: string; registration_generation: number | string }>(
+    `UPDATE sources
+     SET local_path = $2,
+         registration_generation = registration_generation + 1
+     WHERE id = $1
+     RETURNING id AS source_id, local_path, registration_generation`,
+    [sourceId, root],
+  );
+  const row = rows[0];
+  if (!row) throw new Error(`Cannot repair source root ${sourceId}: source not found.`);
+  const generation = Number(row.registration_generation);
+  if (!Number.isInteger(generation) || generation < 2) {
+    throw new Error(`Cannot repair source root ${sourceId}: generation increment failed.`);
+  }
+  return { source_id: row.source_id, local_path: row.local_path, registration_generation: generation };
 }
 
 function parseManifest(value: any): ReconciliationManifest {
@@ -827,11 +852,11 @@ export async function approveSyncReconciliation(
   justification: string,
 ): Promise<void> {
   await assertReconciliationSchema(engine);
-  const identity = await assertRoleCapability(engine, 'can_apply_reconciliation');
+  const identity = await assertRoleCapability(engine, 'can_approve_reconciliation');
   const rows = await engine.executeRaw<{ result: SyncReconciliationStatus }>(
     `UPDATE sync_reconciliation_audit
      SET result = 'approved', authorized = true,
-         after_state = jsonb_build_object('approved_by', $2, 'session_user', $3, 'justification', $4)
+         after_state = jsonb_build_object('approved_by', $2::text, 'session_user', $3::text, 'justification', $4::text)
      WHERE operation_id = $1 AND result = 'proposed'
      RETURNING result`,
     [operationId, identity.current_user, identity.session_user, justification],
@@ -846,29 +871,29 @@ export async function applySyncReconciliation(
 ): Promise<string[]> {
   await assertReconciliationSchema(engine);
   await assertRoleCapability(engine, 'can_apply_reconciliation');
+  const locked = await engine.executeRaw<{
+    source_id: string;
+    manifest_hash: string;
+    before_state: any;
+    result: SyncReconciliationStatus;
+  }>(
+    `UPDATE sync_reconciliation_audit
+     SET result = 'applying', failure = NULL
+     WHERE operation_id = $1 AND result IN ('approved', 'failed')
+     RETURNING source_id, manifest_hash, before_state, result`,
+    [operationId],
+  );
+  const row = locked[0];
+  if (!row) {
+    const current = await engine.executeRaw<{ result: SyncReconciliationStatus }>(
+      `SELECT result FROM sync_reconciliation_audit WHERE operation_id = $1`,
+      [operationId],
+    );
+    if (!current[0]) throw new Error(`Cannot apply reconciliation ${operationId}: not found.`);
+    throw new Error(`Cannot apply reconciliation ${operationId}: status ${current[0].result} is not approved or failed.`);
+  }
   try {
     return await engine.transaction(async (tx) => {
-      const locked = await tx.executeRaw<{
-        source_id: string;
-        manifest_hash: string;
-        before_state: any;
-        result: SyncReconciliationStatus;
-      }>(
-        `UPDATE sync_reconciliation_audit
-         SET result = 'applying'
-         WHERE operation_id = $1 AND result = 'approved'
-         RETURNING source_id, manifest_hash, before_state, result`,
-        [operationId],
-      );
-      const row = locked[0];
-      if (!row) {
-        const current = await tx.executeRaw<{ result: SyncReconciliationStatus }>(
-          `SELECT result FROM sync_reconciliation_audit WHERE operation_id = $1`,
-          [operationId],
-        );
-        if (!current[0]) throw new Error(`Cannot apply reconciliation ${operationId}: not found.`);
-        throw new Error(`Cannot apply reconciliation ${operationId}: status ${current[0].result} is not approved.`);
-      }
       const manifest = parseManifest(row.before_state);
       await assertManifestStillCurrent(tx, manifest, row.manifest_hash, opts.repoPath);
       const marked: string[] = [];
@@ -879,19 +904,23 @@ export async function applySyncReconciliation(
       if (marked.length !== manifest.candidates.length) {
         throw new Error(`Unsafe reconciliation: applied ${marked.length}/${manifest.candidates.length} candidates.`);
       }
-      await tx.executeRaw(
+      const completed = await tx.executeRaw<{ operation_id: string }>(
         `UPDATE sync_reconciliation_audit
          SET result = 'applied', completed_at = now(),
              after_state = COALESCE(after_state, '{}'::jsonb) || $2::jsonb
-         WHERE operation_id = $1 AND result = 'applying'`,
+         WHERE operation_id = $1 AND result = 'applying'
+         RETURNING operation_id`,
         [operationId, { applied: marked.sort(), applied_count: marked.length }],
       );
+      if (completed.length !== 1) {
+        throw new Error(`Cannot apply reconciliation ${operationId}: terminal transition was not claimed.`);
+      }
       return marked;
     });
   } catch (e) {
     await engine.executeRaw(
       `UPDATE sync_reconciliation_audit
-       SET result = 'failed', failure = $2
+       SET result = 'failed', failure = $2, completed_at = now()
        WHERE operation_id = $1 AND result = 'applying'`,
       [operationId, e instanceof Error ? e.message : String(e)],
     );
@@ -946,22 +975,33 @@ export async function rollbackReviveSyncReconciliation(engine: BrainEngine, oper
 export async function authorizedPurgeSyncReconciliation(engine: BrainEngine, operationId: string): Promise<number> {
   await assertReconciliationSchema(engine);
   await assertRoleCapability(engine, 'can_hard_purge');
-  const rows = await engine.executeRaw<{ source_id: string; before_state: any; result: SyncReconciliationStatus; created_at: string }>(
-    `SELECT source_id, before_state, result, created_at::text AS created_at
-     FROM sync_reconciliation_audit WHERE operation_id = $1`,
-    [operationId],
-  );
-  const row = rows[0];
-  if (!row) throw new Error(`Cannot purge reconciliation ${operationId}: not found.`);
-  if (row.result !== 'applied') throw new Error(`Cannot purge reconciliation ${operationId}: status ${row.result} is not applied.`);
-  const createdAt = new Date(row.created_at).getTime();
-  const minAgeMs = SYNC_RECONCILE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  if (Number.isFinite(createdAt) && Date.now() - createdAt < minAgeMs) {
-    throw new Error(`Cannot purge reconciliation ${operationId}: retention window has not elapsed.`);
-  }
-  const candidates = Array.isArray(row.before_state?.candidates) ? row.before_state.candidates : [];
-  const candidateSlugs = candidates.map((candidate: any) => String(candidate.slug)).sort();
   return await engine.transaction(async (tx) => {
+    const claimed = await tx.executeRaw<{ source_id: string; manifest_hash: string; before_state: any; created_at: string }>(
+      `UPDATE sync_reconciliation_audit
+       SET result = 'purging'
+       WHERE operation_id = $1 AND result = 'applied'
+       RETURNING source_id, manifest_hash, before_state, created_at::text AS created_at`,
+      [operationId],
+    );
+    const row = claimed[0];
+    if (!row) {
+      const current = await tx.executeRaw<{ result: SyncReconciliationStatus }>(
+        `SELECT result FROM sync_reconciliation_audit WHERE operation_id = $1`,
+        [operationId],
+      );
+      if (!current[0]) throw new Error(`Cannot purge reconciliation ${operationId}: not found.`);
+      throw new Error(`Cannot purge reconciliation ${operationId}: status ${current[0].result} is not applied.`);
+    }
+    const createdAt = new Date(row.created_at).getTime();
+    const minAgeMs = SYNC_RECONCILE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    if (Number.isFinite(createdAt) && Date.now() - createdAt < minAgeMs) {
+      throw new Error(`Cannot purge reconciliation ${operationId}: retention window has not elapsed.`);
+    }
+    const manifest = parseManifest(row.before_state);
+    if (deterministicHash(manifest) !== row.manifest_hash) {
+      throw new Error(`Cannot purge reconciliation ${operationId}: manifest_hash does not match before_state.`);
+    }
+    const candidateSlugs = manifest.candidates.map((candidate) => candidate.slug).sort();
     const deletedRows = await tx.executeRaw<{ slug: string }>(
       `DELETE FROM pages
        WHERE source_id = $1 AND slug = ANY($2) AND deleted_at IS NOT NULL
@@ -971,10 +1011,13 @@ export async function authorizedPurgeSyncReconciliation(engine: BrainEngine, ope
     if (deletedRows.length !== candidateSlugs.length) {
       throw new Error(`Cannot purge reconciliation ${operationId}: expected ${candidateSlugs.length} tombstones, deleted ${deletedRows.length}.`);
     }
-    await tx.executeRaw(
-      `UPDATE sync_reconciliation_audit SET result = 'purged', completed_at = now() WHERE operation_id = $1 AND result = 'applied'`,
+    const transitioned = await tx.executeRaw<{ operation_id: string }>(
+      `UPDATE sync_reconciliation_audit SET result = 'purged', completed_at = now() WHERE operation_id = $1 AND result = 'purging' RETURNING operation_id`,
       [operationId],
     );
+    if (transitioned.length !== 1) {
+      throw new Error(`Cannot purge reconciliation ${operationId}: terminal transition was not claimed.`);
+    }
     return deletedRows.length;
   });
 }
@@ -3372,6 +3415,15 @@ export async function runSync(engine: BrainEngine, args: string[]) {
     if (!operationId) throw new Error('sync authorized-purge requires --operation <id>');
     const purged = await authorizedPurgeSyncReconciliation(engine, operationId);
     console.log(JSON.stringify({ status: 'purged', operation_id: operationId, purged }));
+    return;
+  }
+  if (args[0] === 'repair-source-root') {
+    const sourceId = args.find((a, i) => args[i - 1] === '--source') ?? args[1];
+    const repoPathForRepair = args.find((a, i) => args[i - 1] === '--repo');
+    if (!sourceId) throw new Error('sync repair-source-root requires --source <id>');
+    if (!repoPathForRepair) throw new Error('sync repair-source-root requires --repo <path>');
+    const repaired = await repairSourceRootRegistration(engine, sourceId, repoPathForRepair);
+    console.log(JSON.stringify({ status: 'repaired', ...repaired }));
     return;
   }
 

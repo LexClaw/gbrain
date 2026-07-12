@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { assertSyncSourceRootGuard, performSync, syncOneSource, proposeSyncReconciliation, applySyncReconciliation } from '../src/commands/sync.ts';
+import { assertSyncSourceRootGuard, performSync, syncOneSource, proposeSyncReconciliation, approveSyncReconciliation, applySyncReconciliation, repairSourceRootRegistration } from '../src/commands/sync.ts';
 import { getCapabilities } from '../src/commands/capabilities.ts';
 
 let engine: PGLiteEngine;
@@ -61,20 +61,22 @@ async function addSource(sourceId: string, localPath: string): Promise<void> {
   );
 }
 
-async function grantCurrentUser(capability: 'can_normal_sync' | 'can_apply_reconciliation' | 'can_repair_source_root' | 'can_hard_purge'): Promise<void> {
+async function grantCurrentUser(capability: 'can_normal_sync' | 'can_approve_reconciliation' | 'can_apply_reconciliation' | 'can_repair_source_root' | 'can_hard_purge'): Promise<void> {
   const identity = await engine.executeRaw<{ current_user: string }>(`SELECT current_user::text AS current_user`);
   await engine.executeRaw(
     `INSERT INTO sync_reconciliation_role_policy
-       (role_name, can_normal_sync, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
-     VALUES ($1, $2, $3, $4, $5)
+       (role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (role_name) DO UPDATE SET
        can_normal_sync = EXCLUDED.can_normal_sync,
+       can_approve_reconciliation = EXCLUDED.can_approve_reconciliation,
        can_apply_reconciliation = EXCLUDED.can_apply_reconciliation,
        can_repair_source_root = EXCLUDED.can_repair_source_root,
        can_hard_purge = EXCLUDED.can_hard_purge`,
     [
       identity[0].current_user,
       capability === 'can_normal_sync',
+      capability === 'can_approve_reconciliation',
       capability === 'can_apply_reconciliation',
       capability === 'can_repair_source_root',
       capability === 'can_hard_purge',
@@ -245,18 +247,20 @@ describe('sync source safety guard', () => {
       const rows = await fresh.executeRaw<{
         role_name: string;
         can_normal_sync: boolean;
+        can_approve_reconciliation: boolean;
         can_apply_reconciliation: boolean;
         can_repair_source_root: boolean;
         can_hard_purge: boolean;
       }>(
-        `SELECT role_name, can_normal_sync, can_apply_reconciliation, can_repair_source_root, can_hard_purge
+        `SELECT role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge
          FROM sync_reconciliation_role_policy ORDER BY role_name`,
       );
       expect(rows).toEqual([
-        { role_name: 'gbrain_hard_purge', can_normal_sync: false, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: true },
-        { role_name: 'gbrain_normal_sync', can_normal_sync: true, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: false },
-        { role_name: 'gbrain_reconciliation_apply', can_normal_sync: false, can_apply_reconciliation: true, can_repair_source_root: false, can_hard_purge: false },
-        { role_name: 'gbrain_source_repair', can_normal_sync: false, can_apply_reconciliation: false, can_repair_source_root: true, can_hard_purge: false },
+        { role_name: 'gbrain_hard_purge', can_normal_sync: false, can_approve_reconciliation: false, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: true },
+        { role_name: 'gbrain_normal_sync', can_normal_sync: true, can_approve_reconciliation: false, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: false },
+        { role_name: 'gbrain_reconciliation_apply', can_normal_sync: false, can_approve_reconciliation: false, can_apply_reconciliation: true, can_repair_source_root: false, can_hard_purge: false },
+        { role_name: 'gbrain_reconciliation_approve', can_normal_sync: false, can_approve_reconciliation: true, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: false },
+        { role_name: 'gbrain_source_repair', can_normal_sync: false, can_approve_reconciliation: false, can_apply_reconciliation: false, can_repair_source_root: true, can_hard_purge: false },
       ]);
     } finally {
       await fresh.disconnect();
@@ -290,11 +294,9 @@ describe('sync source safety guard', () => {
       );
       expect(preApply[0].deleted_at).toBeNull();
 
+      await grantCurrentUser('can_approve_reconciliation');
+      await approveSyncReconciliation(engine, proposal.operationId, 'unit-test');
       await grantCurrentUser('can_apply_reconciliation');
-      await engine.executeRaw(
-        `UPDATE sync_reconciliation_audit SET result = 'approved', authorized = true WHERE operation_id = $1`,
-        [proposal.operationId],
-      );
       const applied = await applySyncReconciliation(engine, proposal.operationId, { repoPath: repo });
       expect(applied).toEqual(['notes/alpha']);
       const postApply = await engine.executeRaw<{ deleted_at: string | null }>(
@@ -324,6 +326,46 @@ describe('sync source safety guard', () => {
       expect(caps.sync_safety.supported).toBe(false);
     } finally {
       await fresh.disconnect();
+    }
+  });
+
+  test('source root repair increments generation and rejects stale approved manifests', async () => {
+    const repoA = makeRepo(5);
+    const repoB = makeRepo(5);
+    try {
+      await setSourcePath('default', repoA);
+      await performSync(engine, {
+        repoPath: repoA,
+        sourceId: 'default',
+        explicitSourceArg: true,
+        sourceResolutionTier: 'flag',
+        noPull: true,
+        noEmbed: true,
+        noExtract: true,
+      });
+      await grantCurrentUser('can_normal_sync');
+      const proposal = await proposeSyncReconciliation(engine, ['notes/alpha'], {
+        sourceId: 'default',
+        repoPath: repoA,
+        reason: 'incremental_deleted',
+      });
+      await grantCurrentUser('can_approve_reconciliation');
+      await approveSyncReconciliation(engine, proposal.operationId, 'unit-test');
+      await grantCurrentUser('can_repair_source_root');
+      const repaired = await repairSourceRootRegistration(engine, 'default', repoB);
+      expect(repaired.registration_generation).toBe(2);
+      await grantCurrentUser('can_apply_reconciliation');
+      await expect(applySyncReconciliation(engine, proposal.operationId, { repoPath: repoA }))
+        .rejects.toThrow(/registration_generation changed/);
+      const audits = await engine.executeRaw<{ result: string; failure: string | null }>(
+        `SELECT result, failure FROM sync_reconciliation_audit WHERE operation_id = $1`,
+        [proposal.operationId],
+      );
+      expect(audits[0].result).toBe('failed');
+      expect(audits[0].failure).toContain('registration_generation changed');
+    } finally {
+      rmSync(repoA, { recursive: true, force: true });
+      rmSync(repoB, { recursive: true, force: true });
     }
   });
 

@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { buildSyncManifest, isSyncable, pathToSlug, pruneDir, isCodeFilePath } from '../src/core/sync.ts';
-import { applySyncReconciliation, buildAutoEmbedArgs, buildGitInvocation, proposeSyncReconciliation } from '../src/commands/sync.ts';
+import { applySyncReconciliation, approveSyncReconciliation, buildAutoEmbedArgs, buildGitInvocation, proposeSyncReconciliation } from '../src/commands/sync.ts';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
@@ -765,6 +765,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
 
   async function setCurrentUserCapabilities(caps: {
     normal?: boolean;
+    approve?: boolean;
     apply?: boolean;
     repair?: boolean;
     purge?: boolean;
@@ -772,14 +773,15 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     const identity = await engine.executeRaw<{ current_user: string }>(`SELECT current_user::text AS current_user`);
     await engine.executeRaw(
       `INSERT INTO sync_reconciliation_role_policy
-         (role_name, can_normal_sync, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
-       VALUES ($1, $2, $3, $4, $5)
+         (role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (role_name) DO UPDATE SET
          can_normal_sync = EXCLUDED.can_normal_sync,
+         can_approve_reconciliation = EXCLUDED.can_approve_reconciliation,
          can_apply_reconciliation = EXCLUDED.can_apply_reconciliation,
          can_repair_source_root = EXCLUDED.can_repair_source_root,
          can_hard_purge = EXCLUDED.can_hard_purge`,
-      [identity[0].current_user, Boolean(caps.normal), Boolean(caps.apply), Boolean(caps.repair), Boolean(caps.purge)],
+      [identity[0].current_user, Boolean(caps.normal), Boolean(caps.approve), Boolean(caps.apply), Boolean(caps.repair), Boolean(caps.purge)],
     );
   }
 
@@ -954,11 +956,9 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     await expect(applySyncReconciliation(engine, proposal.operationId, { repoPath: repo })).rejects.toThrow(/lacks can_apply_reconciliation/);
     expect(await engine.getPage('people/dana')).not.toBeNull();
 
+    await setCurrentUserCapabilities({ approve: true });
+    await approveSyncReconciliation(engine, proposal.operationId, 'unit-test');
     await setCurrentUserCapabilities({ apply: true });
-    await engine.executeRaw(
-      `UPDATE sync_reconciliation_audit SET result = 'approved', authorized = true WHERE operation_id = $1`,
-      [proposal.operationId],
-    );
     expect(await applySyncReconciliation(engine, proposal.operationId, { repoPath: repo })).toEqual(['people/dana']);
     expect(await engine.getPage('people/dana')).toBeNull();
   });
