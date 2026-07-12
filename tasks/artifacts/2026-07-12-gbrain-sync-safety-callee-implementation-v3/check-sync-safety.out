@@ -1,0 +1,2 @@
+$ scripts/check-sync-safety-surfaces.sh
+sync safety static guard passed

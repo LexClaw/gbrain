@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, statSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'fs';
 import { execFileSync } from 'child_process';
-import { join, relative } from 'path';
+import { join, relative, resolve } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { importFile } from '../core/import-file.ts';
@@ -337,6 +337,10 @@ async function promptYesNo(question: string): Promise<boolean> {
 
 export interface SyncOpts {
   repoPath?: string;
+  /** Internal: source resolver tier used by the CLI for sync-root safety diagnostics. */
+  sourceResolutionTier?: string;
+  /** Internal: true when the CLI parsed an explicit --source flag. */
+  explicitSourceArg?: boolean;
   dryRun?: boolean;
   full?: boolean;
   noPull?: boolean;
@@ -444,6 +448,121 @@ export interface SyncOpts {
    * Precedent: CycleOpts.signal at src/core/cycle.ts (v0.22.1 #403).
    */
   signal?: AbortSignal;
+}
+
+interface SyncSourceGuardRow {
+  id: string;
+  local_path: string | null;
+  archived?: boolean | null;
+}
+
+function canonicalRoot(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function rootsEqual(a: string, b: string): boolean {
+  return canonicalRoot(a) === canonicalRoot(b);
+}
+
+async function listGuardSources(engine: BrainEngine): Promise<SyncSourceGuardRow[]> {
+  try {
+    return await engine.executeRaw<SyncSourceGuardRow>(
+      `SELECT id, local_path, archived FROM sources WHERE local_path IS NOT NULL ORDER BY id`,
+    );
+  } catch {
+    return await engine.executeRaw<SyncSourceGuardRow>(
+      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL ORDER BY id`,
+    );
+  }
+}
+
+async function getGuardSource(engine: BrainEngine, sourceId: string): Promise<SyncSourceGuardRow | null> {
+  try {
+    const rows = await engine.executeRaw<SyncSourceGuardRow>(
+      `SELECT id, local_path, archived FROM sources WHERE id = $1`,
+      [sourceId],
+    );
+    return rows[0] ?? null;
+  } catch {
+    const rows = await engine.executeRaw<SyncSourceGuardRow>(
+      `SELECT id, local_path FROM sources WHERE id = $1`,
+      [sourceId],
+    );
+    return rows[0] ?? null;
+  }
+}
+
+export async function assertSyncSourceRootGuard(
+  engine: BrainEngine,
+  opts: SyncOpts,
+  repoPath: string,
+): Promise<void> {
+  const activeSources = (await listGuardSources(engine)).filter((s) => s.archived !== true);
+  const repoRoot = canonicalRoot(repoPath);
+
+  if (!opts.sourceId) {
+    if (activeSources.length > 1) {
+      throw new Error(
+        `Unsafe unqualified sync: --source is required when multiple sources have local_path. ` +
+        `Refusing to use --repo ${repoPath} as source identity.`,
+      );
+    }
+    if (activeSources.length === 1 && !rootsEqual(activeSources[0].local_path!, repoPath)) {
+      throw new Error(
+        `Unsafe unqualified sync: repo ${repoPath} does not match the only registered source root ` +
+        `${activeSources[0].id} (${activeSources[0].local_path}). Pass the compatible --source or run source-path repair.`,
+      );
+    }
+    return;
+  }
+
+  const source = await getGuardSource(engine, opts.sourceId);
+  if (!source || source.archived === true) {
+    throw new Error(`Unsafe sync: source "${opts.sourceId}" is missing or archived.`);
+  }
+  if (!source.local_path) {
+    if (opts.sourceId === DEFAULT_SOURCE_ID && !opts.explicitSourceArg) return;
+    throw new Error(
+      `Unsafe sync: source "${opts.sourceId}" has no local_path. ` +
+      `Normal sync cannot bind or create source roots; use source-path repair first.`,
+    );
+  }
+  if (!rootsEqual(source.local_path, repoPath)) {
+    throw new Error(
+      `Unsafe sync root mismatch for source "${opts.sourceId}": repo ${repoRoot} does not match ` +
+      `registered root ${canonicalRoot(source.local_path)}. Normal sync cannot overwrite sources.local_path; ` +
+      `use the separately reviewed source-path repair transaction.`,
+    );
+  }
+  if (!opts.explicitSourceArg && opts.repoPath && activeSources.length > 1) {
+    throw new Error(
+      `Unsafe repo override in multi-source brain: --repo requires an explicit compatible --source.`,
+    );
+  }
+  if ((opts.sourceResolutionTier === 'seed_default' || opts.sourceResolutionTier === 'brain_default') &&
+      opts.sourceId === DEFAULT_SOURCE_ID && activeSources.length > 1 && opts.repoPath) {
+    throw new Error(
+      `Unsafe default-source fallthrough: resolver tier ${opts.sourceResolutionTier} cannot bind --repo in a multi-source brain. ` +
+      `Pass the compatible --source explicitly.`,
+    );
+  }
+}
+
+async function markSyncDeletedPages(
+  engine: BrainEngine,
+  slugs: string[],
+  opts: { sourceId: string },
+): Promise<string[]> {
+  const marked: string[] = [];
+  for (const slug of slugs) {
+    const result = await engine.softDeletePage(slug, opts);
+    if (result) marked.push(result.slug);
+  }
+  return marked;
 }
 
 /**
@@ -604,6 +723,30 @@ async function writeSyncAnchor(
 ): Promise<void> {
   if (sourceId) {
     const col = which === 'repo_path' ? 'local_path' : 'last_commit';
+    if (which === 'repo_path') {
+      const source = await getGuardSource(engine, sourceId);
+      if (!source?.local_path) {
+        if (sourceId === DEFAULT_SOURCE_ID) {
+          await engine.executeRaw(
+            `UPDATE sources SET local_path = $1 WHERE id = $2`,
+            [value, sourceId],
+          );
+          return;
+        }
+        throw new Error(
+          `Unsafe sync anchor write: source "${sourceId}" has no local_path. ` +
+          `Normal sync cannot create or replace source roots; use source-path repair first.`,
+        );
+      }
+      if (!rootsEqual(source.local_path, value)) {
+        throw new Error(
+          `Unsafe sync anchor write: refusing to overwrite source "${sourceId}" root ` +
+          `${canonicalRoot(source.local_path)} with ${canonicalRoot(value)}. ` +
+          `Use the separately reviewed source-path repair transaction.`,
+        );
+      }
+      return;
+    }
     // last_sync_at bookmarked on every last_commit advance.
     if (which === 'last_commit') {
       if (newestContentEpochMs !== undefined) {
@@ -1089,6 +1232,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       : `No repo path specified. Use --repo or run gbrain init with --repo first.`;
     throw new Error(hint);
   }
+  await assertSyncSourceRootGuard(engine, opts, repoPath);
 
   serr(`[gbrain phase] sync.load_active_pack`);
   // v0.39 T1.5: load active pack ONCE at sync entry; pass to every per-file
@@ -1510,8 +1654,8 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     try {
       const existing = await engine.getPage(slug, pageOpts);
       if (existing) {
-        await engine.deletePage(slug, pageOpts);
-        slog(`  Deleted un-syncable page: ${slug}`);
+        await engine.softDeletePage(slug, pageOpts);
+        slog(`  Tombstoned un-syncable page: ${slug}`);
       }
     } catch { /* ignore */ }
   }
@@ -1805,7 +1949,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
 
         // Phase B: batch delete (1 round-trip per batch).
         try {
-          const deleted = await engine.deletePages(slugs, deleteScopedOpts);
+          const deleted = await markSyncDeletedPages(engine, slugs, deleteScopedOpts);
           // D6: only push slugs that were actually deleted. Filters phantom
           // slugs (paths in filtered.deleted but with no DB row) so
           // downstream extract/embed don't waste lookups.
@@ -1820,8 +1964,8 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
           // (matching the existing import-loop pattern at sync.ts:~1350).
           for (let j = 0; j < slugs.length; j++) {
             try {
-              await engine.deletePage(slugs[j], deleteScopedOpts);
-              pagesAffected.push(slugs[j]);
+              const result = await engine.softDeletePage(slugs[j], deleteScopedOpts);
+              if (result) pagesAffected.push(slugs[j]);
               await markCompleted(batch[j]);
             } catch (perSlugErr) {
               failedFiles.push({
@@ -1847,8 +1991,8 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         }
         const slug = await resolveSlugByPathOrSourcePath(engine, path, undefined);
         try {
-          await engine.deletePage(slug, deleteOpts);
-          pagesAffected.push(slug);
+          const result = await engine.softDeletePage(slug, deleteOpts);
+          if (result) pagesAffected.push(slug);
           await markCompleted(path);
         } catch (err) {
           failedFiles.push({
@@ -2651,13 +2795,16 @@ async function performFullSync(
       for (let i = 0; i < staleSlugs.length; i += DELETE_BATCH_SIZE) {
         const batch = staleSlugs.slice(i, i + DELETE_BATCH_SIZE);
         try {
-          const deleted = await engine.deletePages(batch, deleteScopedOpts);
+          const deleted = await markSyncDeletedPages(engine, batch, deleteScopedOpts);
           reconciledDeletes += deleted.length;
         } catch {
           // Per-slug fallback on a batch blip (mirrors the incremental delete
           // loop). A stale page that won't delete is best-effort, not fatal.
           for (const slug of batch) {
-            try { await engine.deletePage(slug, deleteScopedOpts); reconciledDeletes++; }
+            try {
+              const result = await engine.softDeletePage(slug, deleteScopedOpts);
+              if (result) reconciledDeletes++;
+            }
             catch { /* best-effort */ }
           }
         }
@@ -3359,6 +3506,8 @@ See also:
         noExtract,
         skipFailed, retryFailed, noSchemaPack,
         sourceId: src.id,
+        explicitSourceArg: true,
+        sourceResolutionTier: 'flag',
         strategy: cfg.strategy,
         concurrency,
         signal: composeAbortSignals(allInterrupt.signal, controller?.signal),
@@ -3575,6 +3724,8 @@ See also:
   const onSingleSourceSigint = () => { try { singleSourceInterrupt.abort(new Error('SIGINT')); } catch { /* */ } };
   const opts: SyncOpts = {
     repoPath, dryRun, full, noPull, noEmbed, noExtract, skipFailed, retryFailed, noSchemaPack, sourceId,
+    sourceResolutionTier: resolved.tier,
+    explicitSourceArg: explicitSourceArg !== undefined,
     strategy: strategyArg, concurrency,
     signal: composeAbortSignals(singleSourceInterrupt.signal, singleSourceController?.signal),
   };
