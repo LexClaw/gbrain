@@ -337,7 +337,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   const noWorker = !shouldSpawnAutopilotWorker(args);
 
   if (!repoPath) {
-    console.error('No repo path. Use --repo or run gbrain sync --repo first.');
+    console.error('No repo path. Use --repo or run gbrain sync --repo <path> --source <id> first.');
     process.exit(1);
   }
 
@@ -1125,7 +1125,7 @@ exec '${safeGbrainPath}' autopilot --repo '${safeRepoPath}'
 async function installDaemon(engine: BrainEngine, args: string[]) {
   const repoPath = parseArg(args, '--repo') || await engine.getConfig('sync.repo_path');
   if (!repoPath) {
-    console.error('No repo path. Use --repo or run gbrain sync --repo first.');
+    console.error('No repo path. Use --repo or run gbrain sync --repo <path> --source <id> first.');
     process.exit(1);
   }
 

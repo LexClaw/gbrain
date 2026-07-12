@@ -167,7 +167,7 @@ async function scanFeatures(engine: BrainEngine): Promise<FeatureScanResult> {
           id: 'no-sync', priority: 2,
           title: 'Configure Sync',
           pitch: `Brain not syncing from git. Changes in your repo don't reach your brain.`,
-          command: 'gbrain sync --repo <path>',
+          command: 'gbrain sync --repo <path> --source <id>',
           auto_fixable: false,
         });
       }

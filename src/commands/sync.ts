@@ -560,42 +560,84 @@ export async function assertSyncSourceRootGuard(
 }
 
 type SyncReconciliationReason = 'incremental_deleted' | 'unsyncable_modified' | 'full_stale';
+type SyncReconciliationStatus = 'proposed' | 'approved' | 'applying' | 'applied' | 'failed' | 'rolling_back' | 'rolled_back' | 'purged';
 
 const SYNC_RECONCILE_MAX_ABSOLUTE = 100;
 const SYNC_RECONCILE_MAX_PERCENT = 0.25;
+const SYNC_RECONCILE_RETENTION_DAYS = 30;
 
-async function ensureReconciliationAuditSchema(engine: BrainEngine): Promise<void> {
-  await engine.executeRaw(
-    `CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
-       operation_id text PRIMARY KEY,
-       manifest_hash text NOT NULL,
-       source_id text NOT NULL,
-       actor text NOT NULL,
-       role text NOT NULL,
-       reason text NOT NULL,
-       candidate_count integer NOT NULL,
-       population_count integer NOT NULL,
-       threshold_absolute integer NOT NULL,
-       threshold_percentage double precision NOT NULL,
-       authorized boolean NOT NULL,
-       override_reason text,
-       before_state jsonb NOT NULL,
-       after_state jsonb,
-       result text NOT NULL,
-       failure text,
-       created_at timestamptz NOT NULL DEFAULT now(),
-       completed_at timestamptz
-     )`,
+interface DbIdentity {
+  current_user: string;
+  session_user: string;
+}
+
+async function currentDbIdentity(engine: BrainEngine): Promise<DbIdentity> {
+  const rows = await engine.executeRaw<DbIdentity>(
+    `SELECT current_user::text AS current_user, session_user::text AS session_user`,
+  );
+  return rows[0] ?? { current_user: 'unknown', session_user: 'unknown' };
+}
+
+async function assertReconciliationSchema(engine: BrainEngine): Promise<void> {
+  const rows = await engine.executeRaw<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+     FROM information_schema.tables
+     WHERE table_name IN ('sync_reconciliation_audit', 'sync_reconciliation_role_policy')`,
+  );
+  if (Number(rows[0]?.n ?? 0) !== 2) {
+    throw new Error('Unsafe reconciliation: migrated reconciliation schema is unavailable. Run migrations first.');
+  }
+}
+
+async function assertRoleCapability(
+  engine: BrainEngine,
+  capability: 'can_normal_sync' | 'can_apply_reconciliation' | 'can_repair_source_root' | 'can_hard_purge',
+): Promise<DbIdentity> {
+  const identity = await currentDbIdentity(engine);
+  const rows = await engine.executeRaw<{ ok: boolean }>(
+    `SELECT ${capability} AS ok FROM sync_reconciliation_role_policy WHERE role_name = $1`,
+    [identity.current_user],
+  );
+  if (rows[0]?.ok !== true) {
+    throw new Error(
+      `Unsafe reconciliation: database role ${identity.current_user} lacks ${capability}. ` +
+      `Run under the dedicated database role with SET ROLE or dedicated credentials.`,
+    );
+  }
+  return identity;
+}
+
+async function pageSnapshots(
+  engine: BrainEngine,
+  sourceId: string,
+  slugs: string[],
+): Promise<Array<Record<string, unknown>>> {
+  if (slugs.length === 0) return [];
+  return await engine.executeRaw<Record<string, unknown>>(
+    `SELECT id, source_id, slug, source_path, content_hash, updated_at::text AS updated_at,
+            deleted_at::text AS deleted_at
+     FROM pages
+     WHERE source_id = $1 AND slug = ANY($2)
+     ORDER BY slug`,
+    [sourceId, slugs],
   );
 }
 
-async function reconcileFilesystemRemovals(
+function deterministicHash(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+export async function proposeSyncReconciliation(
   engine: BrainEngine,
   slugs: string[],
-  opts: { sourceId: string; repoPath: string; reason: SyncReconciliationReason; actor?: string; role?: string },
-): Promise<string[]> {
+  opts: { sourceId: string; repoPath: string; reason: SyncReconciliationReason; baselineCommit?: string; observedCommit?: string },
+): Promise<{ operationId: string; manifestHash: string; status: SyncReconciliationStatus; candidates: string[] }> {
   const candidates = unique(slugs).sort();
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) {
+    return { operationId: '', manifestHash: '', status: 'proposed', candidates };
+  }
+  await assertReconciliationSchema(engine);
+  const identity = await assertRoleCapability(engine, 'can_normal_sync');
   const repoBefore = gitRootIdentity(opts.repoPath);
   const popRows = await engine.executeRaw<{ n: number }>(
     `SELECT COUNT(*)::int AS n FROM pages WHERE source_id = $1 AND deleted_at IS NULL`,
@@ -606,69 +648,200 @@ async function reconcileFilesystemRemovals(
     throw new Error('Unsafe reconciliation: population is empty or unknown. Refusing filesystem-derived removals.');
   }
   const pct = candidates.length / populationCount;
-  const overrideReason = process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON;
-  const authorized = candidates.length <= SYNC_RECONCILE_MAX_ABSOLUTE && pct <= SYNC_RECONCILE_MAX_PERCENT;
-  if (!authorized && !overrideReason) {
+  const authorizedByPolicy = candidates.length <= SYNC_RECONCILE_MAX_ABSOLUTE && pct <= SYNC_RECONCILE_MAX_PERCENT;
+  if (!authorizedByPolicy) {
     throw new Error(
-      `Unsafe reconciliation: ${candidates.length}/${populationCount} removals exceeds thresholds ` +
+      `Unsafe reconciliation: ${candidates.length}/${populationCount} removals exceeds aggregate thresholds ` +
       `${SYNC_RECONCILE_MAX_ABSOLUTE} absolute or ${SYNC_RECONCILE_MAX_PERCENT * 100} percent. ` +
-      `Set GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON with a privileged reason for isolated rehearsal only.`,
+      `Approval must be a separate role-gated operation; environment overrides are not accepted.`,
     );
   }
+  const beforeState = await pageSnapshots(engine, opts.sourceId, candidates);
   const manifest = {
-    schema_version: 1,
+    schema_version: 2,
     source_id: opts.sourceId,
+    registration_generation: 0,
     canonical_root: repoBefore.canonicalRoot,
     repository_identity: repoBefore.identityHash,
-    registration_generation: null,
-    baseline_commit: repoBefore.head,
-    observed_commit: repoBefore.head,
+    baseline_commit: opts.baselineCommit ?? null,
+    observed_commit: opts.observedCommit ?? repoBefore.head,
     reason: opts.reason,
-    candidates,
+    candidates: beforeState.map((row) => ({
+      id: row.id,
+      source_id: row.source_id,
+      slug: row.slug,
+      source_path: row.source_path,
+      content_hash: row.content_hash,
+      updated_at: row.updated_at,
+      prior_deleted_at: row.deleted_at ?? null,
+    })),
     candidate_count: candidates.length,
     population_count: populationCount,
-    absolute_impact: candidates.length,
-    percentage_impact: pct,
-    thresholds: { absolute: SYNC_RECONCILE_MAX_ABSOLUTE, percentage: SYNC_RECONCILE_MAX_PERCENT },
-    actor: opts.actor ?? 'sync',
-    role: opts.role ?? 'normal_sync_proposer',
-    authorized: authorized || Boolean(overrideReason),
-    override_reason: overrideReason ?? null,
-    created_at: new Date().toISOString(),
+    aggregate_impact: { absolute: candidates.length, percentage: pct },
+    policy: { absolute: SYNC_RECONCILE_MAX_ABSOLUTE, percentage: SYNC_RECONCILE_MAX_PERCENT },
+    proposer: identity,
   };
-  const manifestHash = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+  const manifestHash = deterministicHash(manifest);
   const operationId = `sync-reconcile-${manifestHash.slice(0, 24)}`;
-  await ensureReconciliationAuditSchema(engine);
-  return await engine.transaction(async (tx) => {
-    await tx.executeRaw(
-      `INSERT INTO sync_reconciliation_audit
-       (operation_id, manifest_hash, source_id, actor, role, reason, candidate_count, population_count,
-        threshold_absolute, threshold_percentage, authorized, override_reason, before_state, result)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, 'started')
-       ON CONFLICT (operation_id) DO NOTHING`,
-      [
-        operationId, manifestHash, opts.sourceId, manifest.actor, manifest.role, opts.reason,
-        candidates.length, populationCount, SYNC_RECONCILE_MAX_ABSOLUTE, SYNC_RECONCILE_MAX_PERCENT,
-        manifest.authorized, overrideReason ?? null, manifest,
-      ],
-    );
-    const repoDuring = gitRootIdentity(opts.repoPath);
-    if (repoDuring.identityHash !== repoBefore.identityHash || repoDuring.canonicalRoot !== repoBefore.canonicalRoot) {
-      throw new Error('Unsafe reconciliation: repository identity changed during validation.');
+
+  const repoDuring = gitRootIdentity(opts.repoPath);
+  if (repoDuring.identityHash !== repoBefore.identityHash || repoDuring.canonicalRoot !== repoBefore.canonicalRoot) {
+    throw new Error('Unsafe reconciliation: repository identity changed during validation.');
+  }
+
+  const existing = await engine.executeRaw<{ manifest_hash: string; before_state: unknown; result: SyncReconciliationStatus }>(
+    `SELECT manifest_hash, before_state, result FROM sync_reconciliation_audit WHERE operation_id = $1`,
+    [operationId],
+  );
+  if (existing.length > 0) {
+    if (existing[0].manifest_hash !== manifestHash || JSON.stringify(existing[0].before_state) !== JSON.stringify(manifest)) {
+      throw new Error(`Unsafe reconciliation: divergent operation_id reuse for ${operationId}.`);
     }
-    const marked: string[] = [];
-    for (const slug of candidates) {
-      const result = await tx.softDeletePage(slug, { sourceId: opts.sourceId });
-      if (result) marked.push(result.slug);
+    return { operationId, manifestHash, status: existing[0].result, candidates };
+  }
+
+  await engine.executeRaw(
+    `INSERT INTO sync_reconciliation_audit
+     (operation_id, manifest_hash, source_id, actor, role, reason, candidate_count, population_count,
+      threshold_absolute, threshold_percentage, authorized, override_reason, before_state, result)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, NULL, $11::jsonb, 'proposed')`,
+    [
+      operationId, manifestHash, opts.sourceId, identity.current_user, identity.current_user, opts.reason,
+      candidates.length, populationCount, SYNC_RECONCILE_MAX_ABSOLUTE, SYNC_RECONCILE_MAX_PERCENT, manifest,
+    ],
+  );
+  return { operationId, manifestHash, status: 'proposed', candidates };
+}
+
+export async function approveSyncReconciliation(
+  engine: BrainEngine,
+  operationId: string,
+  justification: string,
+): Promise<void> {
+  await assertReconciliationSchema(engine);
+  const identity = await assertRoleCapability(engine, 'can_apply_reconciliation');
+  const rows = await engine.executeRaw<{ result: SyncReconciliationStatus }>(
+    `UPDATE sync_reconciliation_audit
+     SET result = 'approved', authorized = true,
+         after_state = jsonb_build_object('approved_by', $2, 'session_user', $3, 'justification', $4)
+     WHERE operation_id = $1 AND result = 'proposed'
+     RETURNING result`,
+    [operationId, identity.current_user, identity.session_user, justification],
+  );
+  if (rows.length !== 1) throw new Error(`Cannot approve reconciliation ${operationId}: not found or not proposed.`);
+}
+
+export async function applySyncReconciliation(engine: BrainEngine, operationId: string): Promise<string[]> {
+  await assertReconciliationSchema(engine);
+  await assertRoleCapability(engine, 'can_apply_reconciliation');
+  const rows = await engine.executeRaw<{ source_id: string; before_state: any; result: SyncReconciliationStatus }>(
+    `SELECT source_id, before_state, result FROM sync_reconciliation_audit WHERE operation_id = $1`,
+    [operationId],
+  );
+  const row = rows[0];
+  if (!row) throw new Error(`Cannot apply reconciliation ${operationId}: not found.`);
+  if (row.result !== 'approved' && row.result !== 'failed') {
+    throw new Error(`Cannot apply reconciliation ${operationId}: status ${row.result} is not approved.`);
+  }
+  const manifest = row.before_state;
+  const candidates = Array.isArray(manifest?.candidates) ? manifest.candidates : [];
+  try {
+    return await engine.transaction(async (tx) => {
+      await tx.executeRaw(`UPDATE sync_reconciliation_audit SET result = 'applying' WHERE operation_id = $1`, [operationId]);
+      const marked: string[] = [];
+      for (const candidate of candidates) {
+        const slug = String(candidate.slug);
+        const result = await tx.softDeletePage(slug, { sourceId: row.source_id });
+        if (result) marked.push(result.slug);
+      }
+      await tx.executeRaw(
+        `UPDATE sync_reconciliation_audit
+         SET result = 'applied', completed_at = now(),
+             after_state = COALESCE(after_state, '{}'::jsonb) || $2::jsonb
+         WHERE operation_id = $1`,
+        [operationId, { applied: marked.sort(), applied_count: marked.length }],
+      );
+      return marked;
+    });
+  } catch (e) {
+    await engine.executeRaw(
+      `UPDATE sync_reconciliation_audit SET result = 'failed', failure = $2 WHERE operation_id = $1`,
+      [operationId, e instanceof Error ? e.message : String(e)],
+    );
+    throw e;
+  }
+}
+
+async function reconcileFilesystemRemovals(
+  engine: BrainEngine,
+  slugs: string[],
+  opts: { sourceId: string; repoPath: string; reason: SyncReconciliationReason; baselineCommit?: string; observedCommit?: string },
+): Promise<string[]> {
+  const proposal = await proposeSyncReconciliation(engine, slugs, opts);
+  if (proposal.candidates.length === 0) return [];
+  throw new Error(
+    `Unsafe reconciliation: filesystem removals were proposed as ${proposal.operationId} but not applied. ` +
+    `Run a separately authenticated approve/apply path under gbrain_reconciliation_apply.`,
+  );
+}
+
+export async function rollbackReviveSyncReconciliation(engine: BrainEngine, operationId: string): Promise<string[]> {
+  await assertReconciliationSchema(engine);
+  await assertRoleCapability(engine, 'can_repair_source_root');
+  const rows = await engine.executeRaw<{ source_id: string; before_state: any; result: SyncReconciliationStatus }>(
+    `SELECT source_id, before_state, result FROM sync_reconciliation_audit WHERE operation_id = $1`,
+    [operationId],
+  );
+  const row = rows[0];
+  if (!row) throw new Error(`Cannot rollback reconciliation ${operationId}: not found.`);
+  const candidates = Array.isArray(row.before_state?.candidates) ? row.before_state.candidates : [];
+  return await engine.transaction(async (tx) => {
+    await tx.executeRaw(`UPDATE sync_reconciliation_audit SET result = 'rolling_back' WHERE operation_id = $1`, [operationId]);
+    const restored: string[] = [];
+    for (const candidate of candidates) {
+      const priorDeletedAt = candidate.prior_deleted_at ?? null;
+      if (priorDeletedAt === null) {
+        const result = await tx.restorePage(String(candidate.slug), { sourceId: row.source_id });
+        if (result) restored.push(String(candidate.slug));
+      }
     }
     await tx.executeRaw(
       `UPDATE sync_reconciliation_audit
-       SET result = 'applied', after_state = $2::jsonb, completed_at = now()
+       SET result = 'rolled_back', completed_at = now(),
+           after_state = COALESCE(after_state, '{}'::jsonb) || $2::jsonb
        WHERE operation_id = $1`,
-      [operationId, { applied: marked.sort(), applied_count: marked.length }],
+      [operationId, { restored: restored.sort(), restored_count: restored.length }],
     );
-    return marked;
+    return restored;
   });
+}
+
+export async function authorizedPurgeSyncReconciliation(engine: BrainEngine, operationId: string): Promise<number> {
+  await assertReconciliationSchema(engine);
+  await assertRoleCapability(engine, 'can_hard_purge');
+  const rows = await engine.executeRaw<{ source_id: string; before_state: any; result: SyncReconciliationStatus; created_at: string }>(
+    `SELECT source_id, before_state, result, created_at::text AS created_at
+     FROM sync_reconciliation_audit WHERE operation_id = $1`,
+    [operationId],
+  );
+  const row = rows[0];
+  if (!row) throw new Error(`Cannot purge reconciliation ${operationId}: not found.`);
+  if (row.result !== 'applied') throw new Error(`Cannot purge reconciliation ${operationId}: status ${row.result} is not applied.`);
+  const createdAt = new Date(row.created_at).getTime();
+  const minAgeMs = SYNC_RECONCILE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  if (Number.isFinite(createdAt) && Date.now() - createdAt < minAgeMs) {
+    throw new Error(`Cannot purge reconciliation ${operationId}: retention window has not elapsed.`);
+  }
+  const candidates = Array.isArray(row.before_state?.candidates) ? row.before_state.candidates : [];
+  const candidateSlugs = candidates.map((candidate: any) => String(candidate.slug)).sort();
+  const deletedRows = await engine.executeRaw<{ slug: string }>(
+    `DELETE FROM pages
+     WHERE source_id = $1 AND slug = ANY($2) AND deleted_at IS NOT NULL
+     RETURNING slug`,
+    [row.source_id, candidateSlugs],
+  );
+  await engine.executeRaw(`UPDATE sync_reconciliation_audit SET result = 'purged', completed_at = now() WHERE operation_id = $1`, [operationId]);
+  return deletedRows.length;
 }
 
 /**
@@ -3007,6 +3180,59 @@ export async function runSync(engine: BrainEngine, args: string[]) {
   // if 'trigger' isn't the first arg.
   if (args[0] === 'trigger') {
     return runSyncTrigger(engine, args.slice(1));
+  }
+  if (args[0] === 'status') {
+    const operationId = args.find((a, i) => args[i - 1] === '--operation') ?? args[1];
+    const where = operationId ? 'WHERE operation_id = $1' : '';
+    const rows = await engine.executeRaw(
+      `SELECT operation_id, manifest_hash, source_id, reason, candidate_count, population_count,
+              result, failure, created_at::text AS created_at, completed_at::text AS completed_at
+       FROM sync_reconciliation_audit ${where}
+       ORDER BY created_at DESC LIMIT 50`,
+      operationId ? [operationId] : [],
+    );
+    console.log(JSON.stringify({ schema_version: 1, operations: rows }, null, 2));
+    return;
+  }
+  if (args[0] === 'approve') {
+    const operationId = args.find((a, i) => args[i - 1] === '--operation') ?? args[1];
+    const reason = args.find((a, i) => args[i - 1] === '--reason') ?? 'operator-approved';
+    if (!operationId) throw new Error('sync approve requires --operation <id>');
+    await approveSyncReconciliation(engine, operationId, reason);
+    console.log(JSON.stringify({ status: 'approved', operation_id: operationId }));
+    return;
+  }
+  if (args[0] === 'apply') {
+    const operationId = args.find((a, i) => args[i - 1] === '--operation') ?? args[1];
+    if (!operationId) throw new Error('sync apply requires --operation <id>');
+    const applied = await applySyncReconciliation(engine, operationId);
+    console.log(JSON.stringify({ status: 'applied', operation_id: operationId, applied }));
+    return;
+  }
+  if (args[0] === 'resume') {
+    const rows = await engine.executeRaw<{ operation_id: string }>(
+      `SELECT operation_id FROM sync_reconciliation_audit
+       WHERE result IN ('approved', 'failed') ORDER BY created_at LIMIT 1`,
+    );
+    const operationId = args.find((a, i) => args[i - 1] === '--operation') ?? rows[0]?.operation_id;
+    if (!operationId) throw new Error('sync resume found no approved or failed reconciliation operation');
+    const applied = await applySyncReconciliation(engine, operationId);
+    console.log(JSON.stringify({ status: 'resumed', operation_id: operationId, applied }));
+    return;
+  }
+  if (args[0] === 'rollback-revive') {
+    const operationId = args.find((a, i) => args[i - 1] === '--operation') ?? args[1];
+    if (!operationId) throw new Error('sync rollback-revive requires --operation <id>');
+    const restored = await rollbackReviveSyncReconciliation(engine, operationId);
+    console.log(JSON.stringify({ status: 'rolled_back', operation_id: operationId, restored }));
+    return;
+  }
+  if (args[0] === 'authorized-purge') {
+    const operationId = args.find((a, i) => args[i - 1] === '--operation') ?? args[1];
+    if (!operationId) throw new Error('sync authorized-purge requires --operation <id>');
+    const purged = await authorizedPurgeSyncReconciliation(engine, operationId);
+    console.log(JSON.stringify({ status: 'purged', operation_id: operationId, purged }));
+    return;
   }
 
   // v0.37 fix wave (Lane D.4 + CDX2-12): print usage when `--help`/`-h` is

@@ -5285,25 +5285,10 @@ export const MIGRATIONS: Migration[] = [
           can_apply_reconciliation = EXCLUDED.can_apply_reconciliation,
           can_repair_source_root = EXCLUDED.can_repair_source_root,
           can_hard_purge = EXCLUDED.can_hard_purge;
-        DO $$
-        BEGIN
-          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_normal_sync') THEN
-            CREATE ROLE gbrain_normal_sync NOLOGIN;
-          END IF;
-          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_reconciliation_apply') THEN
-            CREATE ROLE gbrain_reconciliation_apply NOLOGIN;
-          END IF;
-          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_source_repair') THEN
-            CREATE ROLE gbrain_source_repair NOLOGIN;
-          END IF;
-          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_hard_purge') THEN
-            CREATE ROLE gbrain_hard_purge NOLOGIN;
-          END IF;
-        END $$;
-        GRANT SELECT, INSERT, UPDATE ON sync_reconciliation_audit TO gbrain_reconciliation_apply;
-        GRANT SELECT ON sync_reconciliation_audit TO gbrain_normal_sync;
-        GRANT SELECT ON sync_reconciliation_role_policy TO gbrain_normal_sync, gbrain_reconciliation_apply, gbrain_source_repair, gbrain_hard_purge;
-        REVOKE DELETE ON sync_reconciliation_audit FROM gbrain_normal_sync;
+        -- Cluster roles and grants are intentionally not created by application
+        -- migrations. See artifacts/dba/sync-reconciliation-roles.sql and
+        -- artifacts/dba/sync-reconciliation-roles-rollback.sql for the
+        -- separately reviewed DBA bootstrap lifecycle.
       `,
       pglite: `
         CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (

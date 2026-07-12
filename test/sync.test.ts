@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { buildSyncManifest, isSyncable, pathToSlug, pruneDir, isCodeFilePath } from '../src/core/sync.ts';
-import { buildAutoEmbedArgs, buildGitInvocation } from '../src/commands/sync.ts';
+import { applySyncReconciliation, buildAutoEmbedArgs, buildGitInvocation, proposeSyncReconciliation } from '../src/commands/sync.ts';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
@@ -763,15 +763,24 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     }
   }
 
-  async function withReconcileOverride<T>(fn: () => Promise<T>): Promise<T> {
-    const prev = process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON;
-    process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON = 'unit-test-small-fixture-delete';
-    try {
-      return await fn();
-    } finally {
-      if (prev === undefined) delete process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON;
-      else process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON = prev;
-    }
+  async function setCurrentUserCapabilities(caps: {
+    normal?: boolean;
+    apply?: boolean;
+    repair?: boolean;
+    purge?: boolean;
+  }): Promise<void> {
+    const identity = await engine.executeRaw<{ current_user: string }>(`SELECT current_user::text AS current_user`);
+    await engine.executeRaw(
+      `INSERT INTO sync_reconciliation_role_policy
+         (role_name, can_normal_sync, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (role_name) DO UPDATE SET
+         can_normal_sync = EXCLUDED.can_normal_sync,
+         can_apply_reconciliation = EXCLUDED.can_apply_reconciliation,
+         can_repair_source_root = EXCLUDED.can_repair_source_root,
+         can_hard_purge = EXCLUDED.can_hard_purge`,
+      [identity[0].current_user, Boolean(caps.normal), Boolean(caps.apply), Boolean(caps.repair), Boolean(caps.purge)],
+    );
   }
 
   test('orphan-present (not an ancestor): diffs tree-to-tree, imports only the delta, advances bookmark', async () => {
@@ -831,11 +840,14 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     expect(await engine.getPage('people/alice')).not.toBeNull();
   });
 
-  test('divergence: a file present in the orphan tree but dropped from HEAD is deleted', async () => {
+  test('divergence: a file present in the orphan tree but dropped from HEAD is proposed, not deleted', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
     const repo = await mkRepo({
       'people/alice.md': personMd('Alice', 'Alice is a person.'),
       'people/bob.md': personMd('Bob', 'Bob is a person.'),
+      'people/cal.md': personMd('Cal', 'Cal is a person.'),
+      'people/dee.md': personMd('Dee', 'Dee is a person.'),
+      'people/evan.md': personMd('Evan', 'Evan is a person.'),
     });
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
     expect(await engine.getPage('people/bob')).not.toBeNull();
@@ -845,16 +857,26 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     writeFileSync(join(repo, 'people/alice.md'), personMd('Alice', 'Alice was corrected.'));
     execSync('git add -A && git commit --amend -m "drop bob, edit alice"', { cwd: repo, stdio: 'pipe' });
 
-    const result = await withReconcileOverride(() => performSync(engine, { repoPath: repo, ...SYNC_OPTS }));
-    expect(result.status).toBe('synced');
-    expect(await engine.getPage('people/bob')).toBeNull();          // deleted
+    await setCurrentUserCapabilities({ normal: true });
+    await expect(performSync(engine, { repoPath: repo, ...SYNC_OPTS })).rejects.toThrow(/proposed as sync-reconcile-/);
+    expect(await engine.getPage('people/bob')).not.toBeNull();      // proposed only
     const alice = await engine.getPage('people/alice');
-    expect(alice!.compiled_truth).toContain('corrected');           // updated
+    expect(alice!.compiled_truth).toContain('Alice is a person.');  // proposal abort leaves imports unapplied
+    const audits = await engine.executeRaw<{ reason: string; result: string; candidate_count: number }>(
+      `SELECT reason, result, candidate_count FROM sync_reconciliation_audit`,
+    );
+    expect(audits).toContainEqual({ reason: 'incremental_deleted', result: 'proposed', candidate_count: 1 });
   });
 
-  test('F-C: a rename whose destination is unsyncable deletes the old page', async () => {
+  test('F-C: a rename whose destination is unsyncable proposes the old page without deleting it', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = await mkRepo({ 'people/carol.md': personMd('Carol', 'Carol is a person.') });
+    const repo = await mkRepo({
+      'people/carol.md': personMd('Carol', 'Carol is a person.'),
+      'people/dana.md': personMd('Dana', 'Dana is a person.'),
+      'people/eli.md': personMd('Eli', 'Eli is a person.'),
+      'people/finn.md': personMd('Finn', 'Finn is a person.'),
+      'people/gia.md': personMd('Gia', 'Gia is a person.'),
+    });
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
     expect(await engine.getPage('people/carol')).not.toBeNull();
 
@@ -864,16 +886,23 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     execSync('git mv people/carol.md people/carol.txt', { cwd: repo, stdio: 'pipe' });
     execSync('git commit -m "rename carol to txt"', { cwd: repo, stdio: 'pipe' });
 
-    const result = await withReconcileOverride(() => performSync(engine, { repoPath: repo, ...SYNC_OPTS }));
-    expect(result.status).toBe('synced');
-    expect(await engine.getPage('people/carol')).toBeNull();
+    await setCurrentUserCapabilities({ normal: true });
+    await expect(performSync(engine, { repoPath: repo, ...SYNC_OPTS })).rejects.toThrow(/proposed as sync-reconcile-/);
+    expect(await engine.getPage('people/carol')).not.toBeNull();
+    const audits = await engine.executeRaw<{ reason: string; result: string; candidate_count: number }>(
+      `SELECT reason, result, candidate_count FROM sync_reconciliation_audit`,
+    );
+    expect(audits).toContainEqual({ reason: 'incremental_deleted', result: 'proposed', candidate_count: 1 });
   });
 
-  test('F-A: full reconcile purges stale file-backed pages but spares manual + metafile pages', async () => {
+  test('F-A: full reconcile proposes stale file-backed pages but spares manual + metafile pages', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
     const repo = await mkRepo({
       'people/alice.md': personMd('Alice', 'Alice is a person.'),
       'people/bob.md': personMd('Bob', 'Bob is a person.'),
+      'people/cal.md': personMd('Cal', 'Cal is a person.'),
+      'people/dee.md': personMd('Dee', 'Dee is a person.'),
+      'people/evan.md': personMd('Evan', 'Evan is a person.'),
     });
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
 
@@ -891,14 +920,47 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     execSync('git rm people/bob.md', { cwd: repo, stdio: 'pipe' });
     execSync('git commit -m "remove bob"', { cwd: repo, stdio: 'pipe' });
 
-    const result = await performSync(engine, { repoPath: repo, full: true, ...SYNC_OPTS });
-    expect(result.status).toBe('first_sync');
-    expect(result.deleted).toBeGreaterThanOrEqual(1);
+    await setCurrentUserCapabilities({ normal: true });
+    await expect(performSync(engine, { repoPath: repo, full: true, ...SYNC_OPTS })).rejects.toThrow(/proposed as sync-reconcile-/);
 
-    expect(await engine.getPage('people/bob')).toBeNull();          // stale file-backed → purged
+    expect(await engine.getPage('people/bob')).not.toBeNull();      // stale file-backed → proposed only
     expect(await engine.getPage('people/alice')).not.toBeNull();    // still present → kept
     expect(await engine.getPage('manual/note')).not.toBeNull();     // null source_path → spared
     expect(await engine.getPage('people/log')).not.toBeNull();      // metafile source_path → spared
+    const audits = await engine.executeRaw<{ reason: string; result: string; candidate_count: number }>(
+      `SELECT reason, result, candidate_count FROM sync_reconciliation_audit`,
+    );
+    expect(audits).toContainEqual({ reason: 'full_stale', result: 'proposed', candidate_count: 1 });
+  });
+
+  test('approved apply path tombstones a proposed reconciliation under apply capability', async () => {
+    const { performSync } = await import('../src/commands/sync.ts');
+    const repo = await mkRepo({
+      'people/dana.md': personMd('Dana', 'Dana is a person.'),
+      'people/eli.md': personMd('Eli', 'Eli is a person.'),
+      'people/finn.md': personMd('Finn', 'Finn is a person.'),
+      'people/gia.md': personMd('Gia', 'Gia is a person.'),
+      'people/hal.md': personMd('Hal', 'Hal is a person.'),
+    });
+    await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+    expect(await engine.getPage('people/dana')).not.toBeNull();
+
+    await setCurrentUserCapabilities({ normal: true });
+    const proposal = await proposeSyncReconciliation(engine, ['people/dana'], {
+      sourceId: 'default',
+      repoPath: repo,
+      reason: 'incremental_deleted',
+    });
+    await expect(applySyncReconciliation(engine, proposal.operationId)).rejects.toThrow(/lacks can_apply_reconciliation/);
+    expect(await engine.getPage('people/dana')).not.toBeNull();
+
+    await setCurrentUserCapabilities({ apply: true });
+    await engine.executeRaw(
+      `UPDATE sync_reconciliation_audit SET result = 'approved', authorized = true WHERE operation_id = $1`,
+      [proposal.operationId],
+    );
+    expect(await applySyncReconciliation(engine, proposal.operationId)).toEqual(['people/dana']);
+    expect(await engine.getPage('people/dana')).toBeNull();
   });
 
   test('F-B: an undiffable-but-present bookmark falls back to a full reconcile instead of throwing', async () => {
