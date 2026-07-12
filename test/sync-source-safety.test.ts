@@ -4,8 +4,9 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { runMigrations } from '../src/core/migrate.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { assertSyncSourceRootGuard, performSync, syncOneSource, proposeSyncReconciliation, approveSyncReconciliation, applySyncReconciliation, repairSourceRootRegistration } from '../src/commands/sync.ts';
+import { assertSyncSourceRootGuard, performSync, syncOneSource, proposeSyncReconciliation, approveSyncReconciliation, applySyncReconciliation, recoverAbandonedSyncReconciliation, repairSourceRootRegistration } from '../src/commands/sync.ts';
 import { getCapabilities } from '../src/commands/capabilities.ts';
 
 let engine: PGLiteEngine;
@@ -240,31 +241,26 @@ describe('sync source safety guard', () => {
   });
 
   test('migration-backed reconciliation role policy is present on fresh schema', async () => {
-    const fresh = new PGLiteEngine();
-    await fresh.connect({});
-    try {
-      await fresh.initSchema();
-      const rows = await fresh.executeRaw<{
-        role_name: string;
-        can_normal_sync: boolean;
-        can_approve_reconciliation: boolean;
-        can_apply_reconciliation: boolean;
-        can_repair_source_root: boolean;
-        can_hard_purge: boolean;
-      }>(
-        `SELECT role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge
-         FROM sync_reconciliation_role_policy ORDER BY role_name`,
-      );
-      expect(rows).toEqual([
-        { role_name: 'gbrain_hard_purge', can_normal_sync: false, can_approve_reconciliation: false, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: true },
-        { role_name: 'gbrain_normal_sync', can_normal_sync: true, can_approve_reconciliation: false, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: false },
-        { role_name: 'gbrain_reconciliation_apply', can_normal_sync: false, can_approve_reconciliation: false, can_apply_reconciliation: true, can_repair_source_root: false, can_hard_purge: false },
-        { role_name: 'gbrain_reconciliation_approve', can_normal_sync: false, can_approve_reconciliation: true, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: false },
-        { role_name: 'gbrain_source_repair', can_normal_sync: false, can_approve_reconciliation: false, can_apply_reconciliation: false, can_repair_source_root: true, can_hard_purge: false },
-      ]);
-    } finally {
-      await fresh.disconnect();
-    }
+    await engine.setConfig('version', '116');
+    await runMigrations(engine);
+    const rows = await engine.executeRaw<{
+      role_name: string;
+      can_normal_sync: boolean;
+      can_approve_reconciliation: boolean;
+      can_apply_reconciliation: boolean;
+      can_repair_source_root: boolean;
+      can_hard_purge: boolean;
+    }>(
+      `SELECT role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge
+       FROM sync_reconciliation_role_policy ORDER BY role_name`,
+    );
+    expect(rows).toEqual([
+      { role_name: 'gbrain_hard_purge', can_normal_sync: false, can_approve_reconciliation: false, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: true },
+      { role_name: 'gbrain_normal_sync', can_normal_sync: true, can_approve_reconciliation: false, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: false },
+      { role_name: 'gbrain_reconciliation_apply', can_normal_sync: false, can_approve_reconciliation: false, can_apply_reconciliation: true, can_repair_source_root: false, can_hard_purge: false },
+      { role_name: 'gbrain_reconciliation_approve', can_normal_sync: false, can_approve_reconciliation: true, can_apply_reconciliation: false, can_repair_source_root: false, can_hard_purge: false },
+      { role_name: 'gbrain_source_repair', can_normal_sync: false, can_approve_reconciliation: false, can_apply_reconciliation: false, can_repair_source_root: true, can_hard_purge: false },
+    ]);
   });
 
   test('proposal/apply split denies tombstone to normal sync and applies under apply capability', async () => {
@@ -308,25 +304,92 @@ describe('sync source safety guard', () => {
     }
   });
 
-  test('gbrain capabilities exposes exact sync-safety tokens from schema support', async () => {
-    const fresh = new PGLiteEngine();
-    await fresh.connect({});
+  test('apply refuses approved rows until authorization bit is true', async () => {
+    const repo = makeRepo(5);
     try {
-      await fresh.initSchema();
-      const caps = await getCapabilities(fresh) as any;
-      expect(caps.sync_safety.required_tokens).toEqual([
-        'explicit-source',
-        'root-identity',
-        'reconciliation-manifest',
-        'db-roles',
-        'schema-v2',
-      ]);
-      expect(caps.sync_safety.capabilities.reconciliation_manifest).toBe(true);
-      expect(caps.sync_safety.capabilities.db_roles).toBe(false);
-      expect(caps.sync_safety.supported).toBe(false);
+      await setSourcePath('default', repo);
+      await performSync(engine, {
+        repoPath: repo,
+        sourceId: 'default',
+        explicitSourceArg: true,
+        sourceResolutionTier: 'flag',
+        noPull: true,
+        noEmbed: true,
+        noExtract: true,
+      });
+      await grantCurrentUser('can_normal_sync');
+      const proposal = await proposeSyncReconciliation(engine, ['notes/alpha'], {
+        sourceId: 'default',
+        repoPath: repo,
+        reason: 'incremental_deleted',
+      });
+      await engine.executeRaw(
+        `UPDATE sync_reconciliation_audit SET result = 'approved', authorized = false WHERE operation_id = $1`,
+        [proposal.operationId],
+      );
+      await grantCurrentUser('can_apply_reconciliation');
+      await expect(applySyncReconciliation(engine, proposal.operationId, { repoPath: repo }))
+        .rejects.toThrow(/authorized=true/);
+      expect(await engine.getPage('notes/alpha')).not.toBeNull();
     } finally {
-      await fresh.disconnect();
+      rmSync(repo, { recursive: true, force: true });
     }
+  });
+
+  test('abandoned applying rows are lease-recovered and can be retried', async () => {
+    const repo = makeRepo(5);
+    try {
+      await setSourcePath('default', repo);
+      await performSync(engine, {
+        repoPath: repo,
+        sourceId: 'default',
+        explicitSourceArg: true,
+        sourceResolutionTier: 'flag',
+        noPull: true,
+        noEmbed: true,
+        noExtract: true,
+      });
+      await grantCurrentUser('can_normal_sync');
+      const proposal = await proposeSyncReconciliation(engine, ['notes/alpha'], {
+        sourceId: 'default',
+        repoPath: repo,
+        reason: 'incremental_deleted',
+      });
+      await grantCurrentUser('can_approve_reconciliation');
+      await approveSyncReconciliation(engine, proposal.operationId, 'unit-test');
+      await grantCurrentUser('can_apply_reconciliation');
+      await engine.executeRaw(
+        `UPDATE sync_reconciliation_audit
+         SET result = 'applying', applying_claimed_at = now() - interval '1 hour', apply_attempt = apply_attempt + 1
+         WHERE operation_id = $1`,
+        [proposal.operationId],
+      );
+      await expect(applySyncReconciliation(engine, proposal.operationId, { repoPath: repo }))
+        .rejects.toThrow(/status applying/);
+      await expect(recoverAbandonedSyncReconciliation(engine, proposal.operationId, { leaseSeconds: 1 })).resolves.toBe(true);
+      expect(await applySyncReconciliation(engine, proposal.operationId, { repoPath: repo })).toEqual(['notes/alpha']);
+      const attempts = await engine.executeRaw<{ apply_attempt: number }>(
+        `SELECT apply_attempt FROM sync_reconciliation_audit WHERE operation_id = $1`,
+        [proposal.operationId],
+      );
+      expect(Number(attempts[0].apply_attempt)).toBe(2);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('gbrain capabilities exposes exact sync-safety tokens from schema support', async () => {
+    const caps = await getCapabilities(engine) as any;
+    expect(caps.sync_safety.required_tokens).toEqual([
+      'explicit-source',
+      'root-identity',
+      'reconciliation-manifest',
+      'db-roles',
+      'schema-v2',
+    ]);
+    expect(caps.sync_safety.capabilities.reconciliation_manifest).toBe(true);
+    expect(caps.sync_safety.capabilities.db_roles).toBe(false);
+    expect(caps.sync_safety.supported).toBe(false);
   });
 
   test('source root repair increments generation and rejects stale approved manifests', async () => {

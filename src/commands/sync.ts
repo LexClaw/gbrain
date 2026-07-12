@@ -565,6 +565,7 @@ type SyncReconciliationStatus = 'proposed' | 'approved' | 'applying' | 'applied'
 const SYNC_RECONCILE_MAX_ABSOLUTE = 100;
 const SYNC_RECONCILE_MAX_PERCENT = 0.25;
 const SYNC_RECONCILE_RETENTION_DAYS = 30;
+const SYNC_RECONCILE_APPLY_LEASE_SECONDS = 15 * 60;
 
 interface DbIdentity {
   current_user: string;
@@ -878,8 +879,9 @@ export async function applySyncReconciliation(
     result: SyncReconciliationStatus;
   }>(
     `UPDATE sync_reconciliation_audit
-     SET result = 'applying', failure = NULL
-     WHERE operation_id = $1 AND result IN ('approved', 'failed')
+     SET result = 'applying', failure = NULL, completed_at = NULL,
+         applying_claimed_at = now(), apply_attempt = apply_attempt + 1
+     WHERE operation_id = $1 AND result IN ('approved', 'failed') AND authorized IS TRUE
      RETURNING source_id, manifest_hash, before_state, result`,
     [operationId],
   );
@@ -890,7 +892,7 @@ export async function applySyncReconciliation(
       [operationId],
     );
     if (!current[0]) throw new Error(`Cannot apply reconciliation ${operationId}: not found.`);
-    throw new Error(`Cannot apply reconciliation ${operationId}: status ${current[0].result} is not approved or failed.`);
+    throw new Error(`Cannot apply reconciliation ${operationId}: status ${current[0].result} is not approved or failed with authorized=true.`);
   }
   try {
     return await engine.transaction(async (tx) => {
@@ -926,6 +928,27 @@ export async function applySyncReconciliation(
     );
     throw e;
   }
+}
+
+export async function recoverAbandonedSyncReconciliation(
+  engine: BrainEngine,
+  operationId: string,
+  opts: { leaseSeconds?: number } = {},
+): Promise<boolean> {
+  await assertReconciliationSchema(engine);
+  await assertRoleCapability(engine, 'can_apply_reconciliation');
+  const leaseSeconds = opts.leaseSeconds ?? SYNC_RECONCILE_APPLY_LEASE_SECONDS;
+  const rows = await engine.executeRaw<{ operation_id: string }>(
+    `UPDATE sync_reconciliation_audit
+     SET result = 'failed', failure = 'abandoned applying lease recovered', completed_at = now()
+     WHERE operation_id = $1
+       AND result = 'applying'
+       AND applying_claimed_at IS NOT NULL
+       AND applying_claimed_at < now() - ($2::text || ' seconds')::interval
+     RETURNING operation_id`,
+    [operationId, String(leaseSeconds)],
+  );
+  return rows.length === 1;
 }
 
 async function reconcileFilesystemRemovals(
@@ -3418,12 +3441,21 @@ export async function runSync(engine: BrainEngine, args: string[]) {
     return;
   }
   if (args[0] === 'repair-source-root') {
-    const sourceId = args.find((a, i) => args[i - 1] === '--source') ?? args[1];
-    const repoPathForRepair = args.find((a, i) => args[i - 1] === '--repo');
+    const sourceFlagIndex = args.findIndex((a) => a === '--source');
+    const repoFlagIndex = args.findIndex((a) => a === '--repo');
+    const sourceId = sourceFlagIndex >= 0 ? args[sourceFlagIndex + 1] : args[1];
+    const repoPathForRepair = repoFlagIndex >= 0 ? args[repoFlagIndex + 1] : undefined;
     if (!sourceId) throw new Error('sync repair-source-root requires --source <id>');
     if (!repoPathForRepair) throw new Error('sync repair-source-root requires --repo <path>');
     const repaired = await repairSourceRootRegistration(engine, sourceId, repoPathForRepair);
     console.log(JSON.stringify({ status: 'repaired', ...repaired }));
+    return;
+  }
+  if (args[0] === 'recover-abandoned-reconciliation') {
+    const operationId = args[1];
+    if (!operationId) throw new Error('sync recover-abandoned-reconciliation requires <operation_id>');
+    const recovered = await recoverAbandonedSyncReconciliation(engine, operationId);
+    console.log(JSON.stringify({ status: recovered ? 'recovered' : 'not_recovered', operation_id: operationId }));
     return;
   }
 

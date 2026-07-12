@@ -5243,6 +5243,7 @@ export const MIGRATIONS: Migration[] = [
     sql: '',
     sqlFor: {
       postgres: `
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
         CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
           operation_id text PRIMARY KEY,
           manifest_hash text NOT NULL,
@@ -5291,6 +5292,7 @@ export const MIGRATIONS: Migration[] = [
         -- separately reviewed DBA bootstrap lifecycle.
       `,
       pglite: `
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
         CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
           operation_id text PRIMARY KEY,
           manifest_hash text NOT NULL,
@@ -5344,6 +5346,8 @@ export const MIGRATIONS: Migration[] = [
     sqlFor: {
       postgres: `
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
+        ALTER TABLE sync_reconciliation_audit ADD COLUMN IF NOT EXISTS apply_attempt integer NOT NULL DEFAULT 0;
+        ALTER TABLE sync_reconciliation_audit ADD COLUMN IF NOT EXISTS applying_claimed_at timestamptz;
         ALTER TABLE sync_reconciliation_role_policy ADD COLUMN IF NOT EXISTS can_approve_reconciliation boolean NOT NULL DEFAULT false;
         INSERT INTO sync_reconciliation_role_policy
           (role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge)
@@ -5355,6 +5359,8 @@ export const MIGRATIONS: Migration[] = [
       `,
       pglite: `
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
+        ALTER TABLE sync_reconciliation_audit ADD COLUMN IF NOT EXISTS apply_attempt integer NOT NULL DEFAULT 0;
+        ALTER TABLE sync_reconciliation_audit ADD COLUMN IF NOT EXISTS applying_claimed_at timestamptz;
         ALTER TABLE sync_reconciliation_role_policy ADD COLUMN IF NOT EXISTS can_approve_reconciliation boolean NOT NULL DEFAULT false;
         INSERT INTO sync_reconciliation_role_policy
           (role_name, can_normal_sync, can_approve_reconciliation, can_apply_reconciliation, can_repair_source_root, can_hard_purge)

@@ -89,6 +89,8 @@ async function initRoleBoundarySchema(engine: PostgresEngine, sql: any) {
       after_state jsonb,
       result text NOT NULL,
       failure text,
+      apply_attempt integer NOT NULL DEFAULT 0,
+      applying_claimed_at timestamptz,
       created_at timestamptz NOT NULL DEFAULT now(),
       completed_at timestamptz
     );
@@ -138,7 +140,7 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
     sql = (engine as any).sql;
     await initRoleBoundarySchema(engine, sql);
     await sql.unsafe(readFileSync(join(root, 'artifacts/dba/sync-reconciliation-roles.sql'), 'utf8'));
-    for (const role of ['gbrain_normal_sync', 'gbrain_reconciliation_apply', 'gbrain_source_repair', 'gbrain_hard_purge']) {
+    for (const role of ['gbrain_normal_sync', 'gbrain_reconciliation_approve', 'gbrain_reconciliation_apply', 'gbrain_source_repair', 'gbrain_hard_purge']) {
       await sql.unsafe(`GRANT ${role} TO CURRENT_USER`);
     }
   }, 30_000);
@@ -193,6 +195,34 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
     await sql.unsafe('RESET ROLE');
   }, 30_000);
 
+  test('apply role cannot claim unapproved or unauthorized rows', async () => {
+    await sql.unsafe('RESET ROLE');
+    await sql.unsafe(`DELETE FROM sync_reconciliation_audit WHERE operation_id IN ('role-test-unauth', 'role-test-proposed')`);
+    await sql`
+      INSERT INTO sync_reconciliation_audit
+        (operation_id, manifest_hash, source_id, actor, role, reason, candidate_count, population_count,
+         threshold_absolute, threshold_percentage, authorized, before_state, result)
+      VALUES
+        ('role-test-unauth', 'hash', 'default', 'owner', 'owner', 'incremental_deleted', 1, 10, 100, 0.25, false, '{}'::jsonb, 'approved'),
+        ('role-test-proposed', 'hash', 'default', 'owner', 'owner', 'incremental_deleted', 1, 10, 100, 0.25, false, '{}'::jsonb, 'proposed')
+    `;
+
+    await sql.unsafe('SET ROLE gbrain_reconciliation_apply');
+    await expectDenied(sql`UPDATE sync_reconciliation_audit SET result = 'applying' WHERE operation_id = 'role-test-unauth'`);
+    await expectDenied(sql`UPDATE sync_reconciliation_audit SET result = 'applying' WHERE operation_id = 'role-test-proposed'`);
+    await sql.unsafe('RESET ROLE');
+  }, 30_000);
+
+  test('source repair role can only move root when generation increments', async () => {
+    await sql.unsafe('RESET ROLE');
+    await sql`UPDATE sources SET local_path = NULL, registration_generation = 1 WHERE id = 'default'`;
+    await sql.unsafe('SET ROLE gbrain_source_repair');
+    await expectDenied(sql`UPDATE sources SET local_path = '/tmp/new-root' WHERE id = 'default'`);
+    await sql`UPDATE sources SET local_path = '/tmp/new-root', registration_generation = registration_generation + 1 WHERE id = 'default'`;
+    await expectDenied(sql`UPDATE pages SET deleted_at = now() WHERE slug = 'role-test/normal'`);
+    await sql.unsafe('RESET ROLE');
+  }, 30_000);
+
   test('capabilities reports PostgreSQL roles and current session facts', async () => {
     await sql.unsafe('RESET ROLE');
     const caps = await getCapabilities(engine) as any;
@@ -200,10 +230,14 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
     expect(caps.database.current_user).toBeTruthy();
     expect(caps.database.session_user).toBeTruthy();
     expect(caps.sync_safety.capabilities.db_roles).toBe(true);
+    expect(caps.sync_safety.supported).toBe(true);
+    expect(caps.sync_safety.postgres_checks.guard_ok).toBe(true);
+    expect(caps.sync_safety.postgres_checks.role_privileges_ok).toBe(true);
     expect(caps.sync_safety.roles.map((row: any) => row.role_name).sort()).toEqual([
       'gbrain_hard_purge',
       'gbrain_normal_sync',
       'gbrain_reconciliation_apply',
+      'gbrain_reconciliation_approve',
       'gbrain_source_repair',
     ]);
   });

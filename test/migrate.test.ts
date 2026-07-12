@@ -16,24 +16,37 @@ describe('migrate', () => {
     expect(typeof runMigrations).toBe('function');
   });
 
-  test('registration_generation upgrade is forward migration after sync reconciliation v117', async () => {
+  test('sync reconciliation v117 keeps shipped generation column and v118 is additive', async () => {
+    const v117 = MIGRATIONS.find((m) => m.version === 117);
+    const v118 = MIGRATIONS.find((m) => m.version === 118);
+    expect(v117?.sqlFor?.postgres).toContain('ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation');
+    expect(v117?.sqlFor?.pglite).toContain('ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation');
+    expect(v118?.sqlFor?.postgres).toContain('ADD COLUMN IF NOT EXISTS can_approve_reconciliation');
+    expect(v118?.sqlFor?.postgres).toContain('ADD COLUMN IF NOT EXISTS apply_attempt');
+
     const engine = new PGLiteEngine();
     await engine.connect({});
     try {
       await engine.initSchema();
       await engine.setConfig('version', '117');
-      await engine.executeRaw(`ALTER TABLE sources DROP COLUMN IF EXISTS registration_generation`);
+      await engine.executeRaw(`ALTER TABLE sync_reconciliation_audit DROP COLUMN IF EXISTS apply_attempt`);
+      await engine.executeRaw(`ALTER TABLE sync_reconciliation_audit DROP COLUMN IF EXISTS applying_claimed_at`);
       await engine.executeRaw(`ALTER TABLE sync_reconciliation_role_policy DROP COLUMN IF EXISTS can_approve_reconciliation`);
       const result = await runMigrations(engine);
       expect(result.applied).toBeGreaterThanOrEqual(1);
-      const generation = await engine.executeRaw<{ n: number }>(
-        `SELECT COUNT(*)::int AS n FROM information_schema.columns WHERE table_name = 'sources' AND column_name = 'registration_generation'`,
+      const columns = await engine.executeRaw<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE (table_name = 'sources' AND column_name = 'registration_generation')
+            OR (table_name = 'sync_reconciliation_audit' AND column_name IN ('apply_attempt', 'applying_claimed_at'))
+            OR (table_name = 'sync_reconciliation_role_policy' AND column_name = 'can_approve_reconciliation')
+         ORDER BY column_name`,
       );
-      const approve = await engine.executeRaw<{ n: number }>(
-        `SELECT COUNT(*)::int AS n FROM information_schema.columns WHERE table_name = 'sync_reconciliation_role_policy' AND column_name = 'can_approve_reconciliation'`,
-      );
-      expect(Number(generation[0].n)).toBe(1);
-      expect(Number(approve[0].n)).toBe(1);
+      expect(columns.map((row) => row.column_name)).toEqual([
+        'apply_attempt',
+        'applying_claimed_at',
+        'can_approve_reconciliation',
+        'registration_generation',
+      ]);
     } finally {
       await engine.disconnect();
     }
