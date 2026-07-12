@@ -283,7 +283,7 @@ describe('sync source safety guard', () => {
         reason: 'incremental_deleted',
       });
       expect(proposal.operationId).toStartWith('sync-reconcile-');
-      await expect(applySyncReconciliation(engine, proposal.operationId)).rejects.toThrow(/lacks can_apply_reconciliation/);
+      await expect(applySyncReconciliation(engine, proposal.operationId, { repoPath: repo })).rejects.toThrow(/lacks can_apply_reconciliation/);
 
       const preApply = await engine.executeRaw<{ deleted_at: string | null }>(
         `SELECT deleted_at FROM pages WHERE source_id = 'default' AND slug = 'notes/alpha'`,
@@ -295,7 +295,7 @@ describe('sync source safety guard', () => {
         `UPDATE sync_reconciliation_audit SET result = 'approved', authorized = true WHERE operation_id = $1`,
         [proposal.operationId],
       );
-      const applied = await applySyncReconciliation(engine, proposal.operationId);
+      const applied = await applySyncReconciliation(engine, proposal.operationId, { repoPath: repo });
       expect(applied).toEqual(['notes/alpha']);
       const postApply = await engine.executeRaw<{ deleted_at: string | null }>(
         `SELECT deleted_at FROM pages WHERE source_id = 'default' AND slug = 'notes/alpha'`,
@@ -320,7 +320,8 @@ describe('sync source safety guard', () => {
         'schema-v2',
       ]);
       expect(caps.sync_safety.capabilities.reconciliation_manifest).toBe(true);
-      expect(caps.sync_safety.capabilities.db_roles).toBe(true);
+      expect(caps.sync_safety.capabilities.db_roles).toBe(false);
+      expect(caps.sync_safety.supported).toBe(false);
     } finally {
       await fresh.disconnect();
     }

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS sources (
   last_commit     TEXT,
   last_sync_at    TIMESTAMPTZ,
   config          JSONB NOT NULL DEFAULT '{}'::jsonb,
+  registration_generation BIGINT NOT NULL DEFAULT 1,
   -- v0.20.0 Cathedral II (SP-1): chunker version last used to sync this source.
   -- performSync forces a full walk when this mismatches CURRENT_CHUNKER_VERSION,
   -- bypassing the git-HEAD up_to_date early-return so CHUNKER_VERSION bumps

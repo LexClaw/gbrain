@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'fs';
 import { execFileSync } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { join, relative, isAbsolute } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
@@ -607,6 +607,33 @@ async function assertRoleCapability(
   return identity;
 }
 
+interface ReconciliationManifestCandidate {
+  id: unknown;
+  source_id: unknown;
+  slug: string;
+  source_path: unknown;
+  content_hash: unknown;
+  updated_at: unknown;
+  prior_deleted_at: unknown;
+}
+
+interface ReconciliationManifest {
+  schema_version: 2;
+  source_id: string;
+  registration_generation: number;
+  canonical_root: string;
+  repository_identity: string;
+  baseline_commit: string | null;
+  observed_commit: string | null;
+  reason: SyncReconciliationReason;
+  candidates: ReconciliationManifestCandidate[];
+  candidate_count: number;
+  population_count: number;
+  aggregate_impact: { absolute: number; percentage: number };
+  policy: { absolute: number; percentage: number };
+  proposer: DbIdentity;
+}
+
 async function pageSnapshots(
   engine: BrainEngine,
   sourceId: string,
@@ -623,8 +650,85 @@ async function pageSnapshots(
   );
 }
 
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+}
+
 function deterministicHash(value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  return createHash('sha256').update(stableJson(value)).digest('hex');
+}
+
+async function sourceRegistrationGeneration(engine: BrainEngine, sourceId: string): Promise<number> {
+  const rows = await engine.executeRaw<{ registration_generation: number | string | null }>(
+    `SELECT registration_generation FROM sources WHERE id = $1`,
+    [sourceId],
+  );
+  const generation = Number(rows[0]?.registration_generation ?? 0);
+  if (!Number.isInteger(generation) || generation < 1) {
+    throw new Error(`Unsafe reconciliation: source ${sourceId} has no durable registration_generation.`);
+  }
+  return generation;
+}
+
+function parseManifest(value: any): ReconciliationManifest {
+  if (value?.schema_version !== 2) {
+    throw new Error(`Unsafe reconciliation: manifest schema_version ${value?.schema_version ?? 'unknown'} is not 2.`);
+  }
+  if (!Array.isArray(value.candidates)) {
+    throw new Error('Unsafe reconciliation: manifest candidates are missing.');
+  }
+  return value as ReconciliationManifest;
+}
+
+function compareCandidateSnapshot(candidate: ReconciliationManifestCandidate, live: Record<string, unknown> | undefined): string | null {
+  if (!live) return `${candidate.slug}: live row missing`;
+  const fields: Array<[keyof ReconciliationManifestCandidate, string]> = [
+    ['source_path', 'source_path'],
+    ['content_hash', 'content_hash'],
+    ['updated_at', 'updated_at'],
+  ];
+  for (const [candidateKey, liveKey] of fields) {
+    if ((candidate as any)[candidateKey] !== (live as any)[liveKey]) {
+      return `${candidate.slug}: ${String(candidateKey)} changed`;
+    }
+  }
+  const liveDeletedAt = live.deleted_at ?? null;
+  if ((candidate.prior_deleted_at ?? null) !== liveDeletedAt) {
+    return `${candidate.slug}: deleted_at changed`;
+  }
+  return null;
+}
+
+async function assertManifestStillCurrent(
+  engine: BrainEngine,
+  manifest: ReconciliationManifest,
+  manifestHash: string,
+  repoPath: string,
+): Promise<void> {
+  if (deterministicHash(manifest) !== manifestHash) {
+    throw new Error('Unsafe reconciliation: manifest_hash does not match before_state.');
+  }
+  const repo = gitRootIdentity(repoPath);
+  if (repo.canonicalRoot !== manifest.canonical_root || repo.identityHash !== manifest.repository_identity) {
+    throw new Error('Unsafe reconciliation: repository identity no longer matches the approved manifest.');
+  }
+  const generation = await sourceRegistrationGeneration(engine, manifest.source_id);
+  if (generation !== manifest.registration_generation) {
+    throw new Error(
+      `Unsafe reconciliation: source registration_generation changed from ${manifest.registration_generation} to ${generation}.`,
+    );
+  }
+  const liveRows = await pageSnapshots(engine, manifest.source_id, manifest.candidates.map((candidate) => candidate.slug));
+  const liveBySlug = new Map(liveRows.map((row) => [String(row.slug), row]));
+  const mismatches = manifest.candidates
+    .map((candidate) => compareCandidateSnapshot(candidate, liveBySlug.get(candidate.slug)))
+    .filter((item): item is string => Boolean(item));
+  if (mismatches.length > 0) {
+    throw new Error(`Unsafe reconciliation: live candidate state diverged: ${mismatches.join('; ')}`);
+  }
 }
 
 export async function proposeSyncReconciliation(
@@ -657,10 +761,14 @@ export async function proposeSyncReconciliation(
     );
   }
   const beforeState = await pageSnapshots(engine, opts.sourceId, candidates);
-  const manifest = {
+  if (beforeState.length !== candidates.length) {
+    throw new Error('Unsafe reconciliation: every candidate must have a live page snapshot.');
+  }
+  const registrationGeneration = await sourceRegistrationGeneration(engine, opts.sourceId);
+  const manifest: ReconciliationManifest = {
     schema_version: 2,
     source_id: opts.sourceId,
-    registration_generation: 0,
+    registration_generation: registrationGeneration,
     canonical_root: repoBefore.canonicalRoot,
     repository_identity: repoBefore.identityHash,
     baseline_commit: opts.baselineCommit ?? null,
@@ -669,7 +777,7 @@ export async function proposeSyncReconciliation(
     candidates: beforeState.map((row) => ({
       id: row.id,
       source_id: row.source_id,
-      slug: row.slug,
+      slug: String(row.slug),
       source_path: row.source_path,
       content_hash: row.content_hash,
       updated_at: row.updated_at,
@@ -682,7 +790,7 @@ export async function proposeSyncReconciliation(
     proposer: identity,
   };
   const manifestHash = deterministicHash(manifest);
-  const operationId = `sync-reconcile-${manifestHash.slice(0, 24)}`;
+  const operationId = `sync-reconcile-${Date.now().toString(36)}-${randomUUID()}`;
 
   const repoDuring = gitRootIdentity(opts.repoPath);
   if (repoDuring.identityHash !== repoBefore.identityHash || repoDuring.canonicalRoot !== repoBefore.canonicalRoot) {
@@ -731,41 +839,60 @@ export async function approveSyncReconciliation(
   if (rows.length !== 1) throw new Error(`Cannot approve reconciliation ${operationId}: not found or not proposed.`);
 }
 
-export async function applySyncReconciliation(engine: BrainEngine, operationId: string): Promise<string[]> {
+export async function applySyncReconciliation(
+  engine: BrainEngine,
+  operationId: string,
+  opts: { repoPath: string },
+): Promise<string[]> {
   await assertReconciliationSchema(engine);
   await assertRoleCapability(engine, 'can_apply_reconciliation');
-  const rows = await engine.executeRaw<{ source_id: string; before_state: any; result: SyncReconciliationStatus }>(
-    `SELECT source_id, before_state, result FROM sync_reconciliation_audit WHERE operation_id = $1`,
-    [operationId],
-  );
-  const row = rows[0];
-  if (!row) throw new Error(`Cannot apply reconciliation ${operationId}: not found.`);
-  if (row.result !== 'approved' && row.result !== 'failed') {
-    throw new Error(`Cannot apply reconciliation ${operationId}: status ${row.result} is not approved.`);
-  }
-  const manifest = row.before_state;
-  const candidates = Array.isArray(manifest?.candidates) ? manifest.candidates : [];
   try {
     return await engine.transaction(async (tx) => {
-      await tx.executeRaw(`UPDATE sync_reconciliation_audit SET result = 'applying' WHERE operation_id = $1`, [operationId]);
+      const locked = await tx.executeRaw<{
+        source_id: string;
+        manifest_hash: string;
+        before_state: any;
+        result: SyncReconciliationStatus;
+      }>(
+        `UPDATE sync_reconciliation_audit
+         SET result = 'applying'
+         WHERE operation_id = $1 AND result = 'approved'
+         RETURNING source_id, manifest_hash, before_state, result`,
+        [operationId],
+      );
+      const row = locked[0];
+      if (!row) {
+        const current = await tx.executeRaw<{ result: SyncReconciliationStatus }>(
+          `SELECT result FROM sync_reconciliation_audit WHERE operation_id = $1`,
+          [operationId],
+        );
+        if (!current[0]) throw new Error(`Cannot apply reconciliation ${operationId}: not found.`);
+        throw new Error(`Cannot apply reconciliation ${operationId}: status ${current[0].result} is not approved.`);
+      }
+      const manifest = parseManifest(row.before_state);
+      await assertManifestStillCurrent(tx, manifest, row.manifest_hash, opts.repoPath);
       const marked: string[] = [];
-      for (const candidate of candidates) {
-        const slug = String(candidate.slug);
-        const result = await tx.softDeletePage(slug, { sourceId: row.source_id });
+      for (const candidate of manifest.candidates) {
+        const result = await tx.softDeletePage(candidate.slug, { sourceId: row.source_id });
         if (result) marked.push(result.slug);
+      }
+      if (marked.length !== manifest.candidates.length) {
+        throw new Error(`Unsafe reconciliation: applied ${marked.length}/${manifest.candidates.length} candidates.`);
       }
       await tx.executeRaw(
         `UPDATE sync_reconciliation_audit
          SET result = 'applied', completed_at = now(),
              after_state = COALESCE(after_state, '{}'::jsonb) || $2::jsonb
-         WHERE operation_id = $1`,
+         WHERE operation_id = $1 AND result = 'applying'`,
         [operationId, { applied: marked.sort(), applied_count: marked.length }],
       );
       return marked;
     });
   } catch (e) {
     await engine.executeRaw(
-      `UPDATE sync_reconciliation_audit SET result = 'failed', failure = $2 WHERE operation_id = $1`,
+      `UPDATE sync_reconciliation_audit
+       SET result = 'failed', failure = $2
+       WHERE operation_id = $1 AND result = 'applying'`,
       [operationId, e instanceof Error ? e.message : String(e)],
     );
     throw e;
@@ -834,14 +961,22 @@ export async function authorizedPurgeSyncReconciliation(engine: BrainEngine, ope
   }
   const candidates = Array.isArray(row.before_state?.candidates) ? row.before_state.candidates : [];
   const candidateSlugs = candidates.map((candidate: any) => String(candidate.slug)).sort();
-  const deletedRows = await engine.executeRaw<{ slug: string }>(
-    `DELETE FROM pages
-     WHERE source_id = $1 AND slug = ANY($2) AND deleted_at IS NOT NULL
-     RETURNING slug`,
-    [row.source_id, candidateSlugs],
-  );
-  await engine.executeRaw(`UPDATE sync_reconciliation_audit SET result = 'purged', completed_at = now() WHERE operation_id = $1`, [operationId]);
-  return deletedRows.length;
+  return await engine.transaction(async (tx) => {
+    const deletedRows = await tx.executeRaw<{ slug: string }>(
+      `DELETE FROM pages
+       WHERE source_id = $1 AND slug = ANY($2) AND deleted_at IS NOT NULL
+       RETURNING slug`,
+      [row.source_id, candidateSlugs],
+    );
+    if (deletedRows.length !== candidateSlugs.length) {
+      throw new Error(`Cannot purge reconciliation ${operationId}: expected ${candidateSlugs.length} tombstones, deleted ${deletedRows.length}.`);
+    }
+    await tx.executeRaw(
+      `UPDATE sync_reconciliation_audit SET result = 'purged', completed_at = now() WHERE operation_id = $1 AND result = 'applied'`,
+      [operationId],
+    );
+    return deletedRows.length;
+  });
 }
 
 /**
@@ -3182,6 +3317,7 @@ export async function runSync(engine: BrainEngine, args: string[]) {
     return runSyncTrigger(engine, args.slice(1));
   }
   if (args[0] === 'status') {
+    await assertReconciliationSchema(engine);
     const operationId = args.find((a, i) => args[i - 1] === '--operation') ?? args[1];
     const where = operationId ? 'WHERE operation_id = $1' : '';
     const rows = await engine.executeRaw(
@@ -3204,19 +3340,23 @@ export async function runSync(engine: BrainEngine, args: string[]) {
   }
   if (args[0] === 'apply') {
     const operationId = args.find((a, i) => args[i - 1] === '--operation') ?? args[1];
+    const repoPath = args.find((a, i) => args[i - 1] === '--repo');
     if (!operationId) throw new Error('sync apply requires --operation <id>');
-    const applied = await applySyncReconciliation(engine, operationId);
+    if (!repoPath) throw new Error('sync apply requires --repo <path> for repository identity revalidation');
+    const applied = await applySyncReconciliation(engine, operationId, { repoPath });
     console.log(JSON.stringify({ status: 'applied', operation_id: operationId, applied }));
     return;
   }
   if (args[0] === 'resume') {
     const rows = await engine.executeRaw<{ operation_id: string }>(
       `SELECT operation_id FROM sync_reconciliation_audit
-       WHERE result IN ('approved', 'failed') ORDER BY created_at LIMIT 1`,
+       WHERE result = 'approved' ORDER BY created_at LIMIT 1`,
     );
     const operationId = args.find((a, i) => args[i - 1] === '--operation') ?? rows[0]?.operation_id;
-    if (!operationId) throw new Error('sync resume found no approved or failed reconciliation operation');
-    const applied = await applySyncReconciliation(engine, operationId);
+    const repoPath = args.find((a, i) => args[i - 1] === '--repo');
+    if (!operationId) throw new Error('sync resume found no approved reconciliation operation');
+    if (!repoPath) throw new Error('sync resume requires --repo <path> for repository identity revalidation');
+    const applied = await applySyncReconciliation(engine, operationId, { repoPath });
     console.log(JSON.stringify({ status: 'resumed', operation_id: operationId, applied }));
     return;
   }

@@ -951,7 +951,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
       repoPath: repo,
       reason: 'incremental_deleted',
     });
-    await expect(applySyncReconciliation(engine, proposal.operationId)).rejects.toThrow(/lacks can_apply_reconciliation/);
+    await expect(applySyncReconciliation(engine, proposal.operationId, { repoPath: repo })).rejects.toThrow(/lacks can_apply_reconciliation/);
     expect(await engine.getPage('people/dana')).not.toBeNull();
 
     await setCurrentUserCapabilities({ apply: true });
@@ -959,7 +959,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
       `UPDATE sync_reconciliation_audit SET result = 'approved', authorized = true WHERE operation_id = $1`,
       [proposal.operationId],
     );
-    expect(await applySyncReconciliation(engine, proposal.operationId)).toEqual(['people/dana']);
+    expect(await applySyncReconciliation(engine, proposal.operationId, { repoPath: repo })).toEqual(['people/dana']);
     expect(await engine.getPage('people/dana')).toBeNull();
   });
 

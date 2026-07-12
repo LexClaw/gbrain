@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS sources (
   last_commit   TEXT,
   last_sync_at  TIMESTAMPTZ,
   config        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  registration_generation BIGINT NOT NULL DEFAULT 1,
   -- v0.26.5: soft-delete + recovery window (mirrors src/schema.sql).
   archived            BOOLEAN NOT NULL DEFAULT false,
   archived_at         TIMESTAMPTZ,

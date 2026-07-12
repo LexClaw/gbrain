@@ -5243,6 +5243,7 @@ export const MIGRATIONS: Migration[] = [
     sql: '',
     sqlFor: {
       postgres: `
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
         CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
           operation_id text PRIMARY KEY,
           manifest_hash text NOT NULL,
@@ -5291,6 +5292,7 @@ export const MIGRATIONS: Migration[] = [
         -- separately reviewed DBA bootstrap lifecycle.
       `,
       pglite: `
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS registration_generation BIGINT NOT NULL DEFAULT 1;
         CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
           operation_id text PRIMARY KEY,
           manifest_hash text NOT NULL,

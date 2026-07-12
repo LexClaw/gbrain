@@ -77,7 +77,7 @@ for path in [p for p in root.rglob('*') if p.is_file()]:
             '.deletePage(' in line or '.deletePages(' in line or '.purgeDeletedPages(' in line or
             re.search(r'\bDELETE\s+FROM\s+pages\b', line, re.I)
         )
-        if destructive and path != SYNC_PROTECTED and not is_inventory_represented(path):
+        if destructive and not is_inventory_represented(path):
             failures.append(f'{path}:{lineno}: destructive page operation must be represented in artifacts/destructive-path-inventory.md')
 
 if failures:
