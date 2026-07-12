@@ -390,14 +390,16 @@ describe('sync source safety guard', () => {
     const sql = readFileSync(join(import.meta.dir, '..', 'artifacts/dba/sync-reconciliation-roles.sql'), 'utf8');
     const capabilities = readFileSync(join(import.meta.dir, '..', 'src/commands/capabilities.ts'), 'utf8');
     expect(sql).toContain("OLD.applying_claimed_at < now() - interval '15 minutes'");
+    expect(sql).not.toContain("NEW.failure IS DISTINCT FROM 'abandoned applying lease recovered'");
+    expect(sql).toContain("WHERE roleid = 'gbrain_reconciliation_owner'::regrole");
     expect(sql).toContain('NEW.registration_generation <> OLD.registration_generation + 1');
     expect(sql).toContain('sources.registration_generation may only change with local_path');
     expect(sql).toContain('SET search_path = pg_catalog, public');
     expect(sql).toContain('NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS');
     expect(capabilities).toContain("'public.sync_reconciliation_audit'::regclass");
     expect(capabilities).toContain("'public.gbrain_guard_sync_reconciliation_audit_update()'::regprocedure");
-    expect(capabilities).toContain('apply_before_state_forbidden');
-    expect(capabilities).toContain('owner_memberships_ok');
+    expect(capabilities).toContain('unexpected_column_acl');
+    expect(capabilities).toContain('operational_role_memberships_ok');
   });
 
   test('gbrain capabilities exposes exact sync-safety tokens from schema support', async () => {

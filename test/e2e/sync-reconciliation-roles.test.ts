@@ -151,7 +151,20 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
     await engine.connect({ database_url: DATABASE_URL! });
     sql = (engine as any).sql;
     await initRoleBoundarySchema(engine, sql);
+    await sql.unsafe(`DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gbrain_acl_decoy') THEN
+        REVOKE gbrain_acl_decoy FROM gbrain_reconciliation_apply;
+        REVOKE ALL PRIVILEGES ON sync_reconciliation_audit FROM gbrain_acl_decoy;
+        DROP ROLE gbrain_acl_decoy;
+      END IF;
+    EXCEPTION WHEN undefined_object THEN
+      NULL;
+    END $$;`);
     await sql.unsafe(readFileSync(join(root, 'artifacts/dba/sync-reconciliation-roles.sql'), 'utf8'));
+    for (const table of ['pages', 'sources', 'sync_reconciliation_audit', 'sync_reconciliation_role_policy']) {
+      await sql.unsafe(`ALTER TABLE ${table} DISABLE ROW LEVEL SECURITY`);
+    }
     for (const role of ['gbrain_normal_sync', 'gbrain_reconciliation_approve', 'gbrain_reconciliation_apply', 'gbrain_source_repair', 'gbrain_hard_purge']) {
       await sql.unsafe(`GRANT ${role} TO CURRENT_USER`);
     }
@@ -262,10 +275,38 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
       SET result = 'failed', failure = 'abandoned applying lease recovered', completed_at = now()
       WHERE operation_id = 'role-test-lease'
     `);
+    await expectDenied(sql`
+      UPDATE sync_reconciliation_audit
+      SET result = 'failed', failure = 'alternate apply failure text', completed_at = now()
+      WHERE operation_id = 'role-test-lease'
+    `);
     await sql.unsafe('RESET ROLE');
   }, 30_000);
 
-  test('capability attestation rejects decoy schema, extra grants, and owner drift', async () => {
+  test('apply role can mark any applying failure only after the fixed DB lease', async () => {
+    await sql.unsafe('RESET ROLE');
+    await sql.unsafe(`DELETE FROM sync_reconciliation_audit WHERE operation_id = 'role-test-lease-expired'`);
+    await sql`
+      INSERT INTO sync_reconciliation_audit
+        (operation_id, manifest_hash, source_id, actor, role, reason, candidate_count, population_count,
+         threshold_absolute, threshold_percentage, authorized, before_state, result, applying_claimed_at)
+      VALUES
+        ('role-test-lease-expired', 'hash', 'default', 'owner', 'owner', 'incremental_deleted', 1, 10,
+         100, 0.25, true, '{}'::jsonb, 'applying', now() - interval '16 minutes')
+    `;
+    await sql.unsafe('SET ROLE gbrain_reconciliation_apply');
+    await sql`
+      UPDATE sync_reconciliation_audit
+      SET result = 'failed', failure = 'alternate apply failure text', completed_at = now()
+      WHERE operation_id = 'role-test-lease-expired'
+    `;
+    await sql.unsafe('RESET ROLE');
+    const rows = await sql`SELECT result, failure FROM sync_reconciliation_audit WHERE operation_id = 'role-test-lease-expired'`;
+    expect(rows[0].result).toBe('failed');
+    expect(rows[0].failure).toBe('alternate apply failure text');
+  }, 30_000);
+
+  test('capability attestation rejects decoy schema, extra grants, inherited grants, trigger rewiring, and function drift', async () => {
     await sql.unsafe('RESET ROLE');
     await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS sync_decoy`);
     await sql.unsafe(`CREATE TABLE IF NOT EXISTS sync_decoy.sync_reconciliation_audit (id int)`);
@@ -274,10 +315,46 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
     expect(caps.sync_safety.postgres_checks.role_privileges_ok).toBe(false);
     await sql.unsafe(`REVOKE UPDATE (manifest_hash) ON sync_reconciliation_audit FROM gbrain_reconciliation_apply`);
 
+    await sql.unsafe(`CREATE ROLE gbrain_acl_decoy NOLOGIN`);
+    await sql.unsafe(`GRANT UPDATE (before_state) ON sync_reconciliation_audit TO gbrain_acl_decoy`);
+    await sql.unsafe(`GRANT gbrain_acl_decoy TO gbrain_reconciliation_apply`);
+    caps = await getCapabilities(engine) as any;
+    expect(caps.sync_safety.postgres_checks.role_privileges_ok).toBe(false);
+    expect(caps.sync_safety.postgres_checks.owner_role_ok).toBe(false);
+    await sql.unsafe(`REVOKE gbrain_acl_decoy FROM gbrain_reconciliation_apply`);
+    await sql.unsafe(`REVOKE UPDATE (before_state) ON sync_reconciliation_audit FROM gbrain_acl_decoy`);
+    await sql.unsafe(`DROP ROLE gbrain_acl_decoy`);
+
     await sql.unsafe(`ALTER ROLE gbrain_reconciliation_owner LOGIN`);
     caps = await getCapabilities(engine) as any;
     expect(caps.sync_safety.postgres_checks.owner_role_ok).toBe(false);
     await sql.unsafe(`ALTER ROLE gbrain_reconciliation_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
+
+    await sql.unsafe(`
+      CREATE OR REPLACE FUNCTION public.gbrain_guard_sync_reconciliation_audit_update_decoy()
+      RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+      BEGIN
+        RETURN NEW;
+      END;
+      $$
+    `);
+    await sql.unsafe(`ALTER FUNCTION public.gbrain_guard_sync_reconciliation_audit_update_decoy() OWNER TO gbrain_reconciliation_owner`);
+    await sql.unsafe(`DROP TRIGGER gbrain_guard_sync_reconciliation_audit_update ON sync_reconciliation_audit`);
+    await sql.unsafe(`CREATE TRIGGER gbrain_guard_sync_reconciliation_audit_update BEFORE UPDATE ON sync_reconciliation_audit FOR EACH ROW EXECUTE FUNCTION public.gbrain_guard_sync_reconciliation_audit_update_decoy()`);
+    caps = await getCapabilities(engine) as any;
+    expect(caps.sync_safety.postgres_checks.guard_ok).toBe(false);
+    await sql.unsafe(readFileSync(join(root, 'artifacts/dba/sync-reconciliation-roles.sql'), 'utf8'));
+    await sql.unsafe(`DROP FUNCTION IF EXISTS public.gbrain_guard_sync_reconciliation_audit_update_decoy()`);
+
+    await sql.unsafe(`ALTER FUNCTION public.gbrain_guard_sync_reconciliation_audit_update() OWNER TO CURRENT_USER`);
+    caps = await getCapabilities(engine) as any;
+    expect(caps.sync_safety.postgres_checks.guard_ok).toBe(false);
+    await sql.unsafe(readFileSync(join(root, 'artifacts/dba/sync-reconciliation-roles.sql'), 'utf8'));
+
+    await sql.unsafe(`ALTER FUNCTION public.gbrain_guard_sync_reconciliation_audit_update() SET search_path = public`);
+    caps = await getCapabilities(engine) as any;
+    expect(caps.sync_safety.postgres_checks.guard_ok).toBe(false);
+    await sql.unsafe(readFileSync(join(root, 'artifacts/dba/sync-reconciliation-roles.sql'), 'utf8'));
 
     caps = await getCapabilities(engine) as any;
     expect(caps.sync_safety.postgres_checks.guard_ok).toBe(true);

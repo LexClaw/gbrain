@@ -23,6 +23,20 @@ BEGIN
   END IF;
 END $$;
 
+DO $$
+DECLARE
+  membership record;
+BEGIN
+  FOR membership IN
+    SELECT pg_get_userbyid(roleid) AS granted_role, pg_get_userbyid(member) AS member_role
+    FROM pg_auth_members
+    WHERE roleid = 'gbrain_reconciliation_owner'::regrole
+       OR member = 'gbrain_reconciliation_owner'::regrole
+  LOOP
+    EXECUTE format('REVOKE %I FROM %I', membership.granted_role, membership.member_role);
+  END LOOP;
+END $$;
+
 ALTER ROLE gbrain_reconciliation_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE gbrain_normal_sync NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE gbrain_reconciliation_approve NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
@@ -40,8 +54,20 @@ REVOKE ALL PRIVILEGES ON pages, content_chunks, ingest_log, sources, sync_reconc
   FROM PUBLIC, gbrain_normal_sync, gbrain_reconciliation_approve, gbrain_reconciliation_apply, gbrain_source_repair, gbrain_hard_purge;
 
 GRANT SELECT, INSERT ON pages, content_chunks, ingest_log TO gbrain_normal_sync;
-GRANT UPDATE (slug, type, page_kind, title, compiled_truth, frontmatter, timeline, raw_path, source_path, content_hash, embedding, embedding_voyage, embedding_model, embedding_dimensions, updated_at, effective_date, contextual_retrieval_mode, corpus_generation, generation)
-  ON pages TO gbrain_normal_sync;
+DO $$
+DECLARE
+  cols text;
+BEGIN
+  SELECT string_agg(quote_ident(column_name), ', ' ORDER BY array_position(ARRAY['slug','type','page_kind','title','compiled_truth','frontmatter','timeline','source_path','content_hash','embedding','embedding_voyage','embedding_model','embedding_dimensions','updated_at','effective_date','contextual_retrieval_mode','corpus_generation','generation'], column_name))
+    INTO cols
+  FROM information_schema.columns
+  WHERE table_schema = 'public'
+    AND table_name = 'pages'
+    AND column_name = ANY(ARRAY['slug','type','page_kind','title','compiled_truth','frontmatter','timeline','source_path','content_hash','embedding','embedding_voyage','embedding_model','embedding_dimensions','updated_at','effective_date','contextual_retrieval_mode','corpus_generation','generation']);
+  IF cols IS NOT NULL THEN
+    EXECUTE format('GRANT UPDATE (%s) ON pages TO gbrain_normal_sync', cols);
+  END IF;
+END $$;
 GRANT SELECT ON sources TO gbrain_normal_sync;
 GRANT UPDATE (last_commit, last_sync_at, newest_content_at, chunker_version) ON sources TO gbrain_normal_sync;
 GRANT SELECT, INSERT ON sync_reconciliation_audit TO gbrain_normal_sync;
@@ -80,10 +106,7 @@ BEGIN
     END IF;
     IF OLD.result = 'applying' AND NEW.result = 'failed' AND NEW.authorized = OLD.authorized
        AND NEW.failure IS DISTINCT FROM OLD.failure
-       AND (
-         NEW.failure IS DISTINCT FROM 'abandoned applying lease recovered'
-         OR OLD.applying_claimed_at < now() - interval '15 minutes'
-       ) THEN
+       AND OLD.applying_claimed_at < now() - interval '15 minutes' THEN
       RETURN NEW;
     END IF;
   ELSIF current_user = 'gbrain_hard_purge' THEN

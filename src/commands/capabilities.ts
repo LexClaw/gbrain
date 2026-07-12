@@ -138,8 +138,92 @@ async function postgresSafetyChecks(engine: BrainEngine): Promise<Record<string,
          'public.sync_reconciliation_role_policy'::regclass AS policy_rel,
          'public.sources'::regclass AS sources_rel,
          'public.pages'::regclass AS pages_rel,
+         'public.content_chunks'::regclass AS chunks_rel,
+         'public.ingest_log'::regclass AS ingest_rel,
          'public.gbrain_guard_sync_reconciliation_audit_update()'::regprocedure AS audit_fn,
          'public.gbrain_guard_sources_generation_update()'::regprocedure AS sources_fn
+     ), role_names AS (
+       SELECT unnest($2::text[]) AS role_name
+     ), table_privileges(privilege_type) AS (
+       VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')
+     ), intended_pages_update_cols(column_name) AS (
+       SELECT unnest(ARRAY['slug','type','page_kind','title','compiled_truth','frontmatter','timeline','source_path','content_hash','embedding','embedding_voyage','embedding_model','embedding_dimensions','updated_at','effective_date','contextual_retrieval_mode','corpus_generation','generation'])
+     ), expected_table_acl(role_name, relid, privilege_type) AS (
+       SELECT 'gbrain_normal_sync', pages_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_normal_sync', pages_rel, 'INSERT' FROM oid UNION ALL
+       SELECT 'gbrain_normal_sync', chunks_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_normal_sync', chunks_rel, 'INSERT' FROM oid UNION ALL
+       SELECT 'gbrain_normal_sync', ingest_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_normal_sync', ingest_rel, 'INSERT' FROM oid UNION ALL
+       SELECT 'gbrain_normal_sync', sources_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_normal_sync', audit_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_normal_sync', audit_rel, 'INSERT' FROM oid UNION ALL
+       SELECT 'gbrain_normal_sync', policy_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_reconciliation_approve', audit_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_reconciliation_approve', policy_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_reconciliation_apply', pages_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_reconciliation_apply', sources_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_reconciliation_apply', audit_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_reconciliation_apply', policy_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_source_repair', sources_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_source_repair', policy_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_hard_purge', pages_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_hard_purge', pages_rel, 'DELETE' FROM oid UNION ALL
+       SELECT 'gbrain_hard_purge', audit_rel, 'SELECT' FROM oid UNION ALL
+       SELECT 'gbrain_hard_purge', policy_rel, 'SELECT' FROM oid
+     ), public_relations AS (
+      SELECT c.oid, c.relname
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+    ), public_columns AS (
+       SELECT c.oid, c.relname, a.attname
+       FROM public_relations c
+       JOIN pg_attribute a ON a.attrelid = c.oid
+       WHERE a.attnum > 0 AND NOT a.attisdropped
+     ), expected_column_acl(role_name, relid, column_name, privilege_type) AS (
+       SELECT 'gbrain_normal_sync', pc.oid, pc.attname, 'UPDATE'
+       FROM public_columns pc
+       JOIN intended_pages_update_cols cols ON cols.column_name = pc.attname
+       WHERE pc.relname = 'pages' UNION ALL
+       SELECT 'gbrain_normal_sync', sources_rel, unnest(ARRAY['last_commit','last_sync_at','newest_content_at','chunker_version']), 'UPDATE' FROM oid UNION ALL
+       SELECT 'gbrain_reconciliation_approve', audit_rel, unnest(ARRAY['authorized','after_state','result']), 'UPDATE' FROM oid UNION ALL
+       SELECT 'gbrain_reconciliation_apply', pages_rel, unnest(ARRAY['deleted_at','updated_at']), 'UPDATE' FROM oid UNION ALL
+       SELECT 'gbrain_reconciliation_apply', audit_rel, unnest(ARRAY['after_state','result','failure','completed_at','apply_attempt','applying_claimed_at']), 'UPDATE' FROM oid UNION ALL
+       SELECT 'gbrain_source_repair', sources_rel, unnest(ARRAY['local_path','registration_generation']), 'UPDATE' FROM oid UNION ALL
+       SELECT 'gbrain_hard_purge', audit_rel, unnest(ARRAY['after_state','result','completed_at']), 'UPDATE' FROM oid
+     ), unexpected_table_acl AS (
+       SELECT r.role_name, pr.relname, tp.privilege_type
+       FROM role_names r CROSS JOIN public_relations pr CROSS JOIN table_privileges tp
+       WHERE has_table_privilege(r.role_name, pr.oid, tp.privilege_type)
+         AND NOT EXISTS (
+           SELECT 1 FROM expected_table_acl e
+           WHERE e.role_name = r.role_name AND e.relid = pr.oid AND e.privilege_type = tp.privilege_type
+         )
+     ), missing_table_acl AS (
+       SELECT e.role_name, c.relname, e.privilege_type
+       FROM expected_table_acl e JOIN pg_class c ON c.oid = e.relid
+       WHERE NOT has_table_privilege(e.role_name, e.relid, e.privilege_type)
+     ), column_privileges(privilege_type) AS (
+       VALUES ('UPDATE')
+     ), unexpected_column_acl AS (
+       SELECT r.role_name, pc.relname, pc.attname, cp.privilege_type
+       FROM role_names r CROSS JOIN public_columns pc CROSS JOIN column_privileges cp
+       WHERE has_column_privilege(r.role_name, pc.oid, pc.attname, cp.privilege_type)
+         AND NOT EXISTS (
+           SELECT 1 FROM expected_column_acl e
+           WHERE e.role_name = r.role_name AND e.relid = pc.oid AND e.column_name = pc.attname AND e.privilege_type = cp.privilege_type
+         )
+     ), missing_column_acl AS (
+       SELECT e.role_name, c.relname, e.column_name, e.privilege_type
+       FROM expected_column_acl e JOIN pg_class c ON c.oid = e.relid
+       WHERE NOT has_column_privilege(e.role_name, e.relid, e.column_name, e.privilege_type)
+     ), function_acl AS (
+       SELECT NOT EXISTS (
+         SELECT 1 FROM role_names r, oid
+         WHERE has_function_privilege(r.role_name, oid.audit_fn, 'EXECUTE')
+            OR has_function_privilege(r.role_name, oid.sources_fn, 'EXECUTE')
+       ) AS guard_functions_not_executable
      ), guard AS (
        SELECT
          EXISTS (
@@ -184,30 +268,16 @@ async function postgresSafetyChecks(engine: BrainEngine): Promise<Record<string,
            WHERE c.oid IN (oid.audit_rel, oid.policy_rel, oid.sources_rel)
              AND c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = 'gbrain_reconciliation_owner')
          ) AS guarded_tables_owned
-     ), privs AS (
+     ), acl AS (
        SELECT
-         has_table_privilege('gbrain_normal_sync', oid.pages_rel, 'SELECT') AS normal_pages_select,
-         has_table_privilege('gbrain_normal_sync', oid.pages_rel, 'INSERT') AS normal_pages_insert,
-         has_column_privilege('gbrain_normal_sync', oid.sources_rel, 'local_path', 'UPDATE') = false AS normal_sources_local_path_forbidden,
-         has_column_privilege('gbrain_normal_sync', oid.pages_rel, 'deleted_at', 'UPDATE') = false AS normal_pages_deleted_forbidden,
-         has_column_privilege('gbrain_reconciliation_approve', oid.audit_rel, 'authorized', 'UPDATE') AS approve_authorized_update,
-         has_column_privilege('gbrain_reconciliation_approve', oid.audit_rel, 'result', 'UPDATE') AS approve_result_update,
-         has_table_privilege('gbrain_reconciliation_approve', oid.pages_rel, 'UPDATE') = false AS approve_pages_update_forbidden,
-         has_table_privilege('gbrain_reconciliation_approve', oid.policy_rel, 'UPDATE') = false AS approve_policy_update_forbidden,
-         has_column_privilege('gbrain_reconciliation_apply', oid.pages_rel, 'deleted_at', 'UPDATE') AS apply_pages_deleted_update,
-         has_column_privilege('gbrain_reconciliation_apply', oid.audit_rel, 'authorized', 'UPDATE') = false AS apply_authorized_forbidden,
-         has_column_privilege('gbrain_reconciliation_apply', oid.audit_rel, 'manifest_hash', 'UPDATE') = false AS apply_manifest_hash_forbidden,
-         has_column_privilege('gbrain_reconciliation_apply', oid.audit_rel, 'before_state', 'UPDATE') = false AS apply_before_state_forbidden,
-         has_column_privilege('gbrain_reconciliation_apply', oid.audit_rel, 'source_id', 'UPDATE') = false AS apply_source_id_forbidden,
-         has_table_privilege('gbrain_reconciliation_apply', oid.sources_rel, 'UPDATE') = false AS apply_sources_update_forbidden,
-         has_column_privilege('gbrain_source_repair', oid.sources_rel, 'local_path', 'UPDATE') AS repair_sources_local_path_update,
-         has_column_privilege('gbrain_source_repair', oid.sources_rel, 'registration_generation', 'UPDATE') AS repair_sources_generation_update,
-         has_table_privilege('gbrain_source_repair', oid.pages_rel, 'UPDATE') = false AS repair_pages_update_forbidden,
-         has_table_privilege('gbrain_source_repair', oid.audit_rel, 'UPDATE') = false AS repair_audit_update_forbidden,
-         has_table_privilege('gbrain_hard_purge', oid.pages_rel, 'DELETE') AS purge_pages_delete,
-         has_column_privilege('gbrain_hard_purge', oid.audit_rel, 'manifest_hash', 'UPDATE') = false AS purge_manifest_hash_forbidden,
-         has_table_privilege('gbrain_hard_purge', oid.sources_rel, 'UPDATE') = false AS purge_sources_update_forbidden
-       FROM oid
+         NOT EXISTS (SELECT 1 FROM unexpected_table_acl) AS no_unexpected_table_acl,
+         NOT EXISTS (SELECT 1 FROM missing_table_acl) AS no_missing_table_acl,
+         NOT EXISTS (SELECT 1 FROM unexpected_column_acl) AS no_unexpected_column_acl,
+         NOT EXISTS (SELECT 1 FROM missing_column_acl) AS no_missing_column_acl,
+         COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM unexpected_table_acl x), '[]'::jsonb) AS unexpected_table_acl,
+         COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM unexpected_column_acl x), '[]'::jsonb) AS unexpected_column_acl,
+         COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM missing_table_acl x), '[]'::jsonb) AS missing_table_acl,
+         COALESCE((SELECT jsonb_agg(to_jsonb(x)) FROM missing_column_acl x), '[]'::jsonb) AS missing_column_acl
      ), role_posture AS (
        SELECT
          bool_and(NOT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls) AS cluster_roles_normalized,
@@ -219,26 +289,25 @@ async function postgresSafetyChecks(engine: BrainEngine): Promise<Record<string,
          NOT EXISTS (
            SELECT 1
            FROM pg_auth_members m
-           JOIN pg_roles owner ON owner.oid = m.roleid OR owner.oid = m.member
-           WHERE owner.rolname = 'gbrain_reconciliation_owner'
-         ) AS owner_memberships_ok
+           WHERE m.roleid = 'gbrain_reconciliation_owner'::regrole
+              OR m.member = 'gbrain_reconciliation_owner'::regrole
+         ) AS owner_memberships_ok,
+         NOT EXISTS (
+           SELECT 1
+           FROM pg_auth_members m
+           JOIN pg_roles member_role ON member_role.oid = m.member
+           WHERE member_role.rolname = ANY($1)
+         ) AS operational_role_memberships_ok
        FROM pg_roles
        WHERE rolname = ANY($1)
      )
      SELECT *,
        (audit_trigger_exists AND sources_trigger_exists AND audit_function_posture_ok
-        AND sources_function_posture_ok AND guarded_tables_owned) AS guard_ok,
-       (normal_pages_select AND normal_pages_insert AND normal_sources_local_path_forbidden
-        AND normal_pages_deleted_forbidden AND approve_authorized_update AND approve_result_update
-        AND approve_pages_update_forbidden AND approve_policy_update_forbidden
-        AND apply_pages_deleted_update AND apply_authorized_forbidden AND apply_manifest_hash_forbidden
-        AND apply_before_state_forbidden AND apply_source_id_forbidden AND apply_sources_update_forbidden
-        AND repair_sources_local_path_update AND repair_sources_generation_update
-        AND repair_pages_update_forbidden AND repair_audit_update_forbidden
-        AND purge_pages_delete AND purge_manifest_hash_forbidden AND purge_sources_update_forbidden) AS role_privileges_ok,
-       (cluster_roles_normalized AND owner_flags_ok AND owner_memberships_ok) AS owner_role_ok
-     FROM guard, privs, role_posture`,
-    [RECONCILIATION_CLUSTER_ROLES],
+        AND sources_function_posture_ok AND guarded_tables_owned AND guard_functions_not_executable) AS guard_ok,
+       (no_unexpected_table_acl AND no_missing_table_acl AND no_unexpected_column_acl AND no_missing_column_acl) AS role_privileges_ok,
+       (cluster_roles_normalized AND owner_flags_ok AND owner_memberships_ok AND operational_role_memberships_ok) AS owner_role_ok
+     FROM guard, acl, function_acl, role_posture`,
+    [RECONCILIATION_CLUSTER_ROLES, RECONCILIATION_ROLES],
   );
   return rows[0] ?? { role_privileges_ok: false, guard_ok: false, owner_role_ok: false };
 }
