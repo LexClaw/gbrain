@@ -15,6 +15,16 @@ CREATE TABLE IF NOT EXISTS recovery_schema_version (
   installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS recovery_target_identity (
+  id BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+  nonce TEXT NOT NULL CHECK (nonce ~ '^[a-f0-9]{64}$'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO recovery_target_identity (id, nonce)
+VALUES (true, lower(md5(now()::text || random()::text) || md5(random()::text || now()::text)))
+ON CONFLICT (id) DO NOTHING;
+
 INSERT INTO recovery_schema_version (version)
 VALUES ('recovery_v3_pre_rehearsal_1')
 ON CONFLICT DO NOTHING;

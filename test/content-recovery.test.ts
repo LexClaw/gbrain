@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { generateKeyPairSync } from 'crypto';
+import { createHash, generateKeyPairSync } from 'crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -9,6 +9,7 @@ import {
   applyRecoveryManifest,
   approvalHash,
   buildManifest,
+  canonicalJson,
   contentHash,
   downRecoverySchema,
   createRecoveryPayloadBundle,
@@ -18,11 +19,15 @@ import {
   provisionRecoverySchema,
   rollbackBatch,
   rowActionHash,
+  reviewedAllowlistTrustRootForTests,
+  signAllowlistEnvelope,
   validateManifest,
   verifyRecovery,
   recoverySchemaStatus,
   signApprovalArtifact,
   signExpectedStateArtifact,
+  signRollbackAuthorizationArtifact,
+  verifyAllowlistEnvelope,
   verifyApprovalSignature,
   type ApprovalArtifact,
   type ManifestRow,
@@ -114,6 +119,36 @@ function approved(rows: ManifestRow[], bundle: RecoveryPayloadBundle): { approva
   const { signature: _finalSignature, ...unsignedFinalApproval } = approval;
   approval = signApprovalArtifact({ ...unsignedFinalApproval, manifest_hash: manifestHash(patched), row_action_hash: rowActionHash(patched) }, PRIVATE_KEY_PEM);
   return { approval, approvalHashValue: approvalHash(approval), rows: rows.map(row => ({ ...row, approval_hash: approvalHash(approval) })) };
+}
+
+function rollbackAuth(overrides: Partial<Parameters<typeof signRollbackAuthorizationArtifact>[0]> = {}) {
+  return signRollbackAuthorizationArtifact({
+    schema_version: 'recovery_rollback_authorization_v1',
+    run_id: 'run-test',
+    batch_id: 'b1',
+    tool_commit: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378',
+    target_identity: 'isolated-db',
+    allowlist_hash: 'a'.repeat(64),
+    original_approval_hash: '0'.repeat(64),
+    audit_batch_hash: '0'.repeat(64),
+    row_action_hash: '0'.repeat(64),
+    expected_rollback_state_hash: '0'.repeat(64),
+    approved_at: '2026-07-12T00:00:00.000Z',
+    expires_at: '2026-07-13T00:00:00.000Z',
+    key_id: 'fixture-reviewer',
+    signer: 'fixture-reviewer',
+    ...overrides,
+  }, PRIVATE_KEY_PEM);
+}
+
+async function rollbackAuthForBatch() {
+  const batch = (await engine.executeRaw<{ batch_hash: string; approval_hash: string }>("SELECT batch_hash, approval_hash FROM recovery_audit_batches WHERE run_id='run-test' AND batch_id='b1'"))[0];
+  const audits = await engine.executeRaw<{ row_key: string; action: string; payload_hash: string }>("SELECT row_key, action, payload_hash FROM recovery_audit_rows WHERE run_id='run-test' AND batch_id='b1' ORDER BY id DESC");
+  return rollbackAuth({
+    original_approval_hash: batch.approval_hash,
+    audit_batch_hash: batch.batch_hash,
+    row_action_hash: createHash('sha256').update(canonicalJson(audits.map(a => ({ row_key: a.row_key, action: a.action, payload_hash: a.payload_hash })).sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))))).digest('hex'),
+  });
 }
 
 beforeAll(async () => {
@@ -262,9 +297,10 @@ describe('content recovery applicator', () => {
     await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY, crashAfter: 'after_commit_before_jsonl' })).rejects.toThrow('fault injection');
     let pages = await engine.executeRaw<{ active: string; deleted: string }>(`SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL)::text AS active, COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)::text AS deleted FROM pages WHERE source_id='src-a' AND slug='alpha'`);
     expect(pages[0]).toMatchObject({ active: '1', deleted: '0' });
-    const rollback = await rollbackBatch(engine, 'run-test', 'b1');
+    const auth = await rollbackAuthForBatch();
+    const rollback = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now });
     expect(rollback.rolledBack).toBe(1);
-    const repeated = await rollbackBatch(engine, 'run-test', 'b1');
+    const repeated = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now });
     expect(repeated.rolledBack).toBe(0);
     pages = await engine.executeRaw<{ active: string; deleted: string }>(`SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL)::text AS active, COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)::text AS deleted FROM pages WHERE source_id='src-a' AND slug='alpha'`);
     expect(pages[0]).toMatchObject({ active: '0', deleted: '1' });
@@ -275,7 +311,8 @@ describe('content recovery applicator', () => {
     const approval = approved([row], bundle);
     await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
     await engine.executeRaw(`UPDATE pages SET compiled_truth='operator edit', content_hash=$1 WHERE source_id='src-a' AND slug='alpha'`, [contentHash('operator edit')]);
-    await expect(rollbackBatch(engine, 'run-test', 'b1')).rejects.toThrow('rollback CAS failed');
+    const auth = await rollbackAuthForBatch();
+    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now })).rejects.toThrow('rollback CAS failed');
   });
 
   test('schema status returns a structural checksum after provisioning', async () => {
@@ -383,6 +420,24 @@ describe('content recovery applicator', () => {
     expect(() => verifyApprovalSignature(approval.approval, [...TRUSTED_KEYS, { ...TRUSTED_KEYS[0], key_id: 'second-key' }], APPLY.now)).toThrow('duplicate trusted signer');
   });
 
+  test('allowlist envelope requires a reviewed trust-root source', () => {
+    const envelope = signAllowlistEnvelope({
+      schema_version: 'recovery_allowlist_envelope_v1',
+      allowlist: {
+        allowed_worktrees: {},
+        reserved_isolated_database_targets: [],
+        explicitly_permitted_fixture_identities: [],
+        trusted_approval_keys: TRUSTED_KEYS,
+      },
+      approved_at: '2026-07-12T00:00:00.000Z',
+      expires_at: '2026-07-13T00:00:00.000Z',
+      key_id: 'fixture-reviewer',
+      signer: 'fixture-reviewer',
+    }, PRIVATE_KEY_PEM);
+    expect(() => verifyAllowlistEnvelope(envelope, undefined, APPLY.now)).toThrow('key_id is not trusted');
+    expect(verifyAllowlistEnvelope(envelope, reviewedAllowlistTrustRootForTests(TRUSTED_KEYS), APPLY.now).trusted_approval_keys).toEqual(TRUSTED_KEYS);
+  });
+
   test('migration drift, structural drift, and down reapply are detected', async () => {
     await engine.executeRaw("UPDATE recovery_schema_version SET migration_sha256 = $1 WHERE version = $2", ['b'.repeat(64), 'recovery_v3_pre_rehearsal_1']);
     let status = await recoverySchemaStatus(engine);
@@ -411,7 +466,8 @@ describe('content recovery applicator', () => {
     const { row, bundle } = exactRow({ restore_action: 'merge_exact', live_present: 'true', live_page_id: String(live.id), live_version: String(refreshed.generation), live_content_hash: refreshed.content_hash });
     const approval = approved([row], bundle);
     await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
-    await rollbackBatch(engine, 'run-test', 'b1');
+    const auth = await rollbackAuthForBatch();
+    await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now });
     const after = (await engine.executeRaw<Record<string, unknown>>(`SELECT type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, emotional_weight::text, effective_date::text, effective_date_source, import_filename, salience_touched_at::text, last_retrieved_at::text, links_extracted_at::text, contextual_retrieval_mode, corpus_generation, deleted_at::text FROM pages WHERE id=$1`, [live.id]))[0];
     expect(after).toEqual(before);
   });

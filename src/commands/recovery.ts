@@ -11,7 +11,7 @@ import {
   createRecoveryPayloadBundle,
   downRecoverySchema,
   gapLedger,
-  loadAllowlist,
+  loadAllowlistEnvelope,
   manifestHash,
   parseCsv,
   payloadBundleHash,
@@ -29,6 +29,7 @@ import {
   type ExpectedStateArtifact,
   type ManifestInput,
   type RecoveryPayloadBundle,
+  type RollbackAuthorizationArtifact,
   type TrustedApprovalKey,
 } from '../recovery/content-recovery.ts';
 
@@ -61,7 +62,7 @@ function parseArgs(args: string[]): Args {
     const a = args[i];
     if (!a.startsWith('--')) { out._.push(a); continue; }
     const key = a.slice(2);
-    if (['json', 'yes'].includes(key)) { out[key] = true; continue; }
+    if (['json', 'yes', 'isolated-disposable-rehearsal'].includes(key)) { out[key] = true; continue; }
     const value = args[++i];
     if (!value || value.startsWith('--')) throw new Error(`missing value for --${key}`);
     out[key] = value;
@@ -78,6 +79,11 @@ function str(opts: Args, key: string): string {
 function maybeStr(opts: Args, key: string): string | undefined {
   const v = opts[key];
   return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+function requireWriteGate(opts: Args, command: string): void {
+  if (opts.yes !== true) throw new Error(`${command} requires --yes`);
+  if (opts['isolated-disposable-rehearsal'] !== true) throw new Error(`${command} requires --isolated-disposable-rehearsal`);
 }
 
 function readJson<T>(path: string): T {
@@ -109,7 +115,7 @@ function emit(opts: Args, payload: Record<string, unknown>): void {
 async function bindRuntime(engine: BrainEngine, opts: Args) {
   const worktree = str(opts, 'worktree');
   const allowlistPath = str(opts, 'allowlist');
-  const allowlist = loadAllowlist(allowlistPath);
+  const allowlist = loadAllowlistEnvelope(allowlistPath);
   const runtime = await assertAllowlistedRuntime(allowlist, {
     worktree,
     allowlistPath,
@@ -119,7 +125,7 @@ async function bindRuntime(engine: BrainEngine, opts: Args) {
   return { runtime, allowlist, allowlistPath };
 }
 
-function loadApplyArtifacts(opts: Args, allowlist: ReturnType<typeof loadAllowlist>, allowlistPath: string) {
+function loadApplyArtifacts(opts: Args, allowlist: ReturnType<typeof loadAllowlistEnvelope>, allowlistPath: string) {
   if (opts['trusted-keys']) throw new Error('--trusted-keys is forbidden; approval keys must come from the allowlist trust root');
   const rows = parseCsv(readFileSync(str(opts, 'manifest'), 'utf8'));
   const payloadBundle = readJson<RecoveryPayloadBundle>(str(opts, 'payload-bundle'));
@@ -145,7 +151,7 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
   }
 
   if (cmd === 'schema-provision') {
-    if (opts.yes !== true) throw new Error('schema-provision requires --yes');
+    requireWriteGate(opts, 'schema-provision');
     const { runtime } = await bindRuntime(engine, opts);
     await provisionRecoverySchema(engine);
     const status = await recoverySchemaStatus(engine);
@@ -173,7 +179,7 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
   if (cmd === 'approval-verify') {
     const allowlistPath = str(opts, 'allowlist');
     if (opts['trusted-keys']) throw new Error('--trusted-keys is forbidden; approval keys must come from the allowlist trust root');
-    const allowlist = loadAllowlist(allowlistPath);
+    const allowlist = loadAllowlistEnvelope(allowlistPath);
     const approval = readJson<ApprovalArtifact>(str(opts, 'approval'));
     const trustedApprovalKeys = trustedKeysFromAllowlist(allowlist, 'approval', allowlistPath);
     verifyApprovalSignature(approval, trustedApprovalKeys);
@@ -182,6 +188,7 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
   }
 
   if (cmd === 'dry-run' || cmd === 'apply') {
+    if (cmd === 'apply') requireWriteGate(opts, 'apply');
     const { runtime, allowlist, allowlistPath } = await bindRuntime(engine, opts);
     const a = loadApplyArtifacts(opts, allowlist, allowlistPath);
     const result = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime, dryRun: cmd === 'dry-run' });
@@ -202,15 +209,18 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
   }
 
   if (cmd === 'rollback') {
-    const { runtime } = await bindRuntime(engine, opts);
-    const result = await rollbackBatch(engine, str(opts, 'run-id'), str(opts, 'batch-id'));
-    emit(opts, { command: cmd, ok: true, runtime, result });
+    requireWriteGate(opts, 'rollback');
+    const { runtime, allowlist, allowlistPath } = await bindRuntime(engine, opts);
+    const authorization = readJson<RollbackAuthorizationArtifact>(str(opts, 'rollback-authorization'));
+    const trustedRollbackKeys = trustedKeysFromAllowlist(allowlist, 'approval', allowlistPath);
+    const result = await rollbackBatch(engine, str(opts, 'run-id'), str(opts, 'batch-id'), { authorization, trustedRollbackKeys, runtimeBinding: runtime, expectedRollbackStateHash: maybeStr(opts, 'expected-rollback-state-hash') });
+    emit(opts, { command: cmd, ok: true, runtime, rollback_authorization_hash: sha256(canonicalJson(authorization)), result });
     return;
   }
 
 
   if (cmd === 'schema-down') {
-    if (opts.yes !== true) throw new Error('schema-down requires --yes');
+    requireWriteGate(opts, 'schema-down');
     const { runtime } = await bindRuntime(engine, opts);
     await downRecoverySchema(engine);
     const status = await recoverySchemaStatus(engine);
