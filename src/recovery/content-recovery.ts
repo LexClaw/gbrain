@@ -392,12 +392,21 @@ function verifyDetachedSignature(name: string, keyRole: 'approval' | 'expected_s
   void wrapped;
 }
 
-export function verifyAllowlistEnvelope(envelope: AllowlistEnvelope, now = Date.now()): Allowlist {
+function verifyAllowlistEnvelopeWithRoots(envelope: AllowlistEnvelope, trustedRoots: readonly TrustedApprovalKey[], now = Date.now()): Allowlist {
   assertExactKeys('allowlist envelope', envelope, ['schema_version','allowlist','approved_at','expires_at','key_id','signer','signature']);
   if (envelope.schema_version !== 'recovery_allowlist_envelope_v1') throw new Error('unsupported allowlist envelope schema_version');
   assertAllowlistShape(envelope.allowlist);
-  verifyDetachedSignature('allowlist envelope', 'approval', envelope, [...REVIEWED_RECOVERY_ALLOWLIST_TRUST_ROOTS], allowlistEnvelopeSigningBytes(envelope), now);
+  verifyDetachedSignature('allowlist envelope', 'approval', envelope, [...trustedRoots], allowlistEnvelopeSigningBytes(envelope), now);
   return envelope.allowlist;
+}
+
+export function verifyAllowlistEnvelope(envelope: AllowlistEnvelope, now = Date.now()): Allowlist {
+  return verifyAllowlistEnvelopeWithRoots(envelope, REVIEWED_RECOVERY_ALLOWLIST_TRUST_ROOTS, now);
+}
+
+export function verifyDisposableRehearsalAllowlistEnvelope(envelope: AllowlistEnvelope, trustedRoots: readonly TrustedApprovalKey[], now = Date.now()): Allowlist {
+  if (trustedRoots.length === 0) throw new Error('disposable rehearsal trust roots are required');
+  return verifyAllowlistEnvelopeWithRoots(envelope, trustedRoots, now);
 }
 
 
@@ -410,6 +419,11 @@ export function verifyRollbackAuthorizationSignature(authorization: RollbackAuth
 
 function assertAllowlistShape(allowlist: Allowlist): void {
   assertOptionalExactKeys('allowlist', allowlist, ['allowed_worktrees','reserved_isolated_database_targets','explicitly_permitted_fixture_identities'], ['trusted_approval_keys','trusted_expected_state_keys','denied_before_future_approval']);
+  if (allowlist.allowed_worktrees === null || typeof allowlist.allowed_worktrees !== 'object' || Array.isArray(allowlist.allowed_worktrees)) throw new Error('allowlist missing required field allowed_worktrees');
+  if (!Array.isArray(allowlist.reserved_isolated_database_targets)) throw new Error('allowlist reserved_isolated_database_targets must be an array');
+  if (!Array.isArray(allowlist.explicitly_permitted_fixture_identities)) throw new Error('allowlist explicitly_permitted_fixture_identities must be an array');
+  if (allowlist.trusted_approval_keys != null && !Array.isArray(allowlist.trusted_approval_keys)) throw new Error('allowlist trusted_approval_keys must be an array');
+  if (allowlist.trusted_expected_state_keys != null && !Array.isArray(allowlist.trusted_expected_state_keys)) throw new Error('allowlist trusted_expected_state_keys must be an array');
 }
 
 export function buildManifest(input: ManifestInput, runId: string): ManifestRow[] {
@@ -874,7 +888,7 @@ function assertApproval(rows: ManifestRow[], opts: ApplyOptions): void {
 }
 
 export type ApplyResult = { applied: number; skipped: number; quarantined: number; dryRun: boolean; auditRows: number };
-export type ApplyOptions = { batchId: string; approvalHash: string; approval: ApprovalArtifact; trustedApprovalKeys: TrustedApprovalKey[]; payloadBundle: RecoveryPayloadBundle; runtimeBinding?: { head: string; dbIdentity: string; allowlistHash: string }; dryRun?: boolean; now?: number; crashAfter?: 'before_audit' | 'after_before_image' | 'after_cas' | 'after_mutation_before_commit' | 'after_commit_before_jsonl' | 'audit_write_failure' };
+export type ApplyOptions = { batchId: string; approvalHash: string; approval: ApprovalArtifact; trustedApprovalKeys: TrustedApprovalKey[]; payloadBundle: RecoveryPayloadBundle; runtimeBinding?: RecoveryRuntimeBinding; dryRun?: boolean; now?: number; crashAfter?: 'before_audit' | 'after_before_image' | 'after_cas' | 'after_mutation_before_commit' | 'after_commit_before_jsonl' | 'audit_write_failure' };
 
 export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestRow[], opts: ApplyOptions): Promise<ApplyResult> {
   await assertRecoverySchema(engine);
@@ -897,6 +911,7 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
 
   await engine.executeRaw('BEGIN');
   try {
+    await lockRecoveryBatch(engine, rows[0].run_id, opts.batchId);
     const batchHash = sha256(canonicalJson({ manifest_hash: manifestHash(rows), payload_bundle_hash: payloadBundleHash(opts.payloadBundle), approval_hash: opts.approvalHash, row_action_hash: rowActionHash(rows) }));
     const batchRows = await engine.executeRaw<{ batch_hash: string; manifest_hash: string; payload_bundle_hash: string; approval_hash: string; tool_commit: string; target_identity: string; allowlist_hash: string }>(`
       INSERT INTO recovery_audit_batches (run_id, batch_id, manifest_hash, payload_bundle_hash, approval_hash, tool_commit, target_identity, allowlist_hash, batch_hash)
@@ -1004,6 +1019,17 @@ export type RollbackAuditRow = {
 
 type RollbackAuditBatch = { batch_hash: string; manifest_hash: string; payload_bundle_hash: string; approval_hash: string; tool_commit: string; target_identity: string; allowlist_hash: string };
 
+type RecoveryRuntimeBinding = { head: string; dbIdentity: string; allowlistHash: string };
+
+async function lockRecoveryBatch(engine: BrainEngine, runId: string, batchId: string): Promise<void> {
+  if (engine.kind === 'postgres') await engine.executeRaw('SELECT pg_advisory_xact_lock(hashtext($1))', [`${runId}:${batchId}:recovery-audit`]);
+}
+
+function recomputeAuditBatchHash(batch: RollbackAuditBatch, audits: RollbackAuditRow[]): string {
+  const manifestRows = audits.map(a => a.canonical_manifest_row as ManifestRow);
+  return sha256(canonicalJson({ manifest_hash: batch.manifest_hash, payload_bundle_hash: batch.payload_bundle_hash, approval_hash: batch.approval_hash, row_action_hash: rowActionHash(manifestRows) }));
+}
+
 function rollbackAuditRowHash(audit: RollbackAuditRow, batchHash: string): string {
   return sha256(canonicalJson({ manifest_row: audit.canonical_manifest_row, before_image: audit.before_image, after_image: audit.after_image, cas: audit.cas_predicate, payload_hash: audit.payload_hash, approval_hash: audit.approval_hash, batch_hash: batchHash }));
 }
@@ -1019,17 +1045,37 @@ export function rollbackAuditBatchAuthorizationHash(batch: RollbackAuditBatch, a
 function rollbackStateEntryFromAudit(audit: RollbackAuditRow): Record<string, unknown> {
   const after = audit.after_image ?? {};
   const before = audit.before_image ?? {};
-  if (audit.action === 'add_exact') return { row_key: audit.row_key, action: audit.action, source_id: String(after.source_id ?? ''), slug: String(after.slug ?? ''), active_after_rollback: false };
-  return { row_key: audit.row_key, action: audit.action, source_id: String(before.source_id ?? after.source_id ?? ''), slug: String(before.slug ?? after.slug ?? ''), mutable_page_state: Object.fromEntries(RECOVERY_PAGE_MUTABLE_COLUMNS.map(col => [col, before[col]])) };
+  if (audit.action === 'add_exact') return { row_key: audit.row_key, action: audit.action, source_id: String(after.source_id ?? ''), slug: String(after.slug ?? ''), active_after_rollback: false, apply_state_status: 'rolled_back' };
+  return { row_key: audit.row_key, action: audit.action, source_id: String(before.source_id ?? after.source_id ?? ''), slug: String(before.slug ?? after.slug ?? ''), mutable_page_state: Object.fromEntries(RECOVERY_PAGE_MUTABLE_COLUMNS.map(col => [col, before[col]])), apply_state_status: 'rolled_back' };
 }
 
 export function rollbackStateHashFromAuditRows(audits: RollbackAuditRow[]): string {
   return sha256(canonicalJson(audits.map(rollbackStateEntryFromAudit).sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)))));
 }
 
-export async function rollbackBatch(engine: BrainEngine, runId: string, batchId: string, opts: { authorization: RollbackAuthorizationArtifact; trustedRollbackKeys: TrustedApprovalKey[]; runtimeBinding?: { head: string; dbIdentity: string; allowlistHash: string }; expectedRollbackStateHash: string; now?: number }): Promise<{ rolledBack: number }> {
+async function rollbackStateHashFromDatabase(engine: BrainEngine, runId: string, batchId: string, audits: RollbackAuditRow[]): Promise<string> {
+  const entries: Record<string, unknown>[] = [];
+  for (const audit of audits) {
+    const expected = rollbackStateEntryFromAudit(audit);
+    const sourceId = String(expected.source_id ?? '');
+    const slug = String(expected.slug ?? '');
+    const stateRows = await engine.executeRaw<{ status: string }>(`SELECT status FROM recovery_apply_state WHERE run_id = $1 AND batch_id = $2 AND row_key = $3${engine.kind === 'postgres' ? ' FOR UPDATE' : ''}`, [runId, batchId, audit.row_key]);
+    if (stateRows.length !== 1) throw new Error(`rollback post-state missing apply state for ${audit.row_key}`);
+    const pages = await engine.executeRaw<PageRow>(`SELECT ${PAGE_RETURNING} FROM pages WHERE source_id = $1 AND slug = $2${engine.kind === 'postgres' ? ' FOR UPDATE' : ''}`, [sourceId, slug]);
+    if (audit.action === 'add_exact') {
+      entries.push({ row_key: audit.row_key, action: audit.action, source_id: sourceId, slug, active_after_rollback: pages.some(page => !page.deleted_at), apply_state_status: stateRows[0].status });
+      continue;
+    }
+    if (pages.length !== 1) throw new Error(`rollback post-state expected one page for ${sourceId}/${slug}, got ${pages.length}`);
+    const page = pages[0];
+    entries.push({ row_key: audit.row_key, action: audit.action, source_id: sourceId, slug, mutable_page_state: Object.fromEntries(RECOVERY_PAGE_MUTABLE_COLUMNS.map(col => [col, (page as unknown as Record<string, unknown>)[col]])), apply_state_status: stateRows[0].status });
+  }
+  return sha256(canonicalJson(entries.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)))));
+}
+
+export async function rollbackBatch(engine: BrainEngine, runId: string, batchId: string, opts: { authorization: RollbackAuthorizationArtifact; trustedRollbackKeys: TrustedApprovalKey[]; runtimeBinding: RecoveryRuntimeBinding; expectedRollbackStateHash: string; now?: number }): Promise<{ rolledBack: number }> {
   await assertRecoverySchema(engine);
-  if (!opts.authorization || !opts.trustedRollbackKeys?.length || !opts.expectedRollbackStateHash) throw new Error('signed rollback authorization and expected rollback state hash are required');
+  if (!opts.authorization || !opts.trustedRollbackKeys?.length || !opts.expectedRollbackStateHash || !opts.runtimeBinding) throw new Error('signed rollback authorization, runtime binding, and expected rollback state hash are required');
   verifyRollbackAuthorizationSignature(opts.authorization, opts.trustedRollbackKeys, opts.now);
   const auth = opts.authorization;
   if (auth.run_id !== runId || auth.batch_id !== batchId) throw new Error('rollback authorization run or batch mismatch');
@@ -1037,7 +1083,7 @@ export async function rollbackBatch(engine: BrainEngine, runId: string, batchId:
   let rolledBack = 0;
   await engine.executeRaw('BEGIN');
   try {
-    if (engine.kind === 'postgres') await engine.executeRaw('SELECT pg_advisory_xact_lock(hashtext($1))', [`${runId}:${batchId}:rollback`]);
+    await lockRecoveryBatch(engine, runId, batchId);
     const batchForAuth = await engine.executeRaw<RollbackAuditBatch>(`SELECT batch_hash, manifest_hash, payload_bundle_hash, approval_hash, tool_commit, target_identity, allowlist_hash FROM recovery_audit_batches WHERE run_id = $1 AND batch_id = $2${engine.kind === 'postgres' ? ' FOR UPDATE' : ''}`, [runId, batchId]);
     if (batchForAuth.length !== 1) throw new Error(`expected exactly one rollback audit batch, found ${batchForAuth.length}`);
     const audits = await engine.executeRaw<RollbackAuditRow>(
@@ -1047,6 +1093,7 @@ export async function rollbackBatch(engine: BrainEngine, runId: string, batchId:
     if (audits.length === 0) throw new Error('rollback audit rows are required');
     await engine.executeRaw(`SELECT row_key, status FROM recovery_apply_state WHERE run_id = $1 AND batch_id = $2${engine.kind === 'postgres' ? ' FOR UPDATE' : ''}`, [runId, batchId]);
     const batch = batchForAuth[0];
+    if (recomputeAuditBatchHash(batch, audits) !== batch.batch_hash) throw new Error('audit batch hash verification failed');
     for (const audit of audits) {
       const rowHash = rollbackAuditRowHash(audit, batch.batch_hash);
       if (rowHash !== audit.row_hash) throw new Error(`audit row hash verification failed for ${audit.row_key}`);
@@ -1055,11 +1102,9 @@ export async function rollbackBatch(engine: BrainEngine, runId: string, batchId:
     if (auth.original_approval_hash !== batch.approval_hash) throw new Error('rollback authorization original approval mismatch');
     if (auth.row_action_hash !== rollbackAuditRowsAuthorizationHash(audits)) throw new Error('rollback authorization row set mismatch');
     if (auth.expected_rollback_state_hash !== rollbackStateHashFromAuditRows(audits)) throw new Error('rollback authorization expected rollback state mismatch');
-    if (opts.runtimeBinding) {
-      if (auth.tool_commit !== opts.runtimeBinding.head) throw new Error('rollback authorization tool_commit mismatch');
-      if (auth.target_identity !== opts.runtimeBinding.dbIdentity) throw new Error('rollback authorization target_identity mismatch');
-      if (auth.allowlist_hash !== opts.runtimeBinding.allowlistHash) throw new Error('rollback authorization allowlist_hash mismatch');
-    }
+    if (auth.tool_commit !== opts.runtimeBinding.head) throw new Error('rollback authorization tool_commit mismatch');
+    if (auth.target_identity !== opts.runtimeBinding.dbIdentity) throw new Error('rollback authorization target_identity mismatch');
+    if (auth.allowlist_hash !== opts.runtimeBinding.allowlistHash) throw new Error('rollback authorization allowlist_hash mismatch');
     for (const audit of audits) {
       const state = await engine.executeRaw<{ status: string }>('SELECT status FROM recovery_apply_state WHERE run_id = $1 AND batch_id = $2 AND row_key = $3', [runId, batchId, audit.row_key]);
       if (state[0]?.status === 'rolled_back') continue;
@@ -1105,7 +1150,8 @@ export async function rollbackBatch(engine: BrainEngine, runId: string, batchId:
       await engine.executeRaw('UPDATE recovery_apply_state SET status = $3, updated_at = now() WHERE run_id = $1 AND batch_id = $2 AND row_key = $4', [runId, batchId, 'rolled_back', audit.row_key]);
       rolledBack++;
     }
-    if (rollbackStateHashFromAuditRows(audits) !== opts.expectedRollbackStateHash) throw new Error('rollback post-state hash mismatch');
+    const actualPostStateHash = await rollbackStateHashFromDatabase(engine, runId, batchId, audits);
+    if (actualPostStateHash !== opts.expectedRollbackStateHash) throw new Error('rollback post-state hash mismatch');
     await engine.executeRaw('COMMIT');
   } catch (err) {
     await engine.executeRaw('ROLLBACK');

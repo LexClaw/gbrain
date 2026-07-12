@@ -24,7 +24,9 @@ import {
   toCsv,
   trustedKeysFromAllowlist,
   verifyApprovalSignature,
+  verifyDisposableRehearsalAllowlistEnvelope,
   verifyRecovery,
+  type AllowlistEnvelope,
   type ApprovalArtifact,
   type ExpectedStateArtifact,
   type ManifestInput,
@@ -44,6 +46,7 @@ Commands:
   apply              Apply approved manifest
   verify             Acceptance verify approved manifest and optional expected state
   rollback           Roll back one applied run and batch
+  rehearsal-allowlist-verify  Disposable non-production allowlist verification
   schema-down        Remove unused recovery schema, requires --yes
 
 Required runtime binding for schema-status, schema-provision, dry-run, apply, verify, rollback:
@@ -184,6 +187,15 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
     const trustedApprovalKeys = trustedKeysFromAllowlist(allowlist, 'approval', allowlistPath);
     verifyApprovalSignature(approval, trustedApprovalKeys);
     emit(opts, { command: cmd, ok: true, approval_hash: approvalHash(approval), signer: approval.signer });
+    return;
+  }
+
+  if (cmd === 'rehearsal-allowlist-verify') {
+    if (opts['isolated-disposable-rehearsal'] !== true) throw new Error('rehearsal-allowlist-verify requires --isolated-disposable-rehearsal');
+    const envelope = readJson<AllowlistEnvelope>(str(opts, 'allowlist'));
+    const trustedRoots = readJson<TrustedApprovalKey[]>(str(opts, 'trusted-rehearsal-keys'));
+    const allowlist = verifyDisposableRehearsalAllowlistEnvelope(envelope, trustedRoots);
+    emit(opts, { command: cmd, ok: true, rehearsal: 'isolated-disposable', trusted_roots: trustedRoots.length, allowlist_hash: sha256(canonicalJson(allowlist)) });
     return;
   }
 
