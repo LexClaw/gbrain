@@ -347,12 +347,12 @@ describe('content recovery applicator', () => {
     await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now })).rejects.toThrow('rollback post-state hash mismatch');
   });
 
-  test('rollback requires runtime binding for library callers', async () => {
+  test('rollback requires runtime derivation inputs for library callers', async () => {
     const { row, bundle } = exactRow();
     const approval = approved([row], bundle);
     await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY, crashAfter: 'after_commit_before_jsonl' })).rejects.toThrow('fault injection');
     const auth = await rollbackAuthForBatch();
-    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now } as any)).rejects.toThrow('runtime binding');
+    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now } as any)).rejects.toThrow('runtime derivation');
   });
 
   test('rollback independently recomputes and rejects corrupted stored batch hash', async () => {
@@ -380,7 +380,7 @@ describe('content recovery applicator', () => {
     const rowHash = sha256(canonicalJson({ manifest_row: phantom.canonical_manifest_row, before_image: phantom.before_image, after_image: phantom.after_image, cas: phantom.cas_predicate, payload_hash: phantom.payload_hash, approval_hash: phantom.approval_hash, batch_hash: batch.batch_hash }));
     await engine.executeRaw(`INSERT INTO recovery_audit_rows (run_id, batch_id, row_key, action, canonical_manifest_row, before_image, after_image, cas_predicate, payload_hash, approval_hash, row_hash) VALUES ('run-test','b1',$1,$2,$3::jsonb,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9)`, [phantom.row_key, phantom.action, phantom.canonical_manifest_row, phantom.before_image, phantom.after_image, phantom.cas_predicate, phantom.payload_hash, phantom.approval_hash, rowHash]);
     const auth = await rollbackAuthForBatch();
-    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now })).rejects.toThrow('audit batch hash verification failed');
+    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now })).rejects.toThrow('derived audit rows');
   });
 
   test('schema status returns a structural checksum after provisioning', async () => {

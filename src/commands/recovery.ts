@@ -46,6 +46,7 @@ Commands:
   apply              Apply approved manifest
   verify             Acceptance verify approved manifest and optional expected state
   rollback           Roll back one applied run and batch
+  rehearsal         Run schema dry-run/apply/verify/rollback on an isolated disposable target
   rehearsal-allowlist-verify  Disposable non-production allowlist verification
   schema-down        Remove unused recovery schema, requires --yes
 
@@ -199,6 +200,28 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
     return;
   }
 
+  if (cmd === 'rehearsal') {
+    requireWriteGate(opts, 'rehearsal');
+    const worktree = str(opts, 'worktree');
+    const allowlistPath = str(opts, 'allowlist');
+    const envelope = readJson<AllowlistEnvelope>(allowlistPath);
+    const trustedRoots = readJson<TrustedApprovalKey[]>(str(opts, 'trusted-rehearsal-keys'));
+    const allowlist = verifyDisposableRehearsalAllowlistEnvelope(envelope, trustedRoots);
+    const runtime = await assertAllowlistedRuntime(allowlist, { worktree, allowlistPath, engine, targetIdentity: maybeStr(opts, 'target-identity') });
+    const a = loadApplyArtifacts(opts, allowlist, allowlistPath);
+    await provisionRecoverySchema(engine);
+    const dryRun = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime, dryRun: true });
+    const apply = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime });
+    const expectedState = readJson<ExpectedStateArtifact>(str(opts, 'expected-state'));
+    const checks = await verifyRecovery(engine, a.rows, str(opts, 'run-id'), { batchId: a.batchId, payloadBundle: a.payloadBundle, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, expectedState, trustedExpectedStateKeys: a.trustedExpectedStateKeys, runtimeBinding: runtime });
+    const authorization = readJson<RollbackAuthorizationArtifact>(str(opts, 'rollback-authorization'));
+    const rollback = await rollbackBatch(engine, str(opts, 'run-id'), a.batchId, { authorization, trustedRollbackKeys: a.trustedApprovalKeys, runtime: { allowlist, allowlistPath, worktree, targetIdentity: maybeStr(opts, 'target-identity') }, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
+    const ok = Object.values(checks).every(c => c.pass);
+    emit(opts, { command: cmd, ok, rehearsal: 'isolated-disposable', runtime, dry_run: dryRun, apply, verify: checks, rollback });
+    if (!ok) process.exitCode = 3;
+    return;
+  }
+
   if (cmd === 'dry-run' || cmd === 'apply') {
     if (cmd === 'apply') requireWriteGate(opts, 'apply');
     const { runtime, allowlist, allowlistPath } = await bindRuntime(engine, opts);
@@ -225,7 +248,7 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
     const { runtime, allowlist, allowlistPath } = await bindRuntime(engine, opts);
     const authorization = readJson<RollbackAuthorizationArtifact>(str(opts, 'rollback-authorization'));
     const trustedRollbackKeys = trustedKeysFromAllowlist(allowlist, 'approval', allowlistPath);
-    const result = await rollbackBatch(engine, str(opts, 'run-id'), str(opts, 'batch-id'), { authorization, trustedRollbackKeys, runtimeBinding: runtime, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
+    const result = await rollbackBatch(engine, str(opts, 'run-id'), str(opts, 'batch-id'), { authorization, trustedRollbackKeys, runtime: { allowlist, allowlistPath, worktree: str(opts, 'worktree'), targetIdentity: maybeStr(opts, 'target-identity') }, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
     emit(opts, { command: cmd, ok: true, runtime, rollback_authorization_hash: sha256(canonicalJson(authorization)), result });
     return;
   }
