@@ -1,6 +1,7 @@
-import { createHash } from 'crypto';
+import { createHash, createPublicKey, sign as edSign, verify as edVerify } from 'crypto';
 import { realpathSync, readFileSync } from 'fs';
 import { resolve } from 'path';
+import { execFileSync } from 'child_process';
 import type { BrainEngine } from '../core/engine.ts';
 
 export const RECOVERY_SCHEMA_VERSION = 'recovery_v3_pre_rehearsal_1';
@@ -43,6 +44,17 @@ export type ApprovalArtifact = {
   signer: string;
   signature: string;
 };
+export type TrustedApprovalKey = { key_id: string; signer: string; public_key_pem: string; not_before?: string; not_after?: string };
+export type ExpectedStateArtifact = {
+  schema_version: 'recovery_expected_state_v1';
+  run_id: string;
+  batch_id: string;
+  manifest_hash: string;
+  payload_bundle_hash: string;
+  approval_hash: string;
+  expected_pages: Array<{ source_id: string; slug: string; content_hash: string; action: string }>;
+  expected_audit_rows: number;
+};
 export type ManifestInput = {
   predelete: Array<Partial<ManifestRow> & { compiled_truth?: string; frontmatter?: unknown; timeline?: string }>;
   live: Array<Partial<ManifestRow> & { compiled_truth?: string }>;
@@ -62,6 +74,7 @@ export type Allowlist = {
     environment_contract: { set: Record<string, string>; unset: string[] };
   }>;
   explicitly_permitted_fixture_identities: string[];
+  trusted_approval_keys?: TrustedApprovalKey[];
   denied_before_future_approval?: string[];
 };
 
@@ -163,8 +176,47 @@ export function rowActionHash(rows: ManifestRow[]): string {
   return sha256(canonicalJson(rows.map(row => ({ run_id: row.run_id, batch_id: row.batch_id, source_id: row.source_id, slug: row.slug, action: row.restore_action, payload_hash: row.recovery_payload_hash })).sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)))));
 }
 
+export function approvalSigningBytes(approval: ApprovalArtifact): Buffer {
+  const { signature: _signature, ...unsigned } = approval;
+  return Buffer.from(canonicalJson({ ...unsigned, signature_algorithm: 'Ed25519' }));
+}
+
+export function signApprovalArtifact(unsigned: Omit<ApprovalArtifact, 'signature'>, privateKeyPem: string): ApprovalArtifact {
+  const artifact = { ...unsigned, signature: '' } as ApprovalArtifact;
+  return { ...artifact, signature: edSign(null, approvalSigningBytes(artifact), privateKeyPem).toString('base64') };
+}
+
 export function approvalHash(approval: ApprovalArtifact): string {
   return sha256(canonicalJson(approval));
+}
+
+function parseStrictIso(name: string, value: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) throw new Error(`${name} must be an RFC3339 UTC timestamp with milliseconds`);
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) throw new Error(`${name} is malformed`);
+  return ms;
+}
+
+export function verifyApprovalSignature(approval: ApprovalArtifact, trustedKeys: TrustedApprovalKey[], now = Date.now()): void {
+  if (approval.schema_version !== 'recovery_approval_v1') throw new Error('unsupported approval schema_version');
+  for (const [key, value] of Object.entries(approval)) if (typeof value !== 'string' || value.length === 0) throw new Error(`approval field ${key} must be a non-empty string`);
+  for (const field of ['manifest_hash','payload_bundle_hash','row_action_hash','allowlist_hash'] as const) if (!isSha256(approval[field])) throw new Error(`approval ${field} must be sha256`);
+  if (!/^[a-f0-9]{40,64}$/.test(approval.tool_commit)) throw new Error('approval tool_commit must be an immutable git commit hash');
+  const approvedAt = parseStrictIso('approved_at', approval.approved_at);
+  const expiresAt = parseStrictIso('expires_at', approval.expires_at);
+  if (approvedAt > now + 5 * 60_000) throw new Error('approval artifact is future-dated');
+  if (expiresAt <= now) throw new Error('approval artifact is expired');
+  if (expiresAt - approvedAt > 7 * 24 * 60 * 60_000) throw new Error('approval expiry exceeds seven days');
+  const trusted = trustedKeys.find(key => key.key_id === approval.signer || key.signer === approval.signer);
+  if (!trusted) throw new Error(`approval signer is not trusted: ${approval.signer}`);
+  if (trusted.not_before && approvedAt < parseStrictIso('trusted key not_before', trusted.not_before)) throw new Error('approval predates trusted key validity');
+  if (trusted.not_after && approvedAt > parseStrictIso('trusted key not_after', trusted.not_after)) throw new Error('approval postdates trusted key validity');
+  let publicKey;
+  try { publicKey = createPublicKey(trusted.public_key_pem); } catch { throw new Error('trusted approval public key is malformed'); }
+  let signature: Buffer;
+  try { signature = Buffer.from(approval.signature, 'base64'); } catch { throw new Error('approval signature is malformed base64'); }
+  if (signature.length !== 64) throw new Error('approval signature has invalid Ed25519 length');
+  if (!edVerify(null, approvalSigningBytes(approval), publicKey, signature)) throw new Error('approval signature verification failed');
 }
 
 export function buildManifest(input: ManifestInput, runId: string): ManifestRow[] {
@@ -356,14 +408,66 @@ export function loadAllowlist(path: string): Allowlist {
   return JSON.parse(readFileSync(path, 'utf8')) as Allowlist;
 }
 
-export function assertAllowlistedEnvironment(allowlist: Allowlist, opts: { worktree: string; expectedHead: string; actualHead: string; branch: string; env?: NodeJS.ProcessEnv; targetIdentity?: string; clean?: boolean }): { worktreeRealpath: string; dbIdentity: string } {
+export function allowlistHashBytes(path: string): { bytes: string; sha256: string } {
+  const bytes = readFileSync(path, 'utf8');
+  return { bytes, sha256: sha256(bytes) };
+}
+
+function git(worktree: string, args: string[]): string {
+  return execFileSync('git', ['-C', worktree, ...args], { encoding: 'utf8' }).trim();
+}
+
+export function inspectGitWorktree(worktree: string): { gitRoot: string; head: string; branch: string; clean: boolean } {
+  const gitRoot = realpathSync(git(worktree, ['rev-parse', '--show-toplevel']));
+  const head = git(gitRoot, ['rev-parse', 'HEAD']);
+  const branch = git(gitRoot, ['branch', '--show-current']);
+  const clean = git(gitRoot, ['status', '--porcelain']) === '';
+  return { gitRoot, head, branch, clean };
+}
+
+export async function connectedDatabaseIdentity(engine: BrainEngine): Promise<string> {
+  try {
+    const rows = await engine.executeRaw<{ database_name: string; server_addr: string | null; server_port: string | null; version: string }>(`SELECT current_database()::text AS database_name, inet_server_addr()::text AS server_addr, inet_server_port()::text AS server_port, version()::text AS version`);
+    if (rows[0]) return sha256(canonicalJson({ kind: 'postgres', ...rows[0] }));
+  } catch {
+    const rows = await engine.executeRaw<{ table_count: string; version: string }>(`SELECT COUNT(*)::text AS table_count, version()::text AS version FROM information_schema.tables`);
+    return sha256(canonicalJson({ kind: 'pglite', ...(rows[0] ?? {}) }));
+  }
+  throw new Error('unable to obtain connected database identity');
+}
+
+export async function assertAllowlistedRuntime(allowlist: Allowlist, opts: { worktree: string; allowlistPath: string; engine: BrainEngine; env?: NodeJS.ProcessEnv; targetIdentity?: string }): Promise<{ worktreeRealpath: string; gitRoot: string; head: string; branch: string; clean: boolean; dbIdentity: string; allowlistHash: string }> {
   const env = opts.env ?? process.env;
-  const worktreeRealpath = realpathSync(opts.worktree);
-  const allowed = Object.values(allowlist.allowed_worktrees).find(w => w.realpath === worktreeRealpath && w.branch === opts.branch);
-  if (!allowed) throw new Error(`worktree realpath and branch are not allowlisted: ${worktreeRealpath} ${opts.branch}`);
+  const gitState = inspectGitWorktree(opts.worktree);
+  const worktreeRealpath = gitState.gitRoot;
+  const allowed = Object.values(allowlist.allowed_worktrees).find(w => w.realpath === worktreeRealpath && w.branch === gitState.branch);
+  if (!allowed) throw new Error(`worktree realpath and branch are not allowlisted: ${worktreeRealpath} ${gitState.branch}`);
+  if (allowed.immutable_base_commit !== gitState.head) throw new Error(`actual git HEAD mismatch: expected ${allowed.immutable_base_commit}, got ${gitState.head}`);
+  if (!gitState.clean) throw new Error('worktree must be clean before rehearsal tooling mutates data');
+  const { sha256: allowHash } = allowlistHashBytes(opts.allowlistPath);
+  const dbIdentity = await connectedDatabaseIdentity(opts.engine);
+  const matches = allowlist.reserved_isolated_database_targets.filter(db => db.identity_fingerprint === dbIdentity || (opts.targetIdentity && db.identity_fingerprint === opts.targetIdentity));
+  if (matches.length !== 1) throw new Error(`expected exactly one allowlisted isolated database target, found ${matches.length}`);
+  const db = matches[0];
+  for (const key of db.environment_contract.unset) if (env[key]) throw new Error(`${key} must be unset for recovery tooling`);
+  for (const [key, value] of Object.entries(db.environment_contract.set)) if (env[key] !== value) throw new Error(`${key} must equal allowlisted value`);
+  if (opts.targetIdentity && opts.targetIdentity !== dbIdentity) throw new Error(`connected database identity mismatch: expected ${opts.targetIdentity}, got ${dbIdentity}`);
+  if (!allowlist.explicitly_permitted_fixture_identities.includes(dbIdentity)) throw new Error(`database identity not permitted: ${dbIdentity}`);
+  return { worktreeRealpath, gitRoot: gitState.gitRoot, head: gitState.head, branch: gitState.branch, clean: gitState.clean, dbIdentity, allowlistHash: allowHash };
+}
+
+export function assertAllowlistedEnvironment(allowlist: Allowlist, opts: { worktree: string; expectedHead: string; actualHead?: string; branch?: string; env?: NodeJS.ProcessEnv; targetIdentity?: string; clean?: boolean }): { worktreeRealpath: string; dbIdentity: string } {
+  const env = opts.env ?? process.env;
+  const gitState = inspectGitWorktree(opts.worktree);
+  const worktreeRealpath = gitState.gitRoot;
+  const actualHead = opts.actualHead ?? gitState.head;
+  const branch = opts.branch ?? gitState.branch;
+  const clean = opts.clean ?? gitState.clean;
+  const allowed = Object.values(allowlist.allowed_worktrees).find(w => w.realpath === worktreeRealpath && w.branch === branch);
+  if (!allowed) throw new Error(`worktree realpath and branch are not allowlisted: ${worktreeRealpath} ${branch}`);
   if (allowed.immutable_base_commit !== opts.expectedHead) throw new Error(`base commit mismatch: expected ${allowed.immutable_base_commit}, got ${opts.expectedHead}`);
-  if (opts.actualHead !== opts.expectedHead) throw new Error(`actual git HEAD mismatch: expected ${opts.expectedHead}, got ${opts.actualHead}`);
-  if (opts.clean === false) throw new Error('worktree must be clean before rehearsal tooling mutates data');
+  if (actualHead !== opts.expectedHead) throw new Error(`actual git HEAD mismatch: expected ${opts.expectedHead}, got ${actualHead}`);
+  if (!clean) throw new Error('worktree must be clean before rehearsal tooling mutates data');
   if (!env.GBRAIN_HOME) throw new Error('GBRAIN_HOME is required for recovery tooling');
   for (const blocked of ['DATABASE_URL', 'POSTGRES_URL', 'SUPABASE_DB_URL']) if (env[blocked]) throw new Error(`${blocked} must be unset for recovery tooling`);
   const homeRealpath = realpathSync(resolve(env.GBRAIN_HOME));
@@ -377,43 +481,42 @@ export function assertAllowlistedEnvironment(allowlist: Allowlist, opts: { workt
   return { worktreeRealpath, dbIdentity };
 }
 
-export function recoverySchemaSql(): string {
-  return `
-    CREATE TABLE IF NOT EXISTS recovery_schema_version (
+export const RECOVERY_MIGRATION_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS recovery_schema_version (
       version TEXT PRIMARY KEY,
       installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    INSERT INTO recovery_schema_version (version) VALUES ('${RECOVERY_SCHEMA_VERSION}') ON CONFLICT DO NOTHING;
-    CREATE TABLE IF NOT EXISTS recovery_audit_batches (
+    )`,
+  `INSERT INTO recovery_schema_version (version) VALUES ('${RECOVERY_SCHEMA_VERSION}') ON CONFLICT DO NOTHING`,
+  `CREATE TABLE IF NOT EXISTS recovery_audit_batches (
       run_id TEXT NOT NULL,
       batch_id TEXT NOT NULL,
-      manifest_hash TEXT NOT NULL,
-      payload_bundle_hash TEXT NOT NULL,
-      approval_hash TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL CHECK (manifest_hash ~ '^[a-f0-9]{64}$'),
+      payload_bundle_hash TEXT NOT NULL CHECK (payload_bundle_hash ~ '^[a-f0-9]{64}$'),
+      approval_hash TEXT NOT NULL CHECK (approval_hash ~ '^[a-f0-9]{64}$'),
       tool_commit TEXT NOT NULL,
       target_identity TEXT NOT NULL,
-      allowlist_hash TEXT NOT NULL,
-      batch_hash TEXT NOT NULL,
+      allowlist_hash TEXT NOT NULL CHECK (allowlist_hash ~ '^[a-f0-9]{64}$'),
+      batch_hash TEXT NOT NULL CHECK (batch_hash ~ '^[a-f0-9]{64}$'),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY(run_id, batch_id)
-    );
-    CREATE TABLE IF NOT EXISTS recovery_audit_rows (
+    )`,
+  `CREATE TABLE IF NOT EXISTS recovery_audit_rows (
       id SERIAL PRIMARY KEY,
       run_id TEXT NOT NULL,
       batch_id TEXT NOT NULL,
       row_key TEXT NOT NULL,
-      action TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('add_exact','merge_exact')),
       canonical_manifest_row JSONB NOT NULL,
       before_image JSONB NOT NULL,
       after_image JSONB NOT NULL,
       cas_predicate JSONB NOT NULL,
-      payload_hash TEXT NOT NULL,
-      approval_hash TEXT NOT NULL,
-      row_hash TEXT NOT NULL,
+      payload_hash TEXT NOT NULL CHECK (payload_hash ~ '^[a-f0-9]{64}$'),
+      approval_hash TEXT NOT NULL CHECK (approval_hash ~ '^[a-f0-9]{64}$'),
+      row_hash TEXT NOT NULL CHECK (row_hash ~ '^[a-f0-9]{64}$'),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE(run_id, batch_id, row_key)
-    );
-    CREATE TABLE IF NOT EXISTS recovery_apply_state (
+    )`,
+  `CREATE TABLE IF NOT EXISTS recovery_apply_state (
       run_id TEXT NOT NULL,
       batch_id TEXT NOT NULL,
       row_key TEXT NOT NULL,
@@ -421,14 +524,27 @@ export function recoverySchemaSql(): string {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY(run_id, batch_id, row_key)
-    );
-  `;
+    )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS recovery_active_pages_source_slug_guard ON pages(source_id, slug) WHERE deleted_at IS NULL`,
+];
+
+export function recoverySchemaSql(): string {
+  return RECOVERY_MIGRATION_STATEMENTS.join(';\n') + ';\n';
 }
 
 export async function provisionRecoverySchema(engine: BrainEngine): Promise<void> {
-  for (const statement of recoverySchemaSql().split(';').map(s => s.trim()).filter(Boolean)) {
-    await engine.executeRaw(statement);
-  }
+  for (const statement of RECOVERY_MIGRATION_STATEMENTS) await engine.executeRaw(statement);
+}
+
+export async function recoverySchemaStatus(engine: BrainEngine): Promise<{ provisioned: boolean; schema_version: string; checksum: string; missing: string[] }> {
+  const required = ['recovery_schema_version','recovery_audit_batches','recovery_audit_rows','recovery_apply_state'];
+  const rows = await engine.executeRaw<{ table_name: string }>(`SELECT table_name FROM information_schema.tables WHERE table_name IN ('recovery_schema_version','recovery_audit_batches','recovery_audit_rows','recovery_apply_state')`);
+  const present = new Set(rows.map(r => r.table_name));
+  const missing = required.filter(t => !present.has(t));
+  let versionRows: Array<{ version: string }> = [];
+  if (!missing.includes('recovery_schema_version')) versionRows = await engine.executeRaw<{ version: string }>('SELECT version FROM recovery_schema_version WHERE version = $1', [RECOVERY_SCHEMA_VERSION]);
+  const cols = await engine.executeRaw<{ table_name: string; column_name: string; data_type: string; is_nullable: string }>(`SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name IN ('recovery_schema_version','recovery_audit_batches','recovery_audit_rows','recovery_apply_state') ORDER BY table_name, ordinal_position`);
+  return { provisioned: missing.length === 0 && versionRows.length === 1, schema_version: RECOVERY_SCHEMA_VERSION, checksum: sha256(canonicalJson(cols)), missing };
 }
 
 async function assertRecoverySchema(engine: BrainEngine): Promise<void> {
@@ -442,7 +558,7 @@ async function getSource(engine: BrainEngine, sourceId: string): Promise<SourceR
 }
 
 async function getPage(engine: BrainEngine, sourceId: string, slug: string): Promise<PageRow | null> {
-  const rows = await engine.executeRaw<PageRow>(`SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at FROM pages WHERE source_id = $1 AND slug = $2`, [sourceId, slug]);
+  const rows = await engine.executeRaw<PageRow>('SELECT * FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
   return rows[0] ?? null;
 }
 
@@ -475,27 +591,36 @@ function assertPayload(row: ManifestRow, bundle: RecoveryPayloadBundle): Recover
 
 function assertApproval(rows: ManifestRow[], opts: ApplyOptions): void {
   if (!opts.approval) throw new Error('signed approval artifact is required');
+  if (!opts.trustedApprovalKeys?.length) throw new Error('trusted approval key allowlist is required');
   const approval = opts.approval;
+  verifyApprovalSignature(approval, opts.trustedApprovalKeys, opts.now);
   const hash = approvalHash(approval);
   if (hash !== opts.approvalHash) throw new Error('approval hash argument does not match approval artifact');
   if (rows.some(row => row.approval_hash !== hash)) throw new Error('manifest row approval hash is not bound to approval artifact');
-  if (approval.batch_id !== opts.batchId) throw new Error('approval batch mismatch');
-  if (approval.run_id !== rows[0]?.run_id) throw new Error('approval run mismatch');
+  if (approval.batch_id !== opts.batchId || rows.some(row => row.batch_id !== opts.batchId)) throw new Error('approval batch mismatch');
+  if (approval.run_id !== rows[0]?.run_id || rows.some(row => row.run_id !== approval.run_id)) throw new Error('approval run mismatch');
   if (approval.manifest_hash !== manifestHash(rows)) throw new Error('approval manifest hash mismatch');
   if (approval.payload_bundle_hash !== payloadBundleHash(opts.payloadBundle)) throw new Error('approval payload bundle hash mismatch');
   if (approval.row_action_hash !== rowActionHash(rows)) throw new Error('approval row action hash mismatch');
-  if (new Date(approval.expires_at).getTime() <= Date.now()) throw new Error('approval artifact is expired');
-  if (!approval.signer || !approval.signature) throw new Error('approval artifact missing signer or signature');
+  for (const row of rows) {
+    if (row.payload_bundle_hash && row.payload_bundle_hash !== approval.payload_bundle_hash) throw new Error('manifest payload bundle hash not bound to approval');
+    if (row.tool_commit && row.tool_commit !== approval.tool_commit) throw new Error('manifest tool commit not bound to approval');
+    if (row.target_identity && row.target_identity !== approval.target_identity) throw new Error('manifest target identity not bound to approval');
+    if (row.allowlist_hash && row.allowlist_hash !== approval.allowlist_hash) throw new Error('manifest allowlist hash not bound to approval');
+  }
 }
 
 export type ApplyResult = { applied: number; skipped: number; quarantined: number; dryRun: boolean; auditRows: number };
-export type ApplyOptions = { batchId: string; approvalHash: string; approval: ApprovalArtifact; payloadBundle: RecoveryPayloadBundle; dryRun?: boolean; crashAfter?: 'before_audit' | 'after_before_image' | 'after_cas' | 'after_mutation_before_commit' | 'after_commit_before_jsonl' };
+export type ApplyOptions = { batchId: string; approvalHash: string; approval: ApprovalArtifact; trustedApprovalKeys: TrustedApprovalKey[]; payloadBundle: RecoveryPayloadBundle; dryRun?: boolean; now?: number; crashAfter?: 'before_audit' | 'after_before_image' | 'after_cas' | 'after_mutation_before_commit' | 'after_commit_before_jsonl' | 'audit_write_failure' };
 
 export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestRow[], opts: ApplyOptions): Promise<ApplyResult> {
   await assertRecoverySchema(engine);
   const errors = validateManifest(rows);
   if (errors.length) throw new Error(errors.join('\n'));
   assertApproval(rows, opts);
+  const requiredPayloads = new Set(rows.filter(r => ['add_exact', 'merge_exact'].includes(r.restore_action)).map(r => r.recovery_payload_hash));
+  const extraPayloads = Object.keys(opts.payloadBundle.payloads).filter(hash => !requiredPayloads.has(hash));
+  if (extraPayloads.length) throw new Error(`payload bundle contains extra payloads: ${extraPayloads.join(',')}`);
   const result: ApplyResult = { applied: 0, skipped: 0, quarantined: 0, dryRun: Boolean(opts.dryRun), auditRows: 0 };
   if (opts.crashAfter === 'before_audit') throw new Error('fault injection: before_audit');
   if (opts.dryRun) {
@@ -510,11 +635,16 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
   await engine.executeRaw('BEGIN');
   try {
     const batchHash = sha256(canonicalJson({ manifest_hash: manifestHash(rows), payload_bundle_hash: payloadBundleHash(opts.payloadBundle), approval_hash: opts.approvalHash, row_action_hash: rowActionHash(rows) }));
-    await engine.executeRaw(`
+    const batchRows = await engine.executeRaw<{ batch_hash: string; manifest_hash: string; payload_bundle_hash: string; approval_hash: string; tool_commit: string; target_identity: string; allowlist_hash: string }>(`
       INSERT INTO recovery_audit_batches (run_id, batch_id, manifest_hash, payload_bundle_hash, approval_hash, tool_commit, target_identity, allowlist_hash, batch_hash)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-      ON CONFLICT (run_id, batch_id) DO NOTHING
+      ON CONFLICT (run_id, batch_id) DO UPDATE SET batch_hash = recovery_audit_batches.batch_hash
+      RETURNING batch_hash, manifest_hash, payload_bundle_hash, approval_hash, tool_commit, target_identity, allowlist_hash
     `, [rows[0].run_id, opts.batchId, manifestHash(rows), payloadBundleHash(opts.payloadBundle), opts.approvalHash, opts.approval.tool_commit, opts.approval.target_identity, opts.approval.allowlist_hash, batchHash]);
+    const batch = batchRows[0];
+    if (!batch || batch.batch_hash !== batchHash || batch.manifest_hash !== manifestHash(rows) || batch.payload_bundle_hash !== payloadBundleHash(opts.payloadBundle) || batch.approval_hash !== opts.approvalHash || batch.tool_commit !== opts.approval.tool_commit || batch.target_identity !== opts.approval.target_identity || batch.allowlist_hash !== opts.approval.allowlist_hash) {
+      throw new Error('audit batch identity was reused with different bound values');
+    }
 
     for (const row of rows) {
       const rowKeyValue = sha256(canonicalJson({ run_id: row.run_id, batch_id: row.batch_id, source_id: row.source_id, slug: row.slug, payload_hash: row.recovery_payload_hash, action: row.restore_action }));
@@ -568,6 +698,7 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
       const casJson = canonicalJson(cas);
       const manifestRowJson = canonicalJson(row);
       const rowHash = sha256(canonicalJson({ manifest_row: row, before_image: JSON.parse(beforeImage), after_image: JSON.parse(afterImage), cas, payload_hash: row.recovery_payload_hash, approval_hash: opts.approvalHash, batch_hash: batchHash }));
+      if (opts.crashAfter === 'audit_write_failure') throw new Error('fault injection: audit_write_failure');
       await engine.executeRaw(`
         INSERT INTO recovery_audit_rows (run_id, batch_id, row_key, action, canonical_manifest_row, before_image, after_image, cas_predicate, payload_hash, approval_hash, row_hash)
         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11)
@@ -598,14 +729,17 @@ function assertLiveEqualsAfter(live: PageRow, after: Record<string, unknown>): v
 
 export async function rollbackBatch(engine: BrainEngine, runId: string, batchId: string): Promise<{ rolledBack: number }> {
   await assertRecoverySchema(engine);
-  const audits = await engine.executeRaw<{ row_key: string; action: string; before_image: Record<string, unknown>; after_image: Record<string, unknown>; row_hash: string }>(
-    'SELECT row_key, action, before_image, after_image, row_hash FROM recovery_audit_rows WHERE run_id = $1 AND batch_id = $2 ORDER BY id DESC',
+  const audits = await engine.executeRaw<{ row_key: string; action: string; canonical_manifest_row: Record<string, unknown>; before_image: Record<string, unknown>; after_image: Record<string, unknown>; cas_predicate: Record<string, unknown>; payload_hash: string; approval_hash: string; row_hash: string }>(
+    'SELECT row_key, action, canonical_manifest_row, before_image, after_image, cas_predicate, payload_hash, approval_hash, row_hash FROM recovery_audit_rows WHERE run_id = $1 AND batch_id = $2 ORDER BY id DESC',
     [runId, batchId],
   );
   let rolledBack = 0;
   await engine.executeRaw('BEGIN');
   try {
     for (const audit of audits) {
+      const batchRows = await engine.executeRaw<{ batch_hash: string }>('SELECT batch_hash FROM recovery_audit_batches WHERE run_id = $1 AND batch_id = $2', [runId, batchId]);
+      const rowHash = sha256(canonicalJson({ manifest_row: audit.canonical_manifest_row, before_image: audit.before_image, after_image: audit.after_image, cas: audit.cas_predicate, payload_hash: audit.payload_hash, approval_hash: audit.approval_hash, batch_hash: batchRows[0]?.batch_hash ?? '' }));
+      if (rowHash !== audit.row_hash) throw new Error(`audit row hash verification failed for ${audit.row_key}`);
       const state = await engine.executeRaw<{ status: string }>('SELECT status FROM recovery_apply_state WHERE run_id = $1 AND batch_id = $2 AND row_key = $3', [runId, batchId, audit.row_key]);
       if (state[0]?.status === 'rolled_back') continue;
       const after = audit.after_image ?? {};
@@ -648,13 +782,18 @@ export async function rollbackBatch(engine: BrainEngine, runId: string, batchId:
   return { rolledBack };
 }
 
-export async function verifyRecovery(engine: BrainEngine, rows: ManifestRow[], runId: string, opts: { batchId: string; payloadBundle: RecoveryPayloadBundle; approvalHash: string }): Promise<Record<string, { pass: boolean; count: number }>> {
+export async function verifyRecovery(engine: BrainEngine, rows: ManifestRow[], runId: string, opts: { batchId: string; payloadBundle: RecoveryPayloadBundle; approvalHash: string; approval?: ApprovalArtifact; trustedApprovalKeys?: TrustedApprovalKey[]; expectedState?: ExpectedStateArtifact }): Promise<Record<string, { pass: boolean; count: number }>> {
   await assertRecoverySchema(engine);
   const approvedRows = rows.filter(r => ['add_exact', 'merge_exact'].includes(r.restore_action));
-  const auditRows = await engine.executeRaw<{ row_key: string; action: string; after_image: Record<string, unknown>; payload_hash: string; approval_hash: string; row_hash: string }>(
-    'SELECT row_key, action, after_image, payload_hash, approval_hash, row_hash FROM recovery_audit_rows WHERE run_id = $1 AND batch_id = $2',
+  if (opts.approval && opts.trustedApprovalKeys?.length) verifyApprovalSignature(opts.approval, opts.trustedApprovalKeys);
+  if (manifestHash(rows) !== opts.approval?.manifest_hash && opts.approval) throw new Error('approval manifest hash mismatch during verify');
+  if (payloadBundleHash(opts.payloadBundle) !== (opts.approval?.payload_bundle_hash ?? rows[0]?.payload_bundle_hash)) throw new Error('payload bundle hash mismatch during verify');
+  const auditRows = await engine.executeRaw<{ row_key: string; action: string; canonical_manifest_row: Record<string, unknown>; before_image: Record<string, unknown>; after_image: Record<string, unknown>; cas_predicate: Record<string, unknown>; payload_hash: string; approval_hash: string; row_hash: string }>(
+    'SELECT row_key, action, canonical_manifest_row, before_image, after_image, cas_predicate, payload_hash, approval_hash, row_hash FROM recovery_audit_rows WHERE run_id = $1 AND batch_id = $2',
     [runId, opts.batchId],
   );
+  const batchRows = await engine.executeRaw<{ batch_hash: string }>('SELECT batch_hash FROM recovery_audit_batches WHERE run_id = $1 AND batch_id = $2', [runId, opts.batchId]);
+  const auditHashFailures = auditRows.filter(a => sha256(canonicalJson({ manifest_row: a.canonical_manifest_row, before_image: a.before_image, after_image: a.after_image, cas: a.cas_predicate, payload_hash: a.payload_hash, approval_hash: a.approval_hash, batch_hash: batchRows[0]?.batch_hash ?? '' })) !== a.row_hash).length;
   let storedHashFailures = 0;
   for (const row of approvedRows) {
     const page = await getPage(engine, row.source_id, row.slug);
@@ -670,6 +809,15 @@ export async function verifyRecovery(engine: BrainEngine, rows: ManifestRow[], r
   const dupes = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM (SELECT source_id, slug FROM pages WHERE deleted_at IS NULL GROUP BY source_id, slug HAVING COUNT(*) > 1) d`);
   const approvalMismatches = auditRows.filter(a => a.approval_hash !== opts.approvalHash || !opts.payloadBundle.payloads[a.payload_hash]).length;
   const derivedChanged = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM content_chunks c JOIN recovery_audit_rows a ON c.page_id = ((a.after_image->>'id')::int) WHERE a.run_id = $1 AND a.batch_id = $2`, [runId, opts.batchId]);
+  let expectedStateFailures = 0;
+  if (opts.expectedState) {
+    const expected = opts.expectedState;
+    if (expected.schema_version !== 'recovery_expected_state_v1' || expected.run_id !== runId || expected.batch_id !== opts.batchId || expected.manifest_hash !== manifestHash(rows) || expected.payload_bundle_hash !== payloadBundleHash(opts.payloadBundle) || expected.approval_hash !== opts.approvalHash || expected.expected_audit_rows !== auditRows.length) expectedStateFailures++;
+    for (const page of expected.expected_pages) {
+      const live = await getPage(engine, page.source_id, page.slug);
+      if (!live || live.content_hash !== page.content_hash) expectedStateFailures++;
+    }
+  }
   return {
     manifest_approved_identities_only: { pass: outOfManifest === 0, count: outOfManifest },
     audit_completeness: { pass: auditRows.length === approvedRows.length && missingAudit === 0, count: auditRows.length },
@@ -678,6 +826,8 @@ export async function verifyRecovery(engine: BrainEngine, rows: ManifestRow[], r
     delete_denial: { pass: Number(deleteCount[0]?.count ?? 0) === 0 && Number(hardDeletes[0]?.count ?? 0) === 0, count: Number(deleteCount[0]?.count ?? 0) + Number(hardDeletes[0]?.count ?? 0) },
     duplicate_identity: { pass: Number(dupes[0]?.count ?? 0) === 0, count: Number(dupes[0]?.count ?? 0) },
     quarantine_handling: { pass: quarantinedAudits === 0, count: quarantinedAudits },
+    audit_integrity: { pass: auditHashFailures === 0, count: auditHashFailures },
+    expected_state: { pass: expectedStateFailures === 0, count: expectedStateFailures },
     no_derived_data_mutation: { pass: Number(derivedChanged[0]?.count ?? 0) === 0, count: Number(derivedChanged[0]?.count ?? 0) },
   };
 }

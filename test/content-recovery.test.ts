@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { generateKeyPairSync } from 'crypto';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -18,13 +19,21 @@ import {
   rowActionHash,
   validateManifest,
   verifyRecovery,
+  recoverySchemaStatus,
+  signApprovalArtifact,
+  verifyApprovalSignature,
   type ApprovalArtifact,
   type ManifestRow,
   type RecoveryPayloadBundle,
+  type TrustedApprovalKey,
 } from '../src/recovery/content-recovery.ts';
 
 let engine: PGLiteEngine;
 let dir: string;
+const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+const PRIVATE_KEY_PEM = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+const TRUSTED_KEYS: TrustedApprovalKey[] = [{ key_id: 'fixture-reviewer', signer: 'fixture-reviewer', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
+const APPLY = { trustedApprovalKeys: TRUSTED_KEYS, now: Date.parse('2026-07-12T00:00:01.000Z') };
 
 async function seedSource(id = 'src-a') {
   await engine.executeRaw(
@@ -75,33 +84,32 @@ function exactRow(overrides: Partial<ManifestRow> = {}) {
 }
 
 function approved(rows: ManifestRow[], bundle: RecoveryPayloadBundle): { approval: ApprovalArtifact; approvalHashValue: string; rows: ManifestRow[] } {
-  const approval: ApprovalArtifact = {
+  let patched = rows.map(row => ({ ...row, approval_hash: '0'.repeat(64) }));
+  let approval: ApprovalArtifact = signApprovalArtifact({
     schema_version: 'recovery_approval_v1',
     run_id: 'run-test',
     batch_id: 'b1',
-    manifest_hash: '',
+    manifest_hash: manifestHash(patched),
     payload_bundle_hash: payloadBundleHash(bundle),
-    row_action_hash: '',
+    row_action_hash: rowActionHash(patched),
     tool_commit: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378',
     target_identity: 'isolated-db',
     allowlist_hash: 'a'.repeat(64),
     approved_at: '2026-07-12T00:00:00.000Z',
-    expires_at: '2999-01-01T00:00:00.000Z',
+    expires_at: '2026-07-13T00:00:00.000Z',
     signer: 'fixture-reviewer',
-    signature: 'fixture-signature',
-  };
-  let patched = rows.map(row => ({ ...row, approval_hash: '0'.repeat(64) }));
-  approval.manifest_hash = manifestHash(patched);
-  approval.row_action_hash = rowActionHash(patched);
-  const hash = approvalHash(approval);
-  patched = rows.map(row => ({ ...row, approval_hash: hash }));
-  approval.manifest_hash = manifestHash(patched);
-  approval.row_action_hash = rowActionHash(patched);
+  }, PRIVATE_KEY_PEM);
+  for (let i = 0; i < 3; i++) {
+    const hash = approvalHash(approval);
+    patched = rows.map(row => ({ ...row, approval_hash: hash }));
+    const { signature: _signature, ...unsignedApproval } = approval;
+    approval = signApprovalArtifact({ ...unsignedApproval, manifest_hash: manifestHash(patched), row_action_hash: rowActionHash(patched) }, PRIVATE_KEY_PEM);
+  }
   const finalHash = approvalHash(approval);
   patched = rows.map(row => ({ ...row, approval_hash: finalHash }));
-  approval.manifest_hash = manifestHash(patched);
-  approval.row_action_hash = rowActionHash(patched);
-  return { approval, approvalHashValue: approvalHash(approval), rows: patched };
+  const { signature: _finalSignature, ...unsignedFinalApproval } = approval;
+  approval = signApprovalArtifact({ ...unsignedFinalApproval, manifest_hash: manifestHash(patched), row_action_hash: rowActionHash(patched) }, PRIVATE_KEY_PEM);
+  return { approval, approvalHashValue: approvalHash(approval), rows: rows.map(row => ({ ...row, approval_hash: approvalHash(approval) })) };
 }
 
 beforeAll(async () => {
@@ -169,7 +177,7 @@ describe('content recovery applicator', () => {
   test('dry-run is deterministic and writes no audit rows', async () => {
     const { row, bundle } = exactRow();
     const approval = approved([row], bundle);
-    const result = await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, dryRun: true });
+    const result = await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY, dryRun: true });
     expect(result).toMatchObject({ applied: 1, dryRun: true, auditRows: 0 });
     const audit = await engine.executeRaw<{ count: string }>('SELECT COUNT(*)::text AS count FROM recovery_audit_rows');
     expect(audit[0]?.count ?? '0').toBe('0');
@@ -178,13 +186,13 @@ describe('content recovery applicator', () => {
   test('applies exact add rows from authenticated payload bytes and machine acceptance passes', async () => {
     const { row, bundle } = exactRow();
     const approval = approved([row], bundle);
-    const result = await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle });
+    const result = await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
     expect(result.applied).toBe(1);
     const pages = await engine.executeRaw<{ slug: string; compiled_truth: string; content_hash: string }>(`SELECT slug, compiled_truth, content_hash FROM pages WHERE source_id='src-a' AND slug='alpha' AND deleted_at IS NULL`);
     expect(pages).toHaveLength(1);
     expect(pages[0].compiled_truth).toBe('Recovered body\n');
     expect(pages[0].content_hash).toBe(row.pre_delete_content_hash);
-    const acceptance = await verifyRecovery(engine, approval.rows, 'run-test', { batchId: 'b1', payloadBundle: bundle, approvalHash: approval.approvalHashValue });
+    const acceptance = await verifyRecovery(engine, approval.rows, 'run-test', { batchId: 'b1', payloadBundle: bundle, ...APPLY, approvalHash: approval.approvalHashValue });
     expect(Object.values(acceptance).every(v => v.pass)).toBe(true);
   });
 
@@ -193,14 +201,14 @@ describe('content recovery applicator', () => {
     const tampered: RecoveryPayloadBundle = { ...bundle, payloads: { ...bundle.payloads } };
     tampered.payloads[row.recovery_payload_hash] = { ...tampered.payloads[row.recovery_payload_hash], compiled_truth: 'different bytes' };
     const approval = approved([row], tampered);
-    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: tampered })).rejects.toThrow('payload bundle hash mismatch');
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: tampered, ...APPLY })).rejects.toThrow('manifest payload bundle hash not bound to approval');
   });
 
   test('merge_exact restores complete content through an atomic CAS predicate', async () => {
     const live = await seedPage('live body');
     const { row, bundle } = exactRow({ restore_action: 'merge_exact', live_present: 'true', live_page_id: String(live.id), live_version: String(live.generation), live_content_hash: live.hash });
     const approval = approved([row], bundle);
-    const result = await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle });
+    const result = await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
     expect(result.applied).toBe(1);
     const pages = await engine.executeRaw<{ compiled_truth: string; content_hash: string }>(`SELECT compiled_truth, content_hash FROM pages WHERE id=$1`, [live.id]);
     expect(pages[0].compiled_truth).toBe('Recovered body\n');
@@ -211,7 +219,7 @@ describe('content recovery applicator', () => {
     const live = await seedPage('live body');
     const { row, bundle } = exactRow({ restore_action: 'merge_exact', live_present: 'true', live_page_id: String(live.id), live_version: String(live.generation + 1), live_content_hash: live.hash });
     const approval = approved([row], bundle);
-    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle })).rejects.toThrow('CAS failed');
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY })).rejects.toThrow('CAS failed');
     const audit = await engine.executeRaw<{ count: string }>('SELECT COUNT(*)::text AS count FROM recovery_audit_rows');
     expect(audit[0]?.count ?? '0').toBe('0');
   });
@@ -219,13 +227,13 @@ describe('content recovery applicator', () => {
   test('source uuid and path mismatches fail closed', async () => {
     const { row, bundle } = exactRow({ source_uuid: 'wrong-uuid' });
     const approval = approved([row], bundle);
-    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle })).rejects.toThrow('source uuid mismatch');
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY })).rejects.toThrow('source uuid mismatch');
   });
 
   test('mid-batch crash rolls back uncommitted mutation', async () => {
     const { row, bundle } = exactRow();
     const approval = approved([row], bundle);
-    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, crashAfter: 'after_mutation_before_commit' })).rejects.toThrow('fault injection');
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY, crashAfter: 'after_mutation_before_commit' })).rejects.toThrow('fault injection');
     const pages = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM pages WHERE source_id='src-a' AND slug='alpha'`);
     expect(pages[0]?.count ?? '0').toBe('0');
   });
@@ -233,7 +241,7 @@ describe('content recovery applicator', () => {
   test('rollback uses no-delete state transition and is idempotent', async () => {
     const { row, bundle } = exactRow();
     const approval = approved([row], bundle);
-    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, crashAfter: 'after_commit_before_jsonl' })).rejects.toThrow('fault injection');
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY, crashAfter: 'after_commit_before_jsonl' })).rejects.toThrow('fault injection');
     let pages = await engine.executeRaw<{ active: string; deleted: string }>(`SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL)::text AS active, COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)::text AS deleted FROM pages WHERE source_id='src-a' AND slug='alpha'`);
     expect(pages[0]).toMatchObject({ active: '1', deleted: '0' });
     const rollback = await rollbackBatch(engine, 'run-test', 'b1');
@@ -247,8 +255,61 @@ describe('content recovery applicator', () => {
   test('rollback refuses after post-apply mutation changes the after-image', async () => {
     const { row, bundle } = exactRow();
     const approval = approved([row], bundle);
-    await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle });
+    await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
     await engine.executeRaw(`UPDATE pages SET compiled_truth='operator edit', content_hash=$1 WHERE source_id='src-a' AND slug='alpha'`, [contentHash('operator edit')]);
     await expect(rollbackBatch(engine, 'run-test', 'b1')).rejects.toThrow('rollback CAS failed');
+  });
+
+  test('schema status returns a structural checksum after provisioning', async () => {
+    const status = await recoverySchemaStatus(engine);
+    expect(status.provisioned).toBe(true);
+    expect(status.checksum).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test('approval verification rejects malformed, expired, future, wrong-key, and tampered artifacts', () => {
+    const { row, bundle } = exactRow();
+    const approval = approved([row], bundle);
+    expect(() => verifyApprovalSignature(approval.approval, TRUSTED_KEYS, APPLY.now)).not.toThrow();
+    expect(() => verifyApprovalSignature({ ...approval.approval, approved_at: 'bad-date' }, TRUSTED_KEYS, APPLY.now)).toThrow('approved_at');
+    expect(() => verifyApprovalSignature({ ...approval.approval, expires_at: '2026-07-11T00:00:00.000Z' }, TRUSTED_KEYS, APPLY.now)).toThrow('expired');
+    expect(() => verifyApprovalSignature({ ...approval.approval, approved_at: '2026-08-12T00:00:00.000Z' }, TRUSTED_KEYS, APPLY.now)).toThrow('future');
+    expect(() => verifyApprovalSignature(approval.approval, [{ ...TRUSTED_KEYS[0], key_id: 'wrong', signer: 'wrong' }], APPLY.now)).toThrow('not trusted');
+    expect(() => verifyApprovalSignature({ ...approval.approval, manifest_hash: 'b'.repeat(64) }, TRUSTED_KEYS, APPLY.now)).toThrow('signature verification failed');
+  });
+
+  test('audit batch replay is insert-or-exact-match CAS', async () => {
+    const { row, bundle } = exactRow();
+    const approval = approved([row], bundle);
+    await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
+    await engine.executeRaw(`UPDATE recovery_audit_batches SET batch_hash=$1 WHERE run_id='run-test' AND batch_id='b1'`, ['b'.repeat(64)]);
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY })).rejects.toThrow('audit batch identity was reused');
+  });
+
+  test('audit write failure rolls back the page mutation atomically', async () => {
+    const { row, bundle } = exactRow();
+    const approval = approved([row], bundle);
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY, crashAfter: 'audit_write_failure' })).rejects.toThrow('audit_write_failure');
+    const pages = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM pages WHERE source_id='src-a' AND slug='alpha'`);
+    expect(pages[0]?.count ?? '0').toBe('0');
+  });
+
+  test('extra payloads are rejected before mutation', async () => {
+    const { row, bundle } = exactRow();
+    const approval = approved([row], bundle);
+    const extraBundle: RecoveryPayloadBundle = { ...bundle, payloads: { ...bundle.payloads, ['b'.repeat(64)]: Object.values(bundle.payloads)[0] } };
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: extraBundle, ...APPLY })).rejects.toThrow('approval payload bundle hash mismatch');
+  });
+
+  test('expected-state artifact is independently checked during acceptance', async () => {
+    const { row, bundle } = exactRow();
+    const approval = approved([row], bundle);
+    await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
+    const acceptance = await verifyRecovery(engine, approval.rows, 'run-test', {
+      batchId: 'b1',
+      payloadBundle: bundle,
+      approvalHash: approval.approvalHashValue,
+      expectedState: { schema_version: 'recovery_expected_state_v1', run_id: 'run-test', batch_id: 'b1', manifest_hash: manifestHash(approval.rows), payload_bundle_hash: payloadBundleHash(bundle), approval_hash: approval.approvalHashValue, expected_pages: [{ source_id: 'src-a', slug: 'alpha', content_hash: row.pre_delete_content_hash, action: 'add_exact' }], expected_audit_rows: 1 },
+    });
+    expect(acceptance.expected_state.pass).toBe(true);
   });
 });
