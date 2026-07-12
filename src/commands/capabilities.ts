@@ -74,7 +74,7 @@ async function checked<T>(diagnostics: string[], label: string, fn: () => Promis
 
 async function tableExists(engine: BrainEngine, table: string): Promise<boolean> {
   const rows = await engine.executeRaw<{ n: number }>(
-    `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_name = $1`,
+    `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
     [table],
   );
   return Number(rows[0]?.n ?? 0) === 1;
@@ -84,7 +84,7 @@ async function columnExists(engine: BrainEngine, table: string, column: string):
   const rows = await engine.executeRaw<{ n: number }>(
     `SELECT COUNT(*)::int AS n
      FROM information_schema.columns
-     WHERE table_name = $1 AND column_name = $2`,
+     WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2`,
     [table, column],
   );
   return Number(rows[0]?.n ?? 0) === 1;

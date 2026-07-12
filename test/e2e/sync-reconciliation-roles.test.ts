@@ -17,6 +17,13 @@ async function initRoleBoundarySchema(engine: PostgresEngine, sql: any) {
   }
 
   await sql.unsafe(`
+    CREATE TABLE IF NOT EXISTS config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    INSERT INTO config (key, value) VALUES ('version', '118')
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+
     CREATE TABLE IF NOT EXISTS sources (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
@@ -230,7 +237,7 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
 
   test('source repair role rejects generation-only and non-plus-one root tamper', async () => {
     await sql.unsafe('RESET ROLE');
-    await sql`UPDATE sources SET local_path = '/tmp/base-root', registration_generation = 10 WHERE id = 'default'`;
+    await sql`UPDATE sources SET local_path = '/tmp/base-root', registration_generation = registration_generation + 1 WHERE id = 'default'`;
     await sql.unsafe('SET ROLE gbrain_source_repair');
     await expectDenied(sql`UPDATE sources SET registration_generation = registration_generation + 1 WHERE id = 'default'`);
     await expectDenied(sql`UPDATE sources SET local_path = '/tmp/bad-root', registration_generation = registration_generation + 2 WHERE id = 'default'`);
