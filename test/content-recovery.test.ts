@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { execFileSync } from 'child_process';
 import { generateKeyPairSync } from 'crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -12,6 +13,7 @@ import {
   buildManifest,
   canonicalJson,
   contentHash,
+  connectedDatabaseIdentity,
   downRecoverySchema,
   createRecoveryPayloadBundle,
   gapLedger,
@@ -42,12 +44,29 @@ import {
 
 let engine: PGLiteEngine;
 let dir: string;
+let runtimeWorktree: string;
+let runtimeHead: string;
+let runtimeAllowlistPath: string;
+let runtimeAllowlistHash = 'a'.repeat(64);
+let runtimeDbIdentity = 'isolated-db';
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const PRIVATE_KEY_PEM = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
 const TRUSTED_KEYS: TrustedApprovalKey[] = [{ key_id: 'fixture-reviewer', signer: 'fixture-reviewer', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
 const TRUSTED_EXPECTED_KEYS: TrustedApprovalKey[] = [{ key_id: 'fixture-expected', signer: 'fixture-expected', role: 'expected_state', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
 const APPLY = { trustedApprovalKeys: TRUSTED_KEYS, now: Date.parse('2026-07-12T00:00:01.000Z') };
-const RUNTIME_BINDING = { head: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378', dbIdentity: 'isolated-db', allowlistHash: 'a'.repeat(64) };
+function recoveryRuntime() {
+  return {
+    allowlist: {
+      allowed_worktrees: { fixture: { realpath: realpathSync(runtimeWorktree), immutable_base_commit: runtimeHead, branch: 'main' } },
+      reserved_isolated_database_targets: [{ realpath: join(dir, 'brain.pglite'), identity_fingerprint: runtimeDbIdentity, environment_contract: { set: {}, unset: [] } }],
+      explicitly_permitted_fixture_identities: [runtimeDbIdentity],
+      trusted_approval_keys: TRUSTED_KEYS,
+    },
+    allowlistPath: runtimeAllowlistPath,
+    worktree: runtimeWorktree,
+    targetIdentity: runtimeDbIdentity,
+  };
+}
 
 async function seedSource(id = 'src-a') {
   await engine.executeRaw(
@@ -90,9 +109,9 @@ function exactRow(overrides: Partial<ManifestRow> = {}) {
     live: [],
     batchId: 'b1',
     payloadBundleHash: payloadBundleHash(bundle),
-    toolCommit: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378',
-    targetIdentity: 'isolated-db',
-    allowlistHash: 'a'.repeat(64),
+    toolCommit: runtimeHead,
+    targetIdentity: runtimeDbIdentity,
+    allowlistHash: runtimeAllowlistHash,
   }, 'run-test');
   return { row: { ...rows[0], ...overrides }, bundle };
 }
@@ -106,9 +125,9 @@ function approved(rows: ManifestRow[], bundle: RecoveryPayloadBundle): { approva
     manifest_hash: manifestHash(patched),
     payload_bundle_hash: payloadBundleHash(bundle),
     row_action_hash: rowActionHash(patched),
-    tool_commit: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378',
-    target_identity: 'isolated-db',
-    allowlist_hash: 'a'.repeat(64),
+    tool_commit: runtimeHead,
+    target_identity: runtimeDbIdentity,
+    allowlist_hash: runtimeAllowlistHash,
     approved_at: '2026-07-12T00:00:00.000Z',
     expires_at: '2026-07-13T00:00:00.000Z',
     key_id: 'fixture-reviewer',
@@ -132,9 +151,9 @@ function rollbackAuth(overrides: Partial<Parameters<typeof signRollbackAuthoriza
     schema_version: 'recovery_rollback_authorization_v1',
     run_id: 'run-test',
     batch_id: 'b1',
-    tool_commit: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378',
-    target_identity: 'isolated-db',
-    allowlist_hash: 'a'.repeat(64),
+    tool_commit: runtimeHead,
+    target_identity: runtimeDbIdentity,
+    allowlist_hash: runtimeAllowlistHash,
     original_approval_hash: '0'.repeat(64),
     audit_batch_hash: '0'.repeat(64),
     row_action_hash: '0'.repeat(64),
@@ -174,10 +193,23 @@ async function provisionIndependentTargetIdentity() {
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'gbrain-recovery-test-'));
+  runtimeWorktree = join(dir, 'runtime-worktree');
+  execFileSync('git', ['init', '-b', 'main', runtimeWorktree]);
+  execFileSync('git', ['-C', runtimeWorktree, 'config', 'user.email', 'fixture@example.com']);
+  execFileSync('git', ['-C', runtimeWorktree, 'config', 'user.name', 'Fixture']);
+  writeFileSync(join(runtimeWorktree, 'README.md'), 'fixture\n');
+  execFileSync('git', ['-C', runtimeWorktree, 'add', 'README.md']);
+  execFileSync('git', ['-C', runtimeWorktree, 'commit', '-m', 'fixture']);
+  runtimeHead = execFileSync('git', ['-C', runtimeWorktree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  runtimeAllowlistPath = join(dir, 'runtime-allowlist.json');
+  writeFileSync(runtimeAllowlistPath, 'placeholder\n');
   engine = new PGLiteEngine();
   await engine.connect({ database_path: join(dir, 'brain.pglite') });
   await engine.initSchema();
   await provisionIndependentTargetIdentity();
+  runtimeDbIdentity = await connectedDatabaseIdentity(engine);
+  writeFileSync(runtimeAllowlistPath, canonicalJson(recoveryRuntime().allowlist) + '\n');
+  runtimeAllowlistHash = sha256(readFileSync(runtimeAllowlistPath));
   await provisionRecoverySchema(engine);
 });
 
@@ -321,9 +353,9 @@ describe('content recovery applicator', () => {
     let pages = await engine.executeRaw<{ active: string; deleted: string }>(`SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL)::text AS active, COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)::text AS deleted FROM pages WHERE source_id='src-a' AND slug='alpha'`);
     expect(pages[0]).toMatchObject({ active: '1', deleted: '0' });
     const auth = await rollbackAuthForBatch();
-    const rollback = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now });
+    const rollback = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtime: recoveryRuntime(), now: APPLY.now });
     expect(rollback.rolledBack).toBe(1);
-    const repeated = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now });
+    const repeated = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtime: recoveryRuntime(), now: APPLY.now });
     expect(repeated.rolledBack).toBe(0);
     pages = await engine.executeRaw<{ active: string; deleted: string }>(`SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL)::text AS active, COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)::text AS deleted FROM pages WHERE source_id='src-a' AND slug='alpha'`);
     expect(pages[0]).toMatchObject({ active: '0', deleted: '1' });
@@ -335,7 +367,7 @@ describe('content recovery applicator', () => {
     await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
     await engine.executeRaw(`UPDATE pages SET compiled_truth='operator edit', content_hash=$1 WHERE source_id='src-a' AND slug='alpha'`, [contentHash('operator edit')]);
     const auth = await rollbackAuthForBatch();
-    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now })).rejects.toThrow('rollback CAS failed');
+    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtime: recoveryRuntime(), now: APPLY.now })).rejects.toThrow('rollback CAS failed');
   });
 
   test('partial rollback post-state mismatch is detected from actual database state', async () => {
@@ -344,7 +376,7 @@ describe('content recovery applicator', () => {
     await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY, crashAfter: 'after_commit_before_jsonl' })).rejects.toThrow('fault injection');
     const auth = await rollbackAuthForBatch();
     await engine.executeRaw("UPDATE recovery_apply_state SET status='rolled_back' WHERE run_id='run-test' AND batch_id='b1'");
-    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now })).rejects.toThrow('rollback post-state hash mismatch');
+    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtime: recoveryRuntime(), now: APPLY.now })).rejects.toThrow('rollback post-state hash mismatch');
   });
 
   test('rollback requires runtime derivation inputs for library callers', async () => {
@@ -352,7 +384,7 @@ describe('content recovery applicator', () => {
     const approval = approved([row], bundle);
     await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY, crashAfter: 'after_commit_before_jsonl' })).rejects.toThrow('fault injection');
     const auth = await rollbackAuthForBatch();
-    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now } as any)).rejects.toThrow('runtime derivation');
+    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: { head: runtimeHead, dbIdentity: runtimeDbIdentity, allowlistHash: runtimeAllowlistHash }, now: APPLY.now } as any)).rejects.toThrow('runtime derivation');
   });
 
   test('rollback independently recomputes and rejects corrupted stored batch hash', async () => {
@@ -367,7 +399,7 @@ describe('content recovery applicator', () => {
       await engine.executeRaw('UPDATE recovery_audit_rows SET row_hash=$1 WHERE row_key=$2', [rowHash, audit.row_key]);
     }
     const auth = await rollbackAuthForBatch();
-    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now })).rejects.toThrow('audit batch hash verification failed');
+    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtime: recoveryRuntime(), now: APPLY.now })).rejects.toThrow('audit batch hash verification failed');
   });
 
   test('phantom audit insertion protocol is rejected before rollback mutation', async () => {
@@ -380,7 +412,7 @@ describe('content recovery applicator', () => {
     const rowHash = sha256(canonicalJson({ manifest_row: phantom.canonical_manifest_row, before_image: phantom.before_image, after_image: phantom.after_image, cas: phantom.cas_predicate, payload_hash: phantom.payload_hash, approval_hash: phantom.approval_hash, batch_hash: batch.batch_hash }));
     await engine.executeRaw(`INSERT INTO recovery_audit_rows (run_id, batch_id, row_key, action, canonical_manifest_row, before_image, after_image, cas_predicate, payload_hash, approval_hash, row_hash) VALUES ('run-test','b1',$1,$2,$3::jsonb,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9)`, [phantom.row_key, phantom.action, phantom.canonical_manifest_row, phantom.before_image, phantom.after_image, phantom.cas_predicate, phantom.payload_hash, phantom.approval_hash, rowHash]);
     const auth = await rollbackAuthForBatch();
-    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now })).rejects.toThrow('derived audit rows');
+    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtime: recoveryRuntime(), now: APPLY.now })).rejects.toThrow('derived audit rows');
   });
 
   test('schema status returns a structural checksum after provisioning', async () => {
@@ -460,7 +492,7 @@ describe('content recovery applicator', () => {
       { source_id: 'src-a', source_uuid: 'uuid-a', slug: 'beta', source_path: '/isolated/source-a', type: 'note', title: 'Beta', compiled_truth: 'Recovered beta', frontmatter: {}, pre_delete_export_commit: 'export-sha' },
     ];
     const bundle = createRecoveryPayloadBundle('run-test', predelete);
-    const rows = buildManifest({ predelete, live: [], batchId: 'b1', payloadBundleHash: payloadBundleHash(bundle), toolCommit: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378', targetIdentity: 'isolated-db', allowlistHash: 'a'.repeat(64) }, 'run-test');
+    const rows = buildManifest({ predelete, live: [], batchId: 'b1', payloadBundleHash: payloadBundleHash(bundle), toolCommit: runtimeHead, targetIdentity: runtimeDbIdentity, allowlistHash: runtimeAllowlistHash }, 'run-test');
     rows[1].restore_action = 'merge_exact';
     rows[1].live_present = 'true';
     rows[1].live_page_id = String(live.id);
@@ -548,7 +580,7 @@ describe('content recovery applicator', () => {
     const approval = approved([row], bundle);
     await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
     const auth = await rollbackAuthForBatch();
-    await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtimeBinding: RUNTIME_BINDING, now: APPLY.now });
+    await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, runtime: recoveryRuntime(), now: APPLY.now });
     const after = (await engine.executeRaw<Record<string, unknown>>(`SELECT type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, emotional_weight::text, effective_date::text, effective_date_source, import_filename, salience_touched_at::text, last_retrieved_at::text, links_extracted_at::text, contextual_retrieval_mode, corpus_generation, deleted_at::text FROM pages WHERE id=$1`, [live.id]))[0];
     expect(after).toEqual(before);
   });
@@ -557,7 +589,7 @@ describe('content recovery applicator', () => {
     const inputPath = join(dir, 'manifest-input.json');
     const outA = join(dir, 'manifest-a');
     const outB = join(dir, 'manifest-b');
-    writeFileSync(inputPath, JSON.stringify({ predelete: [{ source_id: 'src-a', source_uuid: 'uuid-a', slug: 'alpha', source_path: '/isolated/source-a', type: 'note', title: 'Alpha', compiled_truth: 'Recovered body', frontmatter: { recovered: true }, pre_delete_export_commit: 'export-sha' }], live: [], batchId: 'b1', toolCommit: '6ada2d8e01b607bf6326b4f40c5e42f4c6e01378', targetIdentity: 'isolated-db', allowlistHash: 'a'.repeat(64) }));
+    writeFileSync(inputPath, JSON.stringify({ predelete: [{ source_id: 'src-a', source_uuid: 'uuid-a', slug: 'alpha', source_path: '/isolated/source-a', type: 'note', title: 'Alpha', compiled_truth: 'Recovered body', frontmatter: { recovered: true }, pre_delete_export_commit: 'export-sha' }], live: [], batchId: 'b1', toolCommit: runtimeHead, targetIdentity: runtimeDbIdentity, allowlistHash: 'a'.repeat(64) }));
     const run = (out: string, locale: string) => Bun.spawnSync({ cmd: ['bun', 'run', 'src/cli.ts', 'recovery', 'manifest', '--run-id', 'run-test', '--input', inputPath, '--out-dir', out, '--json'], cwd: process.cwd(), env: { ...process.env, LC_ALL: locale, LANG: locale, NODE_ENV: 'test' } });
     const a = run(outA, 'C');
     const b = run(outB, 'en_US.UTF-8');

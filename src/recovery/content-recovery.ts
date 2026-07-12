@@ -238,7 +238,7 @@ export function createRecoveryPayloadBundle(runId: string, rows: Array<Partial<M
 }
 
 export function payloadBundleHash(bundle: RecoveryPayloadBundle): string {
-  return sha256(canonicalJson(bundle));
+  return sha256(canonicalJson(bundle) + '\n');
 }
 
 export function manifestHash(rows: ManifestRow[]): string {
@@ -663,7 +663,7 @@ export async function connectedDatabaseIdentity(engine: BrainEngine): Promise<st
     return sha256(canonicalJson({ kind: 'postgres', ...rows[0], target_nonce }));
   }
   if (engine.kind === 'pglite') {
-    const rows = await engine.executeRaw<{ table_count: string; version: string }>(`SELECT COUNT(*)::text AS table_count, version()::text AS version FROM information_schema.tables`);
+    const rows = await engine.executeRaw<{ version: string }>(`SELECT version()::text AS version`);
     if (!rows[0]) throw new Error('unable to obtain pglite database identity');
     const identityRows = await engine.executeRaw<{ nonce: string }>('SELECT nonce FROM recovery_target_identity LIMIT 1');
     if (identityRows.length !== 1 || !isSha256(identityRows[0].nonce)) throw new Error('independent recovery target identity is required');
@@ -912,15 +912,19 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
   await engine.executeRaw('BEGIN');
   try {
     await lockRecoveryBatch(engine, rows[0].run_id, opts.batchId);
-    const batchHash = sha256(canonicalJson({ manifest_hash: manifestHash(rows), payload_bundle_hash: payloadBundleHash(opts.payloadBundle), approval_hash: opts.approvalHash, row_action_hash: rowActionHash(rows) }));
+    const computedPayloadBundleHash = payloadBundleHash(opts.payloadBundle);
+    const computedApprovalHash = approvalHash(opts.approval);
+    const computedManifestHash = manifestHash(rows);
+    const computedRowActionHash = rowActionHash(rows);
+    const batchHash = sha256(canonicalJson({ manifest_hash: computedManifestHash, payload_bundle_hash: computedPayloadBundleHash, approval_hash: computedApprovalHash, row_action_hash: computedRowActionHash }));
     const batchRows = await engine.executeRaw<{ batch_hash: string; manifest_hash: string; payload_bundle_hash: string; approval_hash: string; tool_commit: string; target_identity: string; allowlist_hash: string }>(`
       INSERT INTO recovery_audit_batches (run_id, batch_id, manifest_hash, payload_bundle_hash, approval_hash, tool_commit, target_identity, allowlist_hash, batch_hash)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
       ON CONFLICT (run_id, batch_id) DO UPDATE SET batch_hash = recovery_audit_batches.batch_hash
       RETURNING batch_hash, manifest_hash, payload_bundle_hash, approval_hash, tool_commit, target_identity, allowlist_hash
-    `, [rows[0].run_id, opts.batchId, manifestHash(rows), payloadBundleHash(opts.payloadBundle), opts.approvalHash, opts.approval.tool_commit, opts.approval.target_identity, opts.approval.allowlist_hash, batchHash]);
+    `, [rows[0].run_id, opts.batchId, computedManifestHash, computedPayloadBundleHash, computedApprovalHash, opts.approval.tool_commit, opts.approval.target_identity, opts.approval.allowlist_hash, batchHash]);
     const batch = batchRows[0];
-    if (!batch || batch.batch_hash !== batchHash || batch.manifest_hash !== manifestHash(rows) || batch.payload_bundle_hash !== payloadBundleHash(opts.payloadBundle) || batch.approval_hash !== opts.approvalHash || batch.tool_commit !== opts.approval.tool_commit || batch.target_identity !== opts.approval.target_identity || batch.allowlist_hash !== opts.approval.allowlist_hash) {
+    if (!batch || batch.batch_hash !== batchHash || batch.manifest_hash !== computedManifestHash || batch.payload_bundle_hash !== computedPayloadBundleHash || batch.approval_hash !== computedApprovalHash || batch.tool_commit !== opts.approval.tool_commit || batch.target_identity !== opts.approval.target_identity || batch.allowlist_hash !== opts.approval.allowlist_hash) {
       throw new Error('audit batch identity was reused with different bound values');
     }
 
@@ -975,12 +979,12 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
       const afterImage = canonicalJson(afterRows[0]);
       const afterImageObj = JSON.parse(afterImage);
       if (opts.crashAfter === 'after_mutation_before_commit') throw new Error('fault injection: after_mutation_before_commit');
-      const rowHash = sha256(canonicalJson({ manifest_row: row, before_image: beforeImageObj, after_image: afterImageObj, cas, payload_hash: row.recovery_payload_hash, approval_hash: opts.approvalHash, batch_hash: batchHash }));
+      const rowHash = sha256(canonicalJson({ manifest_row: row, before_image: beforeImageObj, after_image: afterImageObj, cas, payload_hash: row.recovery_payload_hash, approval_hash: computedApprovalHash, batch_hash: batchHash }));
       if (opts.crashAfter === 'audit_write_failure') throw new Error('fault injection: audit_write_failure');
       await engine.executeRaw(`
         INSERT INTO recovery_audit_rows (run_id, batch_id, row_key, action, canonical_manifest_row, before_image, after_image, cas_predicate, payload_hash, approval_hash, row_hash)
         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11)
-      `, [row.run_id, opts.batchId, rowKeyValue, row.restore_action, row, beforeImageObj, afterImageObj, cas, row.recovery_payload_hash, opts.approvalHash, rowHash]);
+      `, [row.run_id, opts.batchId, rowKeyValue, row.restore_action, row, beforeImageObj, afterImageObj, cas, row.recovery_payload_hash, computedApprovalHash, rowHash]);
       await engine.executeRaw(`
         INSERT INTO recovery_apply_state (run_id, batch_id, row_key, status)
         VALUES ($1, $2, $3, 'committed')
@@ -1034,11 +1038,21 @@ function oneUnique(name: string, values: string[]): string {
 
 function derivedAuditBatch(batch: RollbackAuditBatch, audits: RollbackAuditRow[], verifyStored = false): RollbackAuditBatch {
   const manifestRows = audits.map(a => a.canonical_manifest_row as ManifestRow);
+  const manifest_hash = manifestHash(manifestRows);
+  const payload_bundle_hash = batch.payload_bundle_hash;
+  const approval_hash = batch.approval_hash;
+  for (const row of manifestRows) {
+    if (row.payload_bundle_hash !== payload_bundle_hash) throw new Error('audit row payload bundle hash does not match audit batch');
+    if (row.approval_hash !== approval_hash) throw new Error('audit row approval hash does not match audit batch');
+  }
+  for (const audit of audits) {
+    if (audit.approval_hash !== approval_hash) throw new Error('audit row approval hash does not match audit batch');
+  }
   const derived: RollbackAuditBatch = {
     batch_hash: '',
-    manifest_hash: manifestHash(manifestRows),
-    payload_bundle_hash: oneUnique('payload bundle hash', manifestRows.map(row => row.payload_bundle_hash)),
-    approval_hash: oneUnique('approval hash', audits.map(row => row.approval_hash)),
+    manifest_hash,
+    payload_bundle_hash,
+    approval_hash,
     tool_commit: oneUnique('tool commit', manifestRows.map(row => row.tool_commit)),
     target_identity: oneUnique('target identity', manifestRows.map(row => row.target_identity)),
     allowlist_hash: oneUnique('allowlist hash', manifestRows.map(row => row.allowlist_hash)),
@@ -1130,13 +1144,11 @@ async function rollbackStateHashFromDatabase(engine: BrainEngine, runId: string,
   return sha256(canonicalJson(entries.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)))));
 }
 
-export async function rollbackBatch(engine: BrainEngine, runId: string, batchId: string, opts: { authorization: RollbackAuthorizationArtifact; trustedRollbackKeys: TrustedApprovalKey[]; runtime?: RecoveryRuntimeDerivation; runtimeBinding?: RecoveryRuntimeBinding; expectedRollbackStateHash: string; now?: number }): Promise<{ rolledBack: number }> {
+export async function rollbackBatch(engine: BrainEngine, runId: string, batchId: string, opts: { authorization: RollbackAuthorizationArtifact; trustedRollbackKeys: TrustedApprovalKey[]; runtime: RecoveryRuntimeDerivation; expectedRollbackStateHash: string; now?: number }): Promise<{ rolledBack: number }> {
   await assertRecoverySchema(engine);
   if (!opts.authorization || !opts.trustedRollbackKeys?.length || !opts.expectedRollbackStateHash) throw new Error('signed rollback authorization and expected rollback state hash are required');
-  if (!opts.runtime && !opts.runtimeBinding) throw new Error('runtime derivation inputs are required');
-  const runtimeBinding = opts.runtime
-    ? await assertAllowlistedRuntime(opts.runtime.allowlist, { worktree: opts.runtime.worktree, allowlistPath: opts.runtime.allowlistPath, engine, env: opts.runtime.env, targetIdentity: opts.runtime.targetIdentity })
-    : opts.runtimeBinding!;
+  if (!opts.runtime) throw new Error('runtime derivation inputs are required');
+  const runtimeBinding = await assertAllowlistedRuntime(opts.runtime.allowlist, { worktree: opts.runtime.worktree, allowlistPath: opts.runtime.allowlistPath, engine, env: opts.runtime.env, targetIdentity: opts.runtime.targetIdentity });
   verifyRollbackAuthorizationSignature(opts.authorization, opts.trustedRollbackKeys, opts.now);
   const auth = opts.authorization;
   if (auth.run_id !== runId || auth.batch_id !== batchId) throw new Error('rollback authorization run or batch mismatch');

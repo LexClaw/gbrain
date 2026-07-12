@@ -204,20 +204,52 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
     requireWriteGate(opts, 'rehearsal');
     const worktree = str(opts, 'worktree');
     const allowlistPath = str(opts, 'allowlist');
+    const targetIdentity = maybeStr(opts, 'target-identity');
     const envelope = readJson<AllowlistEnvelope>(allowlistPath);
     const trustedRoots = readJson<TrustedApprovalKey[]>(str(opts, 'trusted-rehearsal-keys'));
     const allowlist = verifyDisposableRehearsalAllowlistEnvelope(envelope, trustedRoots);
-    const runtime = await assertAllowlistedRuntime(allowlist, { worktree, allowlistPath, engine, targetIdentity: maybeStr(opts, 'target-identity') });
+    const runtime = await assertAllowlistedRuntime(allowlist, { worktree, allowlistPath, engine, targetIdentity });
     const a = loadApplyArtifacts(opts, allowlist, allowlistPath);
-    await provisionRecoverySchema(engine);
-    const dryRun = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime, dryRun: true });
-    const apply = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime });
-    const expectedState = readJson<ExpectedStateArtifact>(str(opts, 'expected-state'));
-    const checks = await verifyRecovery(engine, a.rows, str(opts, 'run-id'), { batchId: a.batchId, payloadBundle: a.payloadBundle, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, expectedState, trustedExpectedStateKeys: a.trustedExpectedStateKeys, runtimeBinding: runtime });
-    const authorization = readJson<RollbackAuthorizationArtifact>(str(opts, 'rollback-authorization'));
-    const rollback = await rollbackBatch(engine, str(opts, 'run-id'), a.batchId, { authorization, trustedRollbackKeys: a.trustedApprovalKeys, runtime: { allowlist, allowlistPath, worktree, targetIdentity: maybeStr(opts, 'target-identity') }, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
-    const ok = Object.values(checks).every(c => c.pass);
-    emit(opts, { command: cmd, ok, rehearsal: 'isolated-disposable', runtime, dry_run: dryRun, apply, verify: checks, rollback });
+    const phases: Record<string, unknown> = {};
+    let applied = false;
+    let rollbackComplete = false;
+    let error: string | undefined;
+    try {
+      await provisionRecoverySchema(engine);
+      phases.schema_provision = { pass: true };
+      phases.dry_run = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime, dryRun: true });
+      phases.apply = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime });
+      applied = true;
+      const expectedState = readJson<ExpectedStateArtifact>(str(opts, 'expected-state'));
+      const checks = await verifyRecovery(engine, a.rows, str(opts, 'run-id'), { batchId: a.batchId, payloadBundle: a.payloadBundle, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, expectedState, trustedExpectedStateKeys: a.trustedExpectedStateKeys, runtimeBinding: runtime });
+      phases.verify = checks;
+      if (!Object.values(checks).every(c => c.pass)) throw new Error('rehearsal verification failed');
+      const authorization = readJson<RollbackAuthorizationArtifact>(str(opts, 'rollback-authorization'));
+      phases.rollback = await rollbackBatch(engine, str(opts, 'run-id'), a.batchId, { authorization, trustedRollbackKeys: a.trustedApprovalKeys, runtime: { allowlist, allowlistPath, worktree, targetIdentity }, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
+      rollbackComplete = true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      if (applied && !rollbackComplete) {
+        try {
+          const authorization = readJson<RollbackAuthorizationArtifact>(str(opts, 'rollback-authorization'));
+          phases.rollback_cleanup = await rollbackBatch(engine, str(opts, 'run-id'), a.batchId, { authorization, trustedRollbackKeys: a.trustedApprovalKeys, runtime: { allowlist, allowlistPath, worktree, targetIdentity }, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
+          rollbackComplete = true;
+        } catch (err) {
+          phases.rollback_cleanup = { pass: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      try {
+        await downRecoverySchema(engine);
+        const status = await recoverySchemaStatus(engine);
+        phases.schema_down_cleanup = { pass: !status.provisioned, status };
+      } catch (err) {
+        phases.schema_down_cleanup = { pass: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+    const schemaCleanup = phases.schema_down_cleanup as { pass?: boolean } | undefined;
+    const ok = !error && rollbackComplete && schemaCleanup?.pass === true;
+    emit(opts, { command: cmd, ok, rehearsal: 'isolated-disposable', runtime, phases, cleanup: { rollback: rollbackComplete, schema_down: schemaCleanup?.pass === true }, ...(error ? { error } : {}) });
     if (!ok) process.exitCode = 3;
     return;
   }
