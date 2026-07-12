@@ -11,6 +11,7 @@
 
 CREATE TABLE IF NOT EXISTS recovery_schema_version (
   version TEXT PRIMARY KEY,
+  migration_sha256 TEXT NOT NULL DEFAULT repeat('0', 64) CHECK (migration_sha256 ~ '^[a-f0-9]{64}$'),
   installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

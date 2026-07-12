@@ -10,6 +10,7 @@ import {
   approvalHash,
   buildManifest,
   contentHash,
+  downRecoverySchema,
   createRecoveryPayloadBundle,
   gapLedger,
   manifestHash,
@@ -21,6 +22,7 @@ import {
   verifyRecovery,
   recoverySchemaStatus,
   signApprovalArtifact,
+  signExpectedStateArtifact,
   verifyApprovalSignature,
   type ApprovalArtifact,
   type ManifestRow,
@@ -33,6 +35,7 @@ let dir: string;
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const PRIVATE_KEY_PEM = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
 const TRUSTED_KEYS: TrustedApprovalKey[] = [{ key_id: 'fixture-reviewer', signer: 'fixture-reviewer', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
+const TRUSTED_EXPECTED_KEYS: TrustedApprovalKey[] = [{ key_id: 'fixture-expected', signer: 'fixture-expected', role: 'expected_state', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
 const APPLY = { trustedApprovalKeys: TRUSTED_KEYS, now: Date.parse('2026-07-12T00:00:01.000Z') };
 
 async function seedSource(id = 'src-a') {
@@ -97,6 +100,7 @@ function approved(rows: ManifestRow[], bundle: RecoveryPayloadBundle): { approva
     allowlist_hash: 'a'.repeat(64),
     approved_at: '2026-07-12T00:00:00.000Z',
     expires_at: '2026-07-13T00:00:00.000Z',
+    key_id: 'fixture-reviewer',
     signer: 'fixture-reviewer',
   }, PRIVATE_KEY_PEM);
   for (let i = 0; i < 3; i++) {
@@ -192,7 +196,21 @@ describe('content recovery applicator', () => {
     expect(pages).toHaveLength(1);
     expect(pages[0].compiled_truth).toBe('Recovered body\n');
     expect(pages[0].content_hash).toBe(row.pre_delete_content_hash);
-    const acceptance = await verifyRecovery(engine, approval.rows, 'run-test', { batchId: 'b1', payloadBundle: bundle, ...APPLY, approvalHash: approval.approvalHashValue });
+    const expectedState = signExpectedStateArtifact({
+      schema_version: 'recovery_expected_state_v1',
+      run_id: 'run-test',
+      batch_id: 'b1',
+      manifest_hash: manifestHash(approval.rows),
+      payload_bundle_hash: payloadBundleHash(bundle),
+      approval_hash: approval.approvalHashValue,
+      expected_pages: [{ source_id: 'src-a', slug: 'alpha', content_hash: row.pre_delete_content_hash, action: 'add_exact' }],
+      expected_audit_rows: 1,
+      approved_at: '2026-07-12T00:00:00.000Z',
+      expires_at: '2026-07-13T00:00:00.000Z',
+      key_id: 'fixture-expected',
+      signer: 'fixture-expected',
+    }, PRIVATE_KEY_PEM);
+    const acceptance = await verifyRecovery(engine, approval.rows, 'run-test', { batchId: 'b1', payloadBundle: bundle, ...APPLY, approval: approval.approval, approvalHash: approval.approvalHashValue, expectedState, trustedExpectedStateKeys: TRUSTED_EXPECTED_KEYS });
     expect(Object.values(acceptance).every(v => v.pass)).toBe(true);
   });
 
@@ -304,11 +322,28 @@ describe('content recovery applicator', () => {
     const { row, bundle } = exactRow();
     const approval = approved([row], bundle);
     await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
+    const expectedState = signExpectedStateArtifact({
+      schema_version: 'recovery_expected_state_v1',
+      run_id: 'run-test',
+      batch_id: 'b1',
+      manifest_hash: manifestHash(approval.rows),
+      payload_bundle_hash: payloadBundleHash(bundle),
+      approval_hash: approval.approvalHashValue,
+      expected_pages: [{ source_id: 'src-a', slug: 'alpha', content_hash: row.pre_delete_content_hash, action: 'add_exact' }],
+      expected_audit_rows: 1,
+      approved_at: '2026-07-12T00:00:00.000Z',
+      expires_at: '2026-07-13T00:00:00.000Z',
+      key_id: 'fixture-expected',
+      signer: 'fixture-expected',
+    }, PRIVATE_KEY_PEM);
     const acceptance = await verifyRecovery(engine, approval.rows, 'run-test', {
       batchId: 'b1',
       payloadBundle: bundle,
       approvalHash: approval.approvalHashValue,
-      expectedState: { schema_version: 'recovery_expected_state_v1', run_id: 'run-test', batch_id: 'b1', manifest_hash: manifestHash(approval.rows), payload_bundle_hash: payloadBundleHash(bundle), approval_hash: approval.approvalHashValue, expected_pages: [{ source_id: 'src-a', slug: 'alpha', content_hash: row.pre_delete_content_hash, action: 'add_exact' }], expected_audit_rows: 1 },
+      approval: approval.approval,
+      trustedApprovalKeys: TRUSTED_KEYS,
+      expectedState,
+      trustedExpectedStateKeys: TRUSTED_EXPECTED_KEYS,
     });
     expect(acceptance.expected_state.pass).toBe(true);
   });
@@ -330,6 +365,55 @@ describe('content recovery applicator', () => {
     await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY })).rejects.toThrow('CAS failed');
     const pages = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM pages WHERE source_id='src-a' AND slug='alpha'`);
     expect(pages[0]?.count ?? '0').toBe('0');
+  });
+
+  test('wrong runtime binding and missing row binding fail closed', async () => {
+    const { row, bundle } = exactRow();
+    const approval = approved([row], bundle);
+    await expect(applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY, runtimeBinding: { head: 'f'.repeat(40), dbIdentity: 'isolated-db', allowlistHash: 'a'.repeat(64) } })).rejects.toThrow('runtime head');
+    const missing = [{ ...approval.rows[0], tool_commit: '' }];
+    expect(validateManifest(missing).join('\n')).toContain('missing binding field tool_commit');
+  });
+
+  test('key substitution and duplicate trust mappings fail closed', () => {
+    const { row, bundle } = exactRow();
+    const approval = approved([row], bundle);
+    expect(() => verifyApprovalSignature({ ...approval.approval, key_id: 'substituted' }, TRUSTED_KEYS, APPLY.now)).toThrow('key_id is not trusted');
+    expect(() => verifyApprovalSignature(approval.approval, [...TRUSTED_KEYS, TRUSTED_KEYS[0]], APPLY.now)).toThrow('duplicate trusted key_id');
+    expect(() => verifyApprovalSignature(approval.approval, [...TRUSTED_KEYS, { ...TRUSTED_KEYS[0], key_id: 'second-key' }], APPLY.now)).toThrow('duplicate trusted signer');
+  });
+
+  test('migration drift, structural drift, and down reapply are detected', async () => {
+    await engine.executeRaw("UPDATE recovery_schema_version SET migration_sha256 = $1 WHERE version = $2", ['b'.repeat(64), 'recovery_v3_pre_rehearsal_1']);
+    let status = await recoverySchemaStatus(engine);
+    expect(status.provisioned).toBe(false);
+    expect(status.mismatches.join('\n')).toContain('migration byte checksum mismatch');
+    await provisionRecoverySchema(engine);
+    await engine.executeRaw('BEGIN');
+    await engine.executeRaw('ALTER TABLE pages ADD COLUMN recovery_surprise_mutable TEXT');
+    status = await recoverySchemaStatus(engine);
+    expect(status.provisioned).toBe(false);
+    expect(status.mismatches.join('\n')).toContain('unknown pages column outside recovery contract');
+    await engine.executeRaw('ROLLBACK');
+    await downRecoverySchema(engine);
+    status = await recoverySchemaStatus(engine);
+    expect(status.provisioned).toBe(false);
+    await provisionRecoverySchema(engine);
+    status = await recoverySchemaStatus(engine);
+    expect(status.provisioned).toBe(true);
+  });
+
+  test('merge rollback restores every declared mutable page field exactly', async () => {
+    const live = await seedPage('live body');
+    await engine.executeRaw(`UPDATE pages SET page_kind='markdown', timeline='old timeline', frontmatter=$2::jsonb, emotional_weight=0.75, effective_date='2026-07-01T00:00:00.000Z', effective_date_source='fixture', import_filename='old.md', salience_touched_at='2026-07-02T00:00:00.000Z', last_retrieved_at='2026-07-03T00:00:00.000Z', links_extracted_at='2026-07-04T00:00:00.000Z', contextual_retrieval_mode='balanced', corpus_generation='gen-old' WHERE id=$1`, [live.id, { before: true }]);
+    const before = (await engine.executeRaw<Record<string, unknown>>(`SELECT type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, emotional_weight::text, effective_date::text, effective_date_source, import_filename, salience_touched_at::text, last_retrieved_at::text, links_extracted_at::text, contextual_retrieval_mode, corpus_generation, deleted_at::text FROM pages WHERE id=$1`, [live.id]))[0];
+    const refreshed = (await engine.executeRaw<{ generation: number; content_hash: string }>('SELECT generation, content_hash FROM pages WHERE id=$1', [live.id]))[0];
+    const { row, bundle } = exactRow({ restore_action: 'merge_exact', live_present: 'true', live_page_id: String(live.id), live_version: String(refreshed.generation), live_content_hash: refreshed.content_hash });
+    const approval = approved([row], bundle);
+    await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
+    await rollbackBatch(engine, 'run-test', 'b1');
+    const after = (await engine.executeRaw<Record<string, unknown>>(`SELECT type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, emotional_weight::text, effective_date::text, effective_date_source, import_filename, salience_touched_at::text, last_retrieved_at::text, links_extracted_at::text, contextual_retrieval_mode, corpus_generation, deleted_at::text FROM pages WHERE id=$1`, [live.id]))[0];
+    expect(after).toEqual(before);
   });
 
   test('artifact bytes are deterministic across clean subprocesses and locales', async () => {

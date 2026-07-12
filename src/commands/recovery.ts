@@ -9,6 +9,7 @@ import {
   canonicalJson,
   connectedDatabaseIdentity,
   createRecoveryPayloadBundle,
+  downRecoverySchema,
   gapLedger,
   loadAllowlist,
   manifestHash,
@@ -21,6 +22,7 @@ import {
   rowActionHash,
   sha256,
   toCsv,
+  trustedKeysFromAllowlist,
   verifyApprovalSignature,
   verifyRecovery,
   type ApprovalArtifact,
@@ -41,6 +43,7 @@ Commands:
   apply              Apply approved manifest
   verify             Acceptance verify approved manifest and optional expected state
   rollback           Roll back one applied run and batch
+  schema-down        Remove unused recovery schema, requires --yes
 
 Required runtime binding for schema-status, schema-provision, dry-run, apply, verify, rollback:
   --worktree <path> --allowlist <path> [--target-identity <sha256>]
@@ -107,22 +110,25 @@ async function bindRuntime(engine: BrainEngine, opts: Args) {
   const worktree = str(opts, 'worktree');
   const allowlistPath = str(opts, 'allowlist');
   const allowlist = loadAllowlist(allowlistPath);
-  return assertAllowlistedRuntime(allowlist, {
+  const runtime = await assertAllowlistedRuntime(allowlist, {
     worktree,
     allowlistPath,
     engine,
     targetIdentity: maybeStr(opts, 'target-identity'),
   });
+  return { runtime, allowlist, allowlistPath };
 }
 
-function loadApplyArtifacts(opts: Args) {
+function loadApplyArtifacts(opts: Args, allowlist: ReturnType<typeof loadAllowlist>, allowlistPath: string) {
+  if (opts['trusted-keys']) throw new Error('--trusted-keys is forbidden; approval keys must come from the allowlist trust root');
   const rows = parseCsv(readFileSync(str(opts, 'manifest'), 'utf8'));
   const payloadBundle = readJson<RecoveryPayloadBundle>(str(opts, 'payload-bundle'));
   const approval = readJson<ApprovalArtifact>(str(opts, 'approval'));
-  const trustedApprovalKeys = readJson<TrustedApprovalKey[]>(str(opts, 'trusted-keys'));
+  const trustedApprovalKeys = trustedKeysFromAllowlist(allowlist, 'approval', allowlistPath);
+  const trustedExpectedStateKeys = trustedKeysFromAllowlist(allowlist, 'expected_state', allowlistPath);
   const batchId = str(opts, 'batch-id');
   const computedApprovalHash = approvalHash(approval);
-  return { rows, payloadBundle, approval, trustedApprovalKeys, batchId, computedApprovalHash };
+  return { rows, payloadBundle, approval, trustedApprovalKeys, trustedExpectedStateKeys, batchId, computedApprovalHash };
 }
 
 export async function runRecovery(engine: BrainEngine, args: string[]): Promise<void> {
@@ -131,7 +137,7 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
   const opts = parseArgs(rest);
 
   if (cmd === 'schema-status') {
-    const runtime = await bindRuntime(engine, opts);
+    const { runtime } = await bindRuntime(engine, opts);
     const status = await recoverySchemaStatus(engine);
     emit(opts, { command: cmd, ok: status.provisioned, runtime, status });
     if (!status.provisioned) process.exitCode = 2;
@@ -140,7 +146,7 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
 
   if (cmd === 'schema-provision') {
     if (opts.yes !== true) throw new Error('schema-provision requires --yes');
-    const runtime = await bindRuntime(engine, opts);
+    const { runtime } = await bindRuntime(engine, opts);
     await provisionRecoverySchema(engine);
     const status = await recoverySchemaStatus(engine);
     emit(opts, { command: cmd, ok: status.provisioned, runtime, migration_checksum: sha256(recoverySchemaSql()), status });
@@ -165,28 +171,30 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
   }
 
   if (cmd === 'approval-verify') {
+    const allowlistPath = str(opts, 'allowlist');
+    if (opts['trusted-keys']) throw new Error('--trusted-keys is forbidden; approval keys must come from the allowlist trust root');
+    const allowlist = loadAllowlist(allowlistPath);
     const approval = readJson<ApprovalArtifact>(str(opts, 'approval'));
-    const trustedApprovalKeys = readJson<TrustedApprovalKey[]>(str(opts, 'trusted-keys'));
+    const trustedApprovalKeys = trustedKeysFromAllowlist(allowlist, 'approval', allowlistPath);
     verifyApprovalSignature(approval, trustedApprovalKeys);
     emit(opts, { command: cmd, ok: true, approval_hash: approvalHash(approval), signer: approval.signer });
     return;
   }
 
   if (cmd === 'dry-run' || cmd === 'apply') {
-    const runtime = await bindRuntime(engine, opts);
-    const a = loadApplyArtifacts(opts);
-    if (a.approval.target_identity !== runtime.dbIdentity) throw new Error(`approval target_identity mismatch: ${a.approval.target_identity} != ${runtime.dbIdentity}`);
-    const result = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, dryRun: cmd === 'dry-run' });
+    const { runtime, allowlist, allowlistPath } = await bindRuntime(engine, opts);
+    const a = loadApplyArtifacts(opts, allowlist, allowlistPath);
+    const result = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime, dryRun: cmd === 'dry-run' });
     emit(opts, { command: cmd, ok: true, runtime, manifest_hash: manifestHash(a.rows), payload_bundle_hash: payloadBundleHash(a.payloadBundle), row_action_hash: rowActionHash(a.rows), approval_hash: a.computedApprovalHash, result });
     return;
   }
 
   if (cmd === 'verify') {
-    const runtime = await bindRuntime(engine, opts);
-    const a = loadApplyArtifacts(opts);
+    const { runtime, allowlist, allowlistPath } = await bindRuntime(engine, opts);
+    const a = loadApplyArtifacts(opts, allowlist, allowlistPath);
     const runId = str(opts, 'run-id');
     const expectedState = maybeStr(opts, 'expected-state') ? readJson<ExpectedStateArtifact>(str(opts, 'expected-state')) : undefined;
-    const checks = await verifyRecovery(engine, a.rows, runId, { batchId: a.batchId, payloadBundle: a.payloadBundle, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, expectedState });
+    const checks = await verifyRecovery(engine, a.rows, runId, { batchId: a.batchId, payloadBundle: a.payloadBundle, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, expectedState, trustedExpectedStateKeys: a.trustedExpectedStateKeys, runtimeBinding: runtime });
     const ok = Object.values(checks).every(c => c.pass);
     emit(opts, { command: cmd, ok, runtime, checks });
     if (!ok) process.exitCode = 3;
@@ -194,9 +202,19 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
   }
 
   if (cmd === 'rollback') {
-    const runtime = await bindRuntime(engine, opts);
+    const { runtime } = await bindRuntime(engine, opts);
     const result = await rollbackBatch(engine, str(opts, 'run-id'), str(opts, 'batch-id'));
     emit(opts, { command: cmd, ok: true, runtime, result });
+    return;
+  }
+
+
+  if (cmd === 'schema-down') {
+    if (opts.yes !== true) throw new Error('schema-down requires --yes');
+    const { runtime } = await bindRuntime(engine, opts);
+    await downRecoverySchema(engine);
+    const status = await recoverySchemaStatus(engine);
+    emit(opts, { command: cmd, ok: !status.provisioned, runtime, status });
     return;
   }
 

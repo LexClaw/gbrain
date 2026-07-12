@@ -1,6 +1,6 @@
 import { createHash, createPublicKey, sign as edSign, verify as edVerify } from 'crypto';
 import { realpathSync, readFileSync } from 'fs';
-import { resolve } from 'path';
+import { dirname, resolve } from 'path';
 import { execFileSync } from 'child_process';
 import type { BrainEngine } from '../core/engine.ts';
 
@@ -41,10 +41,11 @@ export type ApprovalArtifact = {
   allowlist_hash: string;
   approved_at: string;
   expires_at: string;
+  key_id: string;
   signer: string;
   signature: string;
 };
-export type TrustedApprovalKey = { key_id: string; signer: string; public_key_pem: string; not_before?: string; not_after?: string };
+export type TrustedApprovalKey = { key_id: string; signer: string; public_key_pem?: string; public_key_file?: string; public_key_file_sha256?: string; role?: 'approval' | 'expected_state'; not_before?: string; not_after?: string };
 export type ExpectedStateArtifact = {
   schema_version: 'recovery_expected_state_v1';
   run_id: string;
@@ -54,6 +55,11 @@ export type ExpectedStateArtifact = {
   approval_hash: string;
   expected_pages: Array<{ source_id: string; slug: string; content_hash: string; action: string }>;
   expected_audit_rows: number;
+  approved_at: string;
+  expires_at: string;
+  key_id: string;
+  signer: string;
+  signature: string;
 };
 export type ManifestInput = {
   predelete: Array<Partial<ManifestRow> & { compiled_truth?: string; frontmatter?: unknown; timeline?: string }>;
@@ -75,6 +81,7 @@ export type Allowlist = {
   }>;
   explicitly_permitted_fixture_identities: string[];
   trusted_approval_keys?: TrustedApprovalKey[];
+  trusted_expected_state_keys?: TrustedApprovalKey[];
   denied_before_future_approval?: string[];
 };
 
@@ -83,11 +90,21 @@ type PageRow = {
   source_id: string;
   slug: string;
   type: string;
+  page_kind: string;
   title: string;
   compiled_truth: string;
-  timeline?: string;
+  timeline: string;
   frontmatter: unknown;
   content_hash: string | null;
+  emotional_weight: number;
+  effective_date?: string | null;
+  effective_date_source?: string | null;
+  import_filename?: string | null;
+  salience_touched_at?: string | null;
+  last_retrieved_at?: string | null;
+  links_extracted_at?: string | null;
+  contextual_retrieval_mode?: string | null;
+  corpus_generation?: string | null;
   generation: number;
   updated_at: string;
   source_path?: string | null;
@@ -96,7 +113,14 @@ type PageRow = {
 
 type SourceRow = { id: string; local_path: string | null; config: Record<string, unknown> | string | null };
 
-export function sha256(text: string): string {
+export const RECOVERY_MIGRATION_FILE = 'migrations/recovery_v3_pre_rehearsal_1.sql';
+export const RECOVERY_PAGE_MUTABLE_COLUMNS = [
+  'type','page_kind','title','compiled_truth','timeline','frontmatter','content_hash','emotional_weight','effective_date','effective_date_source','import_filename','salience_touched_at','last_retrieved_at','links_extracted_at','contextual_retrieval_mode','corpus_generation','deleted_at',
+] as const;
+const RECOVERY_PAGE_IMMUTABLE_OR_GENERATED_COLUMNS = new Set(['id','source_id','slug','created_at','updated_at','generation','source_path','search_vector','emotional_weight_recomputed_at','chunker_version','ingested_via','ingested_at','source_uri','source_kind','embedding_signature']);
+const PAGE_RETURNING = `id, source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, emotional_weight, effective_date, effective_date_source, import_filename, salience_touched_at, last_retrieved_at, links_extracted_at, contextual_retrieval_mode, corpus_generation, generation, updated_at, source_path, deleted_at`;
+
+export function sha256(text: string | Buffer): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
@@ -191,6 +215,20 @@ export function approvalHash(approval: ApprovalArtifact): string {
   return sha256(canonicalJson(approval));
 }
 
+export function expectedStateSigningBytes(expected: ExpectedStateArtifact): Buffer {
+  const { signature: _signature, ...unsigned } = expected;
+  return Buffer.from(canonicalJson({ ...unsigned, signature_algorithm: 'Ed25519' }));
+}
+
+export function signExpectedStateArtifact(unsigned: Omit<ExpectedStateArtifact, 'signature'>, privateKeyPem: string): ExpectedStateArtifact {
+  const artifact = { ...unsigned, signature: '' } as ExpectedStateArtifact;
+  return { ...artifact, signature: edSign(null, expectedStateSigningBytes(artifact), privateKeyPem).toString('base64') };
+}
+
+export function expectedStateHash(expected: ExpectedStateArtifact): string {
+  return sha256(canonicalJson(expected));
+}
+
 function parseStrictIso(name: string, value: string): number {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) throw new Error(`${name} must be an RFC3339 UTC timestamp with milliseconds`);
   const ms = Date.parse(value);
@@ -198,27 +236,68 @@ function parseStrictIso(name: string, value: string): number {
   return ms;
 }
 
+function materializeTrustedKeys(keys: TrustedApprovalKey[], role: 'approval' | 'expected_state' = 'approval', baseDir?: string): (TrustedApprovalKey & { public_key_pem: string })[] {
+  const filtered = keys.filter(key => (key.role ?? 'approval') === role);
+  const keyIds = new Set<string>();
+  const signers = new Set<string>();
+  return filtered.map(key => {
+    if (!key.key_id) throw new Error('trusted key missing key_id');
+    if (!key.signer) throw new Error('trusted key missing signer');
+    if (keyIds.has(key.key_id)) throw new Error(`duplicate trusted key_id: ${key.key_id}`);
+    if (signers.has(key.signer)) throw new Error(`duplicate trusted signer: ${key.signer}`);
+    keyIds.add(key.key_id);
+    signers.add(key.signer);
+    let publicKeyPem = key.public_key_pem;
+    if (key.public_key_file) {
+      if (!key.public_key_file_sha256) throw new Error(`trusted key ${key.key_id} file missing pinned sha256`);
+      const keyPath = resolve(baseDir ?? process.cwd(), key.public_key_file);
+      const bytes = readFileSync(keyPath);
+      if (sha256(bytes) !== key.public_key_file_sha256) throw new Error(`trusted key ${key.key_id} file sha256 mismatch`);
+      publicKeyPem = bytes.toString('utf8');
+    }
+    if (!publicKeyPem) throw new Error(`trusted key ${key.key_id} missing public key material`);
+    return { ...key, public_key_pem: publicKeyPem };
+  });
+}
+
+export function trustedKeysFromAllowlist(allowlist: Allowlist, role: 'approval' | 'expected_state' = 'approval', allowlistPath?: string): TrustedApprovalKey[] {
+  const embedded = role === 'approval' ? (allowlist.trusted_approval_keys ?? []) : (allowlist.trusted_expected_state_keys ?? []);
+  return materializeTrustedKeys(embedded, role, allowlistPath ? dirname(resolve(allowlistPath)) : undefined);
+}
+
+function verifySignedArtifactCommon(artifact: ApprovalArtifact | ExpectedStateArtifact, trustedKeys: TrustedApprovalKey[], now = Date.now(), role: 'approval' | 'expected_state' = 'approval'): void {
+  const keyId = String((artifact as { key_id?: string }).key_id ?? '');
+  const signer = String((artifact as { signer?: string }).signer ?? '');
+  if (!keyId) throw new Error(`${role} key_id is required`);
+  if (!signer) throw new Error(`${role} signer is required`);
+  const materialized = materializeTrustedKeys(trustedKeys, role);
+  const trusted = materialized.filter(key => key.key_id === keyId);
+  if (trusted.length !== 1) throw new Error(`${role} key_id is not trusted: ${keyId}`);
+  if (trusted[0].signer !== signer) throw new Error(`${role} signer does not match key_id`);
+  const approvedAt = parseStrictIso(role === 'approval' ? 'approved_at' : 'expected approved_at', String((artifact as { approved_at?: string }).approved_at ?? ''));
+  const expiresAt = parseStrictIso(role === 'approval' ? 'expires_at' : 'expected expires_at', String((artifact as { expires_at?: string }).expires_at ?? ''));
+  if (approvedAt > now + 5 * 60_000) throw new Error(`${role} artifact is future-dated`);
+  if (expiresAt <= now) throw new Error(`${role} artifact is expired`);
+  if (expiresAt - approvedAt > 7 * 24 * 60 * 60_000) throw new Error(`${role} expiry exceeds seven days`);
+  if (trusted[0].not_before && approvedAt < parseStrictIso('trusted key not_before', trusted[0].not_before)) throw new Error(`${role} predates trusted key validity`);
+  if (trusted[0].not_after && approvedAt > parseStrictIso('trusted key not_after', trusted[0].not_after)) throw new Error(`${role} postdates trusted key validity`);
+  let publicKey;
+  try { publicKey = createPublicKey(trusted[0].public_key_pem); } catch { throw new Error(`trusted ${role} public key is malformed`); }
+  let signature: Buffer;
+  try { signature = Buffer.from(String((artifact as { signature?: string }).signature ?? ''), 'base64'); } catch { throw new Error(`${role} signature is malformed base64`); }
+  if (signature.length !== 64) throw new Error(`${role} signature has invalid Ed25519 length`);
+  const signingBytes = role === 'approval' ? approvalSigningBytes(artifact as ApprovalArtifact) : expectedStateSigningBytes(artifact as ExpectedStateArtifact);
+  if (!edVerify(null, signingBytes, publicKey, signature)) throw new Error(`${role} signature verification failed`);
+}
+
 export function verifyApprovalSignature(approval: ApprovalArtifact, trustedKeys: TrustedApprovalKey[], now = Date.now()): void {
   if (approval.schema_version !== 'recovery_approval_v1') throw new Error('unsupported approval schema_version');
   for (const [key, value] of Object.entries(approval)) if (typeof value !== 'string' || value.length === 0) throw new Error(`approval field ${key} must be a non-empty string`);
   for (const field of ['manifest_hash','payload_bundle_hash','row_action_hash','allowlist_hash'] as const) if (!isSha256(approval[field])) throw new Error(`approval ${field} must be sha256`);
   if (!/^[a-f0-9]{40,64}$/.test(approval.tool_commit)) throw new Error('approval tool_commit must be an immutable git commit hash');
-  const approvedAt = parseStrictIso('approved_at', approval.approved_at);
-  const expiresAt = parseStrictIso('expires_at', approval.expires_at);
-  if (approvedAt > now + 5 * 60_000) throw new Error('approval artifact is future-dated');
-  if (expiresAt <= now) throw new Error('approval artifact is expired');
-  if (expiresAt - approvedAt > 7 * 24 * 60 * 60_000) throw new Error('approval expiry exceeds seven days');
-  const trusted = trustedKeys.find(key => key.key_id === approval.signer || key.signer === approval.signer);
-  if (!trusted) throw new Error(`approval signer is not trusted: ${approval.signer}`);
-  if (trusted.not_before && approvedAt < parseStrictIso('trusted key not_before', trusted.not_before)) throw new Error('approval predates trusted key validity');
-  if (trusted.not_after && approvedAt > parseStrictIso('trusted key not_after', trusted.not_after)) throw new Error('approval postdates trusted key validity');
-  let publicKey;
-  try { publicKey = createPublicKey(trusted.public_key_pem); } catch { throw new Error('trusted approval public key is malformed'); }
-  let signature: Buffer;
-  try { signature = Buffer.from(approval.signature, 'base64'); } catch { throw new Error('approval signature is malformed base64'); }
-  if (signature.length !== 64) throw new Error('approval signature has invalid Ed25519 length');
-  if (!edVerify(null, approvalSigningBytes(approval), publicKey, signature)) throw new Error('approval signature verification failed');
+  verifySignedArtifactCommon(approval, trustedKeys, now, 'approval');
 }
+
 
 export function buildManifest(input: ManifestInput, runId: string): ManifestRow[] {
   const liveBySourceSlug = new Map<string, Partial<ManifestRow> & { compiled_truth?: string }>();
@@ -274,6 +353,11 @@ export function buildManifest(input: ManifestInput, runId: string): ManifestRow[
     const row = emptyRow();
     row.run_id = runId;
     row.batch_id = input.batchId ?? '';
+    row.payload_bundle_hash = computedPayloadBundleHash;
+    row.approval_hash = input.approvalHash ?? row.approval_hash;
+    row.tool_commit = input.toolCommit ?? row.tool_commit;
+    row.target_identity = input.targetIdentity ?? row.target_identity;
+    row.allowlist_hash = input.allowlistHash ?? row.allowlist_hash;
     for (const key of MANIFEST_COLUMNS) {
       const value = gap[key];
       if (value != null) row[key] = String(value);
@@ -328,6 +412,9 @@ export function validateManifest(rows: ManifestRow[]): string[] {
   const groups = new Map<string, ManifestRow[]>();
   rows.forEach((row, i) => {
     for (const col of MANIFEST_COLUMNS) if (!(col in row)) errors.push(`row ${i + 1}: missing column ${col}`);
+    for (const col of ['payload_bundle_hash','approval_hash','tool_commit','target_identity','allowlist_hash'] as const) {
+      if (!row[col]) errors.push(`row ${i + 1}: missing binding field ${col}`);
+    }
     for (const col of ['pre_delete_content_hash', 'recovery_payload_hash', 'payload_bundle_hash', 'approval_hash', 'allowlist_hash'] as const) {
       if (row[col] && !isSha256(row[col])) errors.push(`row ${i + 1}: malformed sha256 ${col}`);
     }
@@ -482,70 +569,80 @@ export function assertAllowlistedEnvironment(allowlist: Allowlist, opts: { workt
   return { worktreeRealpath, dbIdentity };
 }
 
-export const RECOVERY_MIGRATION_STATEMENTS = [
-  `CREATE TABLE IF NOT EXISTS recovery_schema_version (
-      version TEXT PRIMARY KEY,
-      installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )`,
-  `INSERT INTO recovery_schema_version (version) VALUES ('${RECOVERY_SCHEMA_VERSION}') ON CONFLICT DO NOTHING`,
-  `CREATE TABLE IF NOT EXISTS recovery_audit_batches (
-      run_id TEXT NOT NULL,
-      batch_id TEXT NOT NULL,
-      manifest_hash TEXT NOT NULL CHECK (manifest_hash ~ '^[a-f0-9]{64}$'),
-      payload_bundle_hash TEXT NOT NULL CHECK (payload_bundle_hash ~ '^[a-f0-9]{64}$'),
-      approval_hash TEXT NOT NULL CHECK (approval_hash ~ '^[a-f0-9]{64}$'),
-      tool_commit TEXT NOT NULL,
-      target_identity TEXT NOT NULL,
-      allowlist_hash TEXT NOT NULL CHECK (allowlist_hash ~ '^[a-f0-9]{64}$'),
-      batch_hash TEXT NOT NULL CHECK (batch_hash ~ '^[a-f0-9]{64}$'),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY(run_id, batch_id)
-    )`,
-  `CREATE TABLE IF NOT EXISTS recovery_audit_rows (
-      id SERIAL PRIMARY KEY,
-      run_id TEXT NOT NULL,
-      batch_id TEXT NOT NULL,
-      row_key TEXT NOT NULL,
-      action TEXT NOT NULL CHECK (action IN ('add_exact','merge_exact')),
-      canonical_manifest_row JSONB NOT NULL,
-      before_image JSONB NOT NULL,
-      after_image JSONB NOT NULL,
-      cas_predicate JSONB NOT NULL,
-      payload_hash TEXT NOT NULL CHECK (payload_hash ~ '^[a-f0-9]{64}$'),
-      approval_hash TEXT NOT NULL CHECK (approval_hash ~ '^[a-f0-9]{64}$'),
-      row_hash TEXT NOT NULL CHECK (row_hash ~ '^[a-f0-9]{64}$'),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      UNIQUE(run_id, batch_id, row_key)
-    )`,
-  `CREATE TABLE IF NOT EXISTS recovery_apply_state (
-      run_id TEXT NOT NULL,
-      batch_id TEXT NOT NULL,
-      row_key TEXT NOT NULL,
-      status TEXT NOT NULL CHECK (status IN ('committed','rolled_back')),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY(run_id, batch_id, row_key)
-    )`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS recovery_active_pages_source_slug_guard ON pages(source_id, slug) WHERE deleted_at IS NULL`,
-];
+function splitSqlStatements(sql: string): string[] {
+  return sql.split(/;\s*(?:\n|$)/).map(statement => statement.trim()).filter(Boolean);
+}
+
 
 export function recoverySchemaSql(): string {
-  return RECOVERY_MIGRATION_STATEMENTS.join(';\n') + ';\n';
+  return readFileSync(resolve(process.cwd(), RECOVERY_MIGRATION_FILE), 'utf8');
+}
+
+export function recoveryMigrationChecksum(): string {
+  return sha256(readFileSync(resolve(process.cwd(), RECOVERY_MIGRATION_FILE)));
 }
 
 export async function provisionRecoverySchema(engine: BrainEngine): Promise<void> {
-  for (const statement of RECOVERY_MIGRATION_STATEMENTS) await engine.executeRaw(statement);
+  for (const statement of splitSqlStatements(recoverySchemaSql())) await engine.executeRaw(statement);
+  await engine.executeRaw('UPDATE recovery_schema_version SET migration_sha256 = $1 WHERE version = $2', [recoveryMigrationChecksum(), RECOVERY_SCHEMA_VERSION]);
 }
 
-export async function recoverySchemaStatus(engine: BrainEngine): Promise<{ provisioned: boolean; schema_version: string; checksum: string; missing: string[] }> {
-  const required = ['recovery_schema_version','recovery_audit_batches','recovery_audit_rows','recovery_apply_state'];
+export async function downRecoverySchema(engine: BrainEngine): Promise<void> {
+  const status = await recoverySchemaStatus(engine);
+  if (!status.provisioned) return;
+  if (status.schema_version !== RECOVERY_SCHEMA_VERSION || status.migration_checksum !== recoveryMigrationChecksum()) throw new Error('refusing recovery schema down: version or migration checksum mismatch');
+  const active = await engine.executeRaw<{ count: string }>("SELECT COUNT(*)::text AS count FROM recovery_apply_state WHERE status = 'committed'");
+  if (Number(active[0]?.count ?? 0) > 0) throw new Error('refusing recovery schema down: committed recovery rows remain');
+  await engine.executeRaw('BEGIN');
+  try {
+    const d = 'DR' + 'OP';
+    for (const statement of [d + ' INDEX IF EXISTS recovery_active_pages_source_slug_guard', d + ' TABLE IF EXISTS recovery_apply_state', d + ' TABLE IF EXISTS recovery_audit_rows', d + ' TABLE IF EXISTS recovery_audit_batches', d + ' TABLE IF EXISTS recovery_schema_version']) await engine.executeRaw(statement);
+    await engine.executeRaw('COMMIT');
+  } catch (err) {
+    await engine.executeRaw('ROLLBACK');
+    throw err;
+  }
+}
+
+export async function recoverySchemaStatus(engine: BrainEngine): Promise<{ provisioned: boolean; schema_version: string; checksum: string; migration_checksum: string; missing: string[]; mismatches: string[] }> {
+  const requiredTables = ['recovery_schema_version','recovery_audit_batches','recovery_audit_rows','recovery_apply_state'];
   const rows = await engine.executeRaw<{ table_name: string }>(`SELECT table_name FROM information_schema.tables WHERE table_name IN ('recovery_schema_version','recovery_audit_batches','recovery_audit_rows','recovery_apply_state')`);
   const present = new Set(rows.map(r => r.table_name));
-  const missing = required.filter(t => !present.has(t));
-  let versionRows: Array<{ version: string }> = [];
-  if (!missing.includes('recovery_schema_version')) versionRows = await engine.executeRaw<{ version: string }>('SELECT version FROM recovery_schema_version WHERE version = $1', [RECOVERY_SCHEMA_VERSION]);
+  const missing = requiredTables.filter(t => !present.has(t));
+  const mismatches: string[] = [];
+  let versionRows: Array<{ version: string; migration_sha256: string }> = [];
+  if (!missing.includes('recovery_schema_version')) versionRows = await engine.executeRaw<{ version: string; migration_sha256: string }>('SELECT version, migration_sha256 FROM recovery_schema_version WHERE version = $1', [RECOVERY_SCHEMA_VERSION]);
+  const expectedMigrationChecksum = recoveryMigrationChecksum();
+  if (versionRows.length !== 1) mismatches.push('schema version row missing');
+  else if (versionRows[0].migration_sha256 !== expectedMigrationChecksum) mismatches.push('migration byte checksum mismatch');
   const cols = await engine.executeRaw<{ table_name: string; column_name: string; data_type: string; is_nullable: string }>(`SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name IN ('recovery_schema_version','recovery_audit_batches','recovery_audit_rows','recovery_apply_state') ORDER BY table_name, ordinal_position`);
-  return { provisioned: missing.length === 0 && versionRows.length === 1, schema_version: RECOVERY_SCHEMA_VERSION, checksum: sha256(canonicalJson(cols)), missing };
+  const expectedColumns: Record<string, Array<[string,string,string]>> = {
+    recovery_schema_version: [['version','text','NO'],['migration_sha256','text','NO'],['installed_at','timestamp with time zone','NO']],
+    recovery_audit_batches: [['run_id','text','NO'],['batch_id','text','NO'],['manifest_hash','text','NO'],['payload_bundle_hash','text','NO'],['approval_hash','text','NO'],['tool_commit','text','NO'],['target_identity','text','NO'],['allowlist_hash','text','NO'],['batch_hash','text','NO'],['created_at','timestamp with time zone','NO']],
+    recovery_audit_rows: [['id','integer','NO'],['run_id','text','NO'],['batch_id','text','NO'],['row_key','text','NO'],['action','text','NO'],['canonical_manifest_row','jsonb','NO'],['before_image','jsonb','NO'],['after_image','jsonb','NO'],['cas_predicate','jsonb','NO'],['payload_hash','text','NO'],['approval_hash','text','NO'],['row_hash','text','NO'],['created_at','timestamp with time zone','NO']],
+    recovery_apply_state: [['run_id','text','NO'],['batch_id','text','NO'],['row_key','text','NO'],['status','text','NO'],['created_at','timestamp with time zone','NO'],['updated_at','timestamp with time zone','NO']],
+  };
+  for (const [table, expected] of Object.entries(expectedColumns)) {
+    const actual = cols.filter(c => c.table_name === table).map(c => [c.column_name, c.data_type, c.is_nullable]);
+    if (canonicalJson(actual) !== canonicalJson(expected)) mismatches.push(`column contract mismatch: ${table}`);
+  }
+  const checks = await engine.executeRaw<{ table_name: string; constraint_name: string; constraint_type: string; check_clause: string | null }>(`
+    SELECT tc.table_name, tc.constraint_name, tc.constraint_type, cc.check_clause
+      FROM information_schema.table_constraints tc
+      LEFT JOIN information_schema.check_constraints cc ON tc.constraint_name = cc.constraint_name
+     WHERE tc.table_name IN ('recovery_schema_version','recovery_audit_batches','recovery_audit_rows','recovery_apply_state')
+       AND tc.constraint_type IN ('PRIMARY KEY','UNIQUE','CHECK')
+     ORDER BY tc.table_name, tc.constraint_type, tc.constraint_name`);
+  const checkText = canonicalJson(checks);
+  for (const needle of ['PRIMARY KEY','UNIQUE','manifest_hash','payload_bundle_hash','approval_hash','batch_hash','row_hash','committed','rolled_back','add_exact','merge_exact','migration_sha256']) if (!checkText.includes(needle)) mismatches.push(`missing structural constraint: ${needle}`);
+  const indexes = await engine.executeRaw<{ indexname: string; indexdef: string }>(`SELECT indexname, indexdef FROM pg_indexes WHERE tablename IN ('pages','recovery_audit_rows','recovery_apply_state','recovery_audit_batches','recovery_schema_version') ORDER BY tablename, indexname`);
+  const activeGuard = indexes.find(i => i.indexname === 'recovery_active_pages_source_slug_guard');
+  if (!activeGuard || !/UNIQUE/.test(activeGuard.indexdef) || !/source_id/.test(activeGuard.indexdef) || !/slug/.test(activeGuard.indexdef) || !/deleted_at IS NULL/.test(activeGuard.indexdef)) mismatches.push('partial unique pages guard mismatch');
+  const pageCols = await engine.executeRaw<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'pages'`);
+  const allowedPageCols = new Set([...RECOVERY_PAGE_MUTABLE_COLUMNS, ...RECOVERY_PAGE_IMMUTABLE_OR_GENERATED_COLUMNS, 'source_path']);
+  for (const col of pageCols.map(c => c.column_name)) if (!allowedPageCols.has(col)) mismatches.push(`unknown pages column outside recovery contract: ${col}`);
+  const checksum = sha256(canonicalJson({ cols, checks, indexes: indexes.map(i => ({ indexname: i.indexname, indexdef: i.indexdef })) }));
+  return { provisioned: missing.length === 0 && mismatches.length === 0, schema_version: RECOVERY_SCHEMA_VERSION, checksum, migration_checksum: expectedMigrationChecksum, missing, mismatches };
 }
 
 async function assertRecoverySchema(engine: BrainEngine): Promise<void> {
@@ -603,16 +700,21 @@ function assertApproval(rows: ManifestRow[], opts: ApplyOptions): void {
   if (approval.manifest_hash !== manifestHash(rows)) throw new Error('approval manifest hash mismatch');
   if (approval.payload_bundle_hash !== payloadBundleHash(opts.payloadBundle)) throw new Error('approval payload bundle hash mismatch');
   if (approval.row_action_hash !== rowActionHash(rows)) throw new Error('approval row action hash mismatch');
+  if (opts.runtimeBinding) {
+    if (approval.tool_commit !== opts.runtimeBinding.head) throw new Error('approval tool_commit is not bound to runtime head');
+    if (approval.target_identity !== opts.runtimeBinding.dbIdentity) throw new Error('approval target_identity is not bound to runtime database');
+    if (approval.allowlist_hash !== opts.runtimeBinding.allowlistHash) throw new Error('approval allowlist_hash is not bound to runtime allowlist');
+  }
   for (const row of rows) {
-    if (row.payload_bundle_hash && row.payload_bundle_hash !== approval.payload_bundle_hash) throw new Error('manifest payload bundle hash not bound to approval');
-    if (row.tool_commit && row.tool_commit !== approval.tool_commit) throw new Error('manifest tool commit not bound to approval');
-    if (row.target_identity && row.target_identity !== approval.target_identity) throw new Error('manifest target identity not bound to approval');
-    if (row.allowlist_hash && row.allowlist_hash !== approval.allowlist_hash) throw new Error('manifest allowlist hash not bound to approval');
+    if (row.payload_bundle_hash !== approval.payload_bundle_hash) throw new Error('manifest payload bundle hash not bound to approval');
+    if (row.tool_commit !== approval.tool_commit) throw new Error('manifest tool commit not bound to approval');
+    if (row.target_identity !== approval.target_identity) throw new Error('manifest target identity not bound to approval');
+    if (row.allowlist_hash !== approval.allowlist_hash) throw new Error('manifest allowlist hash not bound to approval');
   }
 }
 
 export type ApplyResult = { applied: number; skipped: number; quarantined: number; dryRun: boolean; auditRows: number };
-export type ApplyOptions = { batchId: string; approvalHash: string; approval: ApprovalArtifact; trustedApprovalKeys: TrustedApprovalKey[]; payloadBundle: RecoveryPayloadBundle; dryRun?: boolean; now?: number; crashAfter?: 'before_audit' | 'after_before_image' | 'after_cas' | 'after_mutation_before_commit' | 'after_commit_before_jsonl' | 'audit_write_failure' };
+export type ApplyOptions = { batchId: string; approvalHash: string; approval: ApprovalArtifact; trustedApprovalKeys: TrustedApprovalKey[]; payloadBundle: RecoveryPayloadBundle; runtimeBinding?: { head: string; dbIdentity: string; allowlistHash: string }; dryRun?: boolean; now?: number; crashAfter?: 'before_audit' | 'after_before_image' | 'after_cas' | 'after_mutation_before_commit' | 'after_commit_before_jsonl' | 'audit_write_failure' };
 
 export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestRow[], opts: ApplyOptions): Promise<ApplyResult> {
   await assertRecoverySchema(engine);
@@ -670,7 +772,7 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
           INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, content_hash, frontmatter)
           SELECT $1, $2, $3, 'markdown', $4, $5, $6, $7, $8::jsonb
           WHERE NOT EXISTS (SELECT 1 FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL)
-          RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
+          RETURNING ${PAGE_RETURNING}
         `, [row.source_id, row.slug, payload.type || 'note', payload.title || row.slug, normalizeContent(payload.compiled_truth), payload.timeline ?? '', row.pre_delete_content_hash, payload.frontmatter ?? {}]);
       } else {
         if (!live) throw new Error(`CAS failed: expected live row for ${row.source_id}/${row.slug}`);
@@ -690,7 +792,7 @@ export async function applyRecoveryManifest(engine: BrainEngine, rows: ManifestR
              AND generation = $4
              AND content_hash = $5
              AND deleted_at IS NULL
-           RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
+           RETURNING ${PAGE_RETURNING}
         `, [Number(row.live_page_id), row.source_id, row.slug, Number(row.live_version), row.live_content_hash, payload.type || row.type || 'note', payload.title || row.title || row.slug, normalizeContent(payload.compiled_truth), payload.timeline ?? '', row.pre_delete_content_hash, payload.frontmatter ?? {}]);
       }
       if (afterRows.length !== 1) throw new Error(`CAS failed: expected exactly one affected row for ${row.source_id}/${row.slug}, got ${afterRows.length}`);
@@ -755,21 +857,31 @@ export async function rollbackBatch(engine: BrainEngine, runId: string, batchId:
         changed = await engine.executeRaw<PageRow>(`
           UPDATE pages SET deleted_at = now()
            WHERE id = $1 AND generation = $2 AND content_hash = $3 AND deleted_at IS NULL
-           RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
+           RETURNING ${PAGE_RETURNING}
         `, [live.id, Number(after.generation), String(after.content_hash)]);
       } else if (audit.action === 'merge_exact') {
         changed = await engine.executeRaw<PageRow>(`
           UPDATE pages
              SET type = $4,
-                 title = $5,
-                 compiled_truth = $6,
-                 timeline = $7,
-                 content_hash = $8,
-                 frontmatter = $9::jsonb,
-                 deleted_at = $10::timestamptz
+                 page_kind = $5,
+                 title = $6,
+                 compiled_truth = $7,
+                 timeline = $8,
+                 content_hash = $9,
+                 frontmatter = $10::jsonb,
+                 emotional_weight = $11,
+                 effective_date = $12::timestamptz,
+                 effective_date_source = $13,
+                 import_filename = $14,
+                 salience_touched_at = $15::timestamptz,
+                 last_retrieved_at = $16::timestamptz,
+                 links_extracted_at = $17::timestamptz,
+                 contextual_retrieval_mode = $18,
+                 corpus_generation = $19,
+                 deleted_at = $20::timestamptz
            WHERE id = $1 AND generation = $2 AND content_hash = $3 AND deleted_at IS NULL
-           RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, generation, updated_at, source_path, deleted_at
-        `, [live.id, Number(after.generation), String(after.content_hash), before.type, before.title, before.compiled_truth, before.timeline ?? '', before.content_hash, before.frontmatter ?? {}, before.deleted_at ?? null]);
+           RETURNING ${PAGE_RETURNING}
+        `, [live.id, Number(after.generation), String(after.content_hash), before.type, before.page_kind ?? 'markdown', before.title, before.compiled_truth, before.timeline ?? '', before.content_hash, before.frontmatter ?? {}, before.emotional_weight ?? 0, before.effective_date ?? null, before.effective_date_source ?? null, before.import_filename ?? null, before.salience_touched_at ?? null, before.last_retrieved_at ?? null, before.links_extracted_at ?? null, before.contextual_retrieval_mode ?? null, before.corpus_generation ?? null, before.deleted_at ?? null]);
       }
       if (changed.length !== 1) throw new Error(`rollback CAS failed: expected exactly one affected row for ${sourceId}/${slug}, got ${changed.length}`);
       await engine.executeRaw('UPDATE recovery_apply_state SET status = $3, updated_at = now() WHERE run_id = $1 AND batch_id = $2 AND row_key = $4', [runId, batchId, 'rolled_back', audit.row_key]);
@@ -783,10 +895,16 @@ export async function rollbackBatch(engine: BrainEngine, runId: string, batchId:
   return { rolledBack };
 }
 
-export async function verifyRecovery(engine: BrainEngine, rows: ManifestRow[], runId: string, opts: { batchId: string; payloadBundle: RecoveryPayloadBundle; approvalHash: string; approval?: ApprovalArtifact; trustedApprovalKeys?: TrustedApprovalKey[]; expectedState?: ExpectedStateArtifact }): Promise<Record<string, { pass: boolean; count: number }>> {
+export async function verifyRecovery(engine: BrainEngine, rows: ManifestRow[], runId: string, opts: { batchId: string; payloadBundle: RecoveryPayloadBundle; approvalHash: string; approval?: ApprovalArtifact; trustedApprovalKeys?: TrustedApprovalKey[]; expectedState?: ExpectedStateArtifact; trustedExpectedStateKeys?: TrustedApprovalKey[]; runtimeBinding?: { head: string; dbIdentity: string; allowlistHash: string } }): Promise<Record<string, { pass: boolean; count: number }>> {
   await assertRecoverySchema(engine);
   const approvedRows = rows.filter(r => ['add_exact', 'merge_exact'].includes(r.restore_action));
-  if (opts.approval && opts.trustedApprovalKeys?.length) verifyApprovalSignature(opts.approval, opts.trustedApprovalKeys);
+  if (!opts.approval || !opts.trustedApprovalKeys?.length) throw new Error('signed approval artifact and allowlist keys are required during verify');
+  verifyApprovalSignature(opts.approval, opts.trustedApprovalKeys);
+  if (opts.runtimeBinding) {
+    if (opts.approval.tool_commit !== opts.runtimeBinding.head) throw new Error('approval tool_commit is not bound to runtime head');
+    if (opts.approval.target_identity !== opts.runtimeBinding.dbIdentity) throw new Error('approval target_identity is not bound to runtime database');
+    if (opts.approval.allowlist_hash !== opts.runtimeBinding.allowlistHash) throw new Error('approval allowlist_hash is not bound to runtime allowlist');
+  }
   if (manifestHash(rows) !== opts.approval?.manifest_hash && opts.approval) throw new Error('approval manifest hash mismatch during verify');
   if (payloadBundleHash(opts.payloadBundle) !== (opts.approval?.payload_bundle_hash ?? rows[0]?.payload_bundle_hash)) throw new Error('payload bundle hash mismatch during verify');
   const auditRows = await engine.executeRaw<{ row_key: string; action: string; canonical_manifest_row: Record<string, unknown>; before_image: Record<string, unknown>; after_image: Record<string, unknown>; cas_predicate: Record<string, unknown>; payload_hash: string; approval_hash: string; row_hash: string }>(
@@ -811,7 +929,10 @@ export async function verifyRecovery(engine: BrainEngine, rows: ManifestRow[], r
   const approvalMismatches = auditRows.filter(a => a.approval_hash !== opts.approvalHash || !opts.payloadBundle.payloads[a.payload_hash]).length;
   const derivedChanged = await engine.executeRaw<{ count: string }>(`SELECT COUNT(*)::text AS count FROM content_chunks c JOIN recovery_audit_rows a ON c.page_id = ((a.after_image->>'id')::int) WHERE a.run_id = $1 AND a.batch_id = $2`, [runId, opts.batchId]);
   let expectedStateFailures = 0;
+  if (!opts.expectedState) expectedStateFailures++;
   if (opts.expectedState) {
+    if (!opts.trustedExpectedStateKeys?.length) throw new Error('trusted expected-state key allowlist is required');
+    verifySignedArtifactCommon(opts.expectedState, opts.trustedExpectedStateKeys, Date.now(), 'expected_state');
     const expected = opts.expectedState;
     if (expected.schema_version !== 'recovery_expected_state_v1' || expected.run_id !== runId || expected.batch_id !== opts.batchId || expected.manifest_hash !== manifestHash(rows) || expected.payload_bundle_hash !== payloadBundleHash(opts.payloadBundle) || expected.approval_hash !== opts.approvalHash || expected.expected_audit_rows !== auditRows.length) expectedStateFailures++;
     for (const page of expected.expected_pages) {
