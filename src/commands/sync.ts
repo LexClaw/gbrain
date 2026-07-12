@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'fs';
 import { execFileSync } from 'child_process';
-import { join, relative, resolve } from 'path';
+import { createHash } from 'crypto';
+import { join, relative, isAbsolute } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { importFile } from '../core/import-file.ts';
@@ -457,43 +458,70 @@ interface SyncSourceGuardRow {
 }
 
 function canonicalRoot(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return resolve(path);
+  const real = realpathSync(path);
+  if (!statSync(real).isDirectory()) {
+    throw new Error(`Unsafe sync root: ${path} is not a directory.`);
   }
+  return real;
 }
 
 function rootsEqual(a: string, b: string): boolean {
   return canonicalRoot(a) === canonicalRoot(b);
 }
 
+async function hasSourcesArchivedColumn(engine: BrainEngine): Promise<boolean> {
+  const rows = await engine.executeRaw<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_name = 'sources' AND column_name = 'archived'
+     ) AS exists`,
+  );
+  return rows[0]?.exists === true;
+}
+
 async function listGuardSources(engine: BrainEngine): Promise<SyncSourceGuardRow[]> {
-  try {
-    return await engine.executeRaw<SyncSourceGuardRow>(
-      `SELECT id, local_path, archived FROM sources WHERE local_path IS NOT NULL ORDER BY id`,
-    );
-  } catch {
-    return await engine.executeRaw<SyncSourceGuardRow>(
-      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL ORDER BY id`,
-    );
+  if (!(await hasSourcesArchivedColumn(engine))) {
+    throw new Error('Unsafe sync: sources.archived schema capability is missing or unknown. Run migrations before sync.');
   }
+  return await engine.executeRaw<SyncSourceGuardRow>(
+    `SELECT id, local_path, archived FROM sources WHERE local_path IS NOT NULL ORDER BY id`,
+  );
 }
 
 async function getGuardSource(engine: BrainEngine, sourceId: string): Promise<SyncSourceGuardRow | null> {
-  try {
-    const rows = await engine.executeRaw<SyncSourceGuardRow>(
-      `SELECT id, local_path, archived FROM sources WHERE id = $1`,
-      [sourceId],
-    );
-    return rows[0] ?? null;
-  } catch {
-    const rows = await engine.executeRaw<SyncSourceGuardRow>(
-      `SELECT id, local_path FROM sources WHERE id = $1`,
-      [sourceId],
-    );
-    return rows[0] ?? null;
+  if (!(await hasSourcesArchivedColumn(engine))) {
+    throw new Error('Unsafe sync: sources.archived schema capability is missing or unknown. Run migrations before sync.');
   }
+  const rows = await engine.executeRaw<SyncSourceGuardRow>(
+    `SELECT id, local_path, archived FROM sources WHERE id = $1`,
+    [sourceId],
+  );
+  return rows[0] ?? null;
+}
+
+function gitRootIdentity(repoPath: string): { canonicalRoot: string; gitDir: string; head: string; identityHash: string } {
+  const canonical = canonicalRoot(repoPath);
+  const top = canonicalRoot(git(repoPath, ['rev-parse', '--show-toplevel']));
+  if (top !== canonical) {
+    throw new Error(`Unsafe sync root: repo ${canonical} is inside git root ${top}. Pass the git worktree root.`);
+  }
+  const commonDir = git(repoPath, ['rev-parse', '--git-common-dir']);
+  const gitDir = canonicalRoot(isAbsolute(commonDir) ? commonDir : join(canonical, commonDir));
+  const head = git(repoPath, ['rev-parse', 'HEAD']);
+  const remote = (() => {
+    try {
+      return execFileSync('git', buildGitInvocation(repoPath, ['remote', 'get-url', 'origin']), {
+        encoding: 'utf-8',
+        timeout: 30000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    }
+    catch { return ''; }
+  })();
+  const identityHash = createHash('sha256')
+    .update(JSON.stringify({ canonicalRoot: canonical, gitDir, remote }))
+    .digest('hex');
+  return { canonicalRoot: canonical, gitDir, head, identityHash };
 }
 
 export async function assertSyncSourceRootGuard(
@@ -501,23 +529,15 @@ export async function assertSyncSourceRootGuard(
   opts: SyncOpts,
   repoPath: string,
 ): Promise<void> {
-  const activeSources = (await listGuardSources(engine)).filter((s) => s.archived !== true);
-  const repoRoot = canonicalRoot(repoPath);
+  await listGuardSources(engine);
+  const repoIdentity = gitRootIdentity(repoPath);
+  const repoRoot = repoIdentity.canonicalRoot;
 
-  if (!opts.sourceId) {
-    if (activeSources.length > 1) {
-      throw new Error(
-        `Unsafe unqualified sync: --source is required when multiple sources have local_path. ` +
-        `Refusing to use --repo ${repoPath} as source identity.`,
-      );
-    }
-    if (activeSources.length === 1 && !rootsEqual(activeSources[0].local_path!, repoPath)) {
-      throw new Error(
-        `Unsafe unqualified sync: repo ${repoPath} does not match the only registered source root ` +
-        `${activeSources[0].id} (${activeSources[0].local_path}). Pass the compatible --source or run source-path repair.`,
-      );
-    }
-    return;
+  if (!opts.sourceId || opts.explicitSourceArg !== true || opts.sourceResolutionTier !== 'flag') {
+    throw new Error(
+      `Unsafe sync: every sync entry point requires parser-proven explicit --source provenance. ` +
+      `Missing, implicit, default, seed_default, brain_default, unknown, or forgeable resolver tiers are refused.`,
+    );
   }
 
   const source = await getGuardSource(engine, opts.sourceId);
@@ -525,7 +545,6 @@ export async function assertSyncSourceRootGuard(
     throw new Error(`Unsafe sync: source "${opts.sourceId}" is missing or archived.`);
   }
   if (!source.local_path) {
-    if (opts.sourceId === DEFAULT_SOURCE_ID && !opts.explicitSourceArg) return;
     throw new Error(
       `Unsafe sync: source "${opts.sourceId}" has no local_path. ` +
       `Normal sync cannot bind or create source roots; use source-path repair first.`,
@@ -538,31 +557,118 @@ export async function assertSyncSourceRootGuard(
       `use the separately reviewed source-path repair transaction.`,
     );
   }
-  if (!opts.explicitSourceArg && opts.repoPath && activeSources.length > 1) {
-    throw new Error(
-      `Unsafe repo override in multi-source brain: --repo requires an explicit compatible --source.`,
-    );
-  }
-  if ((opts.sourceResolutionTier === 'seed_default' || opts.sourceResolutionTier === 'brain_default') &&
-      opts.sourceId === DEFAULT_SOURCE_ID && activeSources.length > 1 && opts.repoPath) {
-    throw new Error(
-      `Unsafe default-source fallthrough: resolver tier ${opts.sourceResolutionTier} cannot bind --repo in a multi-source brain. ` +
-      `Pass the compatible --source explicitly.`,
-    );
-  }
 }
 
-async function markSyncDeletedPages(
+type SyncReconciliationReason = 'incremental_deleted' | 'unsyncable_modified' | 'full_stale';
+
+const SYNC_RECONCILE_MAX_ABSOLUTE = 100;
+const SYNC_RECONCILE_MAX_PERCENT = 0.25;
+
+async function ensureReconciliationAuditSchema(engine: BrainEngine): Promise<void> {
+  await engine.executeRaw(
+    `CREATE TABLE IF NOT EXISTS sync_reconciliation_audit (
+       operation_id text PRIMARY KEY,
+       manifest_hash text NOT NULL,
+       source_id text NOT NULL,
+       actor text NOT NULL,
+       role text NOT NULL,
+       reason text NOT NULL,
+       candidate_count integer NOT NULL,
+       population_count integer NOT NULL,
+       threshold_absolute integer NOT NULL,
+       threshold_percentage double precision NOT NULL,
+       authorized boolean NOT NULL,
+       override_reason text,
+       before_state jsonb NOT NULL,
+       after_state jsonb,
+       result text NOT NULL,
+       failure text,
+       created_at timestamptz NOT NULL DEFAULT now(),
+       completed_at timestamptz
+     )`,
+  );
+}
+
+async function reconcileFilesystemRemovals(
   engine: BrainEngine,
   slugs: string[],
-  opts: { sourceId: string },
+  opts: { sourceId: string; repoPath: string; reason: SyncReconciliationReason; actor?: string; role?: string },
 ): Promise<string[]> {
-  const marked: string[] = [];
-  for (const slug of slugs) {
-    const result = await engine.softDeletePage(slug, opts);
-    if (result) marked.push(result.slug);
+  const candidates = unique(slugs).sort();
+  if (candidates.length === 0) return [];
+  const repoBefore = gitRootIdentity(opts.repoPath);
+  const popRows = await engine.executeRaw<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM pages WHERE source_id = $1 AND deleted_at IS NULL`,
+    [opts.sourceId],
+  );
+  const populationCount = Number(popRows[0]?.n ?? 0);
+  if (populationCount <= 0) {
+    throw new Error('Unsafe reconciliation: population is empty or unknown. Refusing filesystem-derived removals.');
   }
-  return marked;
+  const pct = candidates.length / populationCount;
+  const overrideReason = process.env.GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON;
+  const authorized = candidates.length <= SYNC_RECONCILE_MAX_ABSOLUTE && pct <= SYNC_RECONCILE_MAX_PERCENT;
+  if (!authorized && !overrideReason) {
+    throw new Error(
+      `Unsafe reconciliation: ${candidates.length}/${populationCount} removals exceeds thresholds ` +
+      `${SYNC_RECONCILE_MAX_ABSOLUTE} absolute or ${SYNC_RECONCILE_MAX_PERCENT * 100} percent. ` +
+      `Set GBRAIN_SYNC_RECONCILE_OVERRIDE_REASON with a privileged reason for isolated rehearsal only.`,
+    );
+  }
+  const manifest = {
+    schema_version: 1,
+    source_id: opts.sourceId,
+    canonical_root: repoBefore.canonicalRoot,
+    repository_identity: repoBefore.identityHash,
+    registration_generation: null,
+    baseline_commit: repoBefore.head,
+    observed_commit: repoBefore.head,
+    reason: opts.reason,
+    candidates,
+    candidate_count: candidates.length,
+    population_count: populationCount,
+    absolute_impact: candidates.length,
+    percentage_impact: pct,
+    thresholds: { absolute: SYNC_RECONCILE_MAX_ABSOLUTE, percentage: SYNC_RECONCILE_MAX_PERCENT },
+    actor: opts.actor ?? 'sync',
+    role: opts.role ?? 'normal_sync_proposer',
+    authorized: authorized || Boolean(overrideReason),
+    override_reason: overrideReason ?? null,
+    created_at: new Date().toISOString(),
+  };
+  const manifestHash = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+  const operationId = `sync-reconcile-${manifestHash.slice(0, 24)}`;
+  await ensureReconciliationAuditSchema(engine);
+  return await engine.transaction(async (tx) => {
+    await tx.executeRaw(
+      `INSERT INTO sync_reconciliation_audit
+       (operation_id, manifest_hash, source_id, actor, role, reason, candidate_count, population_count,
+        threshold_absolute, threshold_percentage, authorized, override_reason, before_state, result)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, 'started')
+       ON CONFLICT (operation_id) DO NOTHING`,
+      [
+        operationId, manifestHash, opts.sourceId, manifest.actor, manifest.role, opts.reason,
+        candidates.length, populationCount, SYNC_RECONCILE_MAX_ABSOLUTE, SYNC_RECONCILE_MAX_PERCENT,
+        manifest.authorized, overrideReason ?? null, manifest,
+      ],
+    );
+    const repoDuring = gitRootIdentity(opts.repoPath);
+    if (repoDuring.identityHash !== repoBefore.identityHash || repoDuring.canonicalRoot !== repoBefore.canonicalRoot) {
+      throw new Error('Unsafe reconciliation: repository identity changed during validation.');
+    }
+    const marked: string[] = [];
+    for (const slug of candidates) {
+      const result = await tx.softDeletePage(slug, { sourceId: opts.sourceId });
+      if (result) marked.push(result.slug);
+    }
+    await tx.executeRaw(
+      `UPDATE sync_reconciliation_audit
+       SET result = 'applied', after_state = $2::jsonb, completed_at = now()
+       WHERE operation_id = $1`,
+      [operationId, { applied: marked.sort(), applied_count: marked.length }],
+    );
+    return marked;
+  });
 }
 
 /**
@@ -726,13 +832,6 @@ async function writeSyncAnchor(
     if (which === 'repo_path') {
       const source = await getGuardSource(engine, sourceId);
       if (!source?.local_path) {
-        if (sourceId === DEFAULT_SOURCE_ID) {
-          await engine.executeRaw(
-            `UPDATE sources SET local_path = $1 WHERE id = $2`,
-            [value, sourceId],
-          );
-          return;
-        }
         throw new Error(
           `Unsafe sync anchor write: source "${sourceId}" has no local_path. ` +
           `Normal sync cannot create or replace source roots; use source-path repair first.`,
@@ -909,6 +1008,14 @@ export class SyncLockBusyError extends Error {
 }
 
 export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<SyncResult> {
+  const preflightRepoPath = opts.repoPath || await readSyncAnchor(engine, opts.sourceId, 'repo_path');
+  if (!preflightRepoPath) {
+    const hint = opts.sourceId
+      ? `Source "${opts.sourceId}" has no local_path. Run the separately reviewed source-path repair transaction first.`
+      : `Unsafe sync: explicit --source and a registered local_path are required before acquiring a sync lock.`;
+    throw new Error(hint);
+  }
+  await assertSyncSourceRootGuard(engine, opts, preflightRepoPath);
   // v0.22.13 CODEX-2: cross-process writer lock prevents two concurrent
   // syncs from racing on the same last_commit anchor (last writer wins,
   // bookmark regresses, silent corruption).
@@ -1653,8 +1760,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     const slug = await resolveSlugByPathOrSourcePath(engine, path, opts.sourceId);
     try {
       const existing = await engine.getPage(slug, pageOpts);
-      if (existing) {
-        await engine.softDeletePage(slug, pageOpts);
+      if (existing && opts.sourceId) {
+        await reconcileFilesystemRemovals(engine, [slug], {
+          sourceId: opts.sourceId,
+          repoPath,
+          reason: 'unsyncable_modified',
+        });
         slog(`  Tombstoned un-syncable page: ${slug}`);
       }
     } catch { /* ignore */ }
@@ -1869,10 +1980,6 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // advancement at the bottom of this function.
   const failedFiles: Array<{ path: string; error: string; line?: number }> = [];
 
-  // v0.18.0+ multi-source: scope deletePage so we only delete the source-A
-  // row, not every same-slug row across all sources.
-  const deleteOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
-
   // v0.41.19.0 (T2/D6/D7/D16/D18 via /plan-eng-review + codex outside-voice):
   // batched delete loop. Replaces the per-file N+1 that PR #1538 originally
   // batched on Postgres only. See plan file:
@@ -1947,9 +2054,13 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         }
         const slugs = batch.map(p => pathSlugMap.get(p) ?? resolveSlugForPath(p));
 
-        // Phase B: batch delete (1 round-trip per batch).
+        // Phase B: reconcile filesystem-derived removals through the single manifest service.
         try {
-          const deleted = await markSyncDeletedPages(engine, slugs, deleteScopedOpts);
+          const deleted = await reconcileFilesystemRemovals(engine, slugs, {
+            sourceId: sid,
+            repoPath,
+            reason: 'incremental_deleted',
+          });
           // D6: only push slugs that were actually deleted. Filters phantom
           // slugs (paths in filtered.deleted but with no DB row) so
           // downstream extract/embed don't waste lookups.
@@ -1958,50 +2069,18 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
           // gone); checkpoint every path so a resume skips it.
           for (const p of batch) await markCompleted(p);
         } catch (err) {
-          // D7 decompose: a transient blip on this batch shouldn't lose all
-          // 500 deletes. Fall back to per-slug deletePage for THIS batch
-          // only; unrecoverable per-slug failures land in failedFiles
-          // (matching the existing import-loop pattern at sync.ts:~1350).
-          for (let j = 0; j < slugs.length; j++) {
-            try {
-              const result = await engine.softDeletePage(slugs[j], deleteScopedOpts);
-              if (result) pagesAffected.push(slugs[j]);
-              await markCompleted(batch[j]);
-            } catch (perSlugErr) {
-              failedFiles.push({
-                path: batch[j],
-                error: `delete failed: ${perSlugErr instanceof Error ? perSlugErr.message : String(perSlugErr)} (batch error: ${err instanceof Error ? err.message : String(err)})`,
-              });
-            }
+          for (const path of batch) {
+            failedFiles.push({
+              path,
+              error: `delete failed: ${err instanceof Error ? err.message : String(err)}`,
+            });
           }
         }
         progress.tick(batch.length, `deletes ${Math.min(i + DELETE_BATCH_SIZE, deletesToDo.length)}/${deletesToDo.length}`);
         await maybeYield();
       }
     } else {
-      // Legacy no-sourceId path. The engine batch methods require sourceId
-      // per D5 (kills the multi-source-bug-class on the new surface); when
-      // sourceId is unset, fall back to the original per-path loop. Slow
-      // but correct; production callers all thread sourceId so this branch
-      // is functionally dead post-v0.34.1.
-      for (const path of deletesToDo) {
-        if (opts.signal?.aborted) {
-          progress.finish();
-          return await partial('timeout');
-        }
-        const slug = await resolveSlugByPathOrSourcePath(engine, path, undefined);
-        try {
-          const result = await engine.softDeletePage(slug, deleteOpts);
-          if (result) pagesAffected.push(slug);
-          await markCompleted(path);
-        } catch (err) {
-          failedFiles.push({
-            path,
-            error: `delete failed: ${err instanceof Error ? err.message : String(err)}`,
-          });
-        }
-        progress.tick(1, slug);
-      }
+      throw new Error('Unsafe sync: filesystem-derived removals require explicit sourceId and the reconciliation manifest service.');
     }
     progress.finish();
   }
@@ -2791,23 +2870,14 @@ async function performFullSync(
         && !current.has(r.source_path))
       .map(r => r.slug);
     if (staleSlugs.length > 0) {
-      const deleteScopedOpts = { sourceId: sid };
       for (let i = 0; i < staleSlugs.length; i += DELETE_BATCH_SIZE) {
         const batch = staleSlugs.slice(i, i + DELETE_BATCH_SIZE);
-        try {
-          const deleted = await markSyncDeletedPages(engine, batch, deleteScopedOpts);
-          reconciledDeletes += deleted.length;
-        } catch {
-          // Per-slug fallback on a batch blip (mirrors the incremental delete
-          // loop). A stale page that won't delete is best-effort, not fatal.
-          for (const slug of batch) {
-            try {
-              const result = await engine.softDeletePage(slug, deleteScopedOpts);
-              if (result) reconciledDeletes++;
-            }
-            catch { /* best-effort */ }
-          }
-        }
+        const deleted = await reconcileFilesystemRemovals(engine, batch, {
+          sourceId: sid,
+          repoPath,
+          reason: 'full_stale',
+        });
+        reconciledDeletes += deleted.length;
       }
       if (reconciledDeletes > 0) {
         slog(`  Reconciled ${reconciledDeletes} stale page(s) whose source file was removed.`);

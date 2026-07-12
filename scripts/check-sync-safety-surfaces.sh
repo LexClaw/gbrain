@@ -13,6 +13,10 @@ for lineno, line in enumerate(sync.read_text().splitlines(), 1):
         continue
     if 'engine.deletePage(' in line or 'engine.deletePages(' in line:
         failures.append(f'{sync}:{lineno}: normal sync must not call hard-delete primitives')
+    if '.softDeletePage(' in line and 'tx.softDeletePage(' not in line:
+        failures.append(f'{sync}:{lineno}: filesystem-derived removals must use reconcileFilesystemRemovals')
+    if 'UPDATE sources SET local_path' in line:
+        failures.append(f'{sync}:{lineno}: normal sync must not write sources.local_path')
 
 for path in list(root.glob('scripts/**/*')) + list(root.glob('recipes/**/*')):
     if path.is_dir() or path.name.endswith(('.png', '.jpg', '.jpeg', '.gif', '.pdf')):
