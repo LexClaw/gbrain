@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { createHash, generateKeyPairSync } from 'crypto';
+import { generateKeyPairSync } from 'crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { verifyRehearsalAllowlistEnvelope } from './helpers/recovery-rehearsal-root.ts';
 import {
   applyRecoveryManifest,
   approvalHash,
@@ -18,8 +19,10 @@ import {
   payloadBundleHash,
   provisionRecoverySchema,
   rollbackBatch,
+  rollbackAuditBatchAuthorizationHash,
+  rollbackAuditRowsAuthorizationHash,
+  rollbackStateHashFromAuditRows,
   rowActionHash,
-  reviewedAllowlistTrustRootForTests,
   signAllowlistEnvelope,
   validateManifest,
   verifyRecovery,
@@ -32,6 +35,7 @@ import {
   type ApprovalArtifact,
   type ManifestRow,
   type RecoveryPayloadBundle,
+  type RollbackAuditRow,
   type TrustedApprovalKey,
 } from '../src/recovery/content-recovery.ts';
 
@@ -142,13 +146,28 @@ function rollbackAuth(overrides: Partial<Parameters<typeof signRollbackAuthoriza
 }
 
 async function rollbackAuthForBatch() {
-  const batch = (await engine.executeRaw<{ batch_hash: string; approval_hash: string }>("SELECT batch_hash, approval_hash FROM recovery_audit_batches WHERE run_id='run-test' AND batch_id='b1'"))[0];
-  const audits = await engine.executeRaw<{ row_key: string; action: string; payload_hash: string }>("SELECT row_key, action, payload_hash FROM recovery_audit_rows WHERE run_id='run-test' AND batch_id='b1' ORDER BY id DESC");
-  return rollbackAuth({
-    original_approval_hash: batch.approval_hash,
-    audit_batch_hash: batch.batch_hash,
-    row_action_hash: createHash('sha256').update(canonicalJson(audits.map(a => ({ row_key: a.row_key, action: a.action, payload_hash: a.payload_hash })).sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))))).digest('hex'),
-  });
+  const batch = (await engine.executeRaw<{ batch_hash: string; manifest_hash: string; payload_bundle_hash: string; approval_hash: string; tool_commit: string; target_identity: string; allowlist_hash: string }>("SELECT batch_hash, manifest_hash, payload_bundle_hash, approval_hash, tool_commit, target_identity, allowlist_hash FROM recovery_audit_batches WHERE run_id='run-test' AND batch_id='b1'"))[0];
+  const audits = await engine.executeRaw<RollbackAuditRow>("SELECT row_key, action, canonical_manifest_row, before_image, after_image, cas_predicate, payload_hash, approval_hash, row_hash FROM recovery_audit_rows WHERE run_id='run-test' AND batch_id='b1' ORDER BY id DESC");
+  const expectedRollbackStateHash = rollbackStateHashFromAuditRows(audits);
+  return {
+    expectedRollbackStateHash,
+    authorization: rollbackAuth({
+      original_approval_hash: batch.approval_hash,
+      audit_batch_hash: rollbackAuditBatchAuthorizationHash(batch, audits),
+      row_action_hash: rollbackAuditRowsAuthorizationHash(audits),
+      expected_rollback_state_hash: expectedRollbackStateHash,
+    }),
+  };
+}
+
+async function provisionIndependentTargetIdentity() {
+  await engine.executeRaw(`CREATE TABLE IF NOT EXISTS recovery_target_identity (
+    id BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+    nonce TEXT NOT NULL CHECK (nonce ~ '^[a-f0-9]{64}$'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await engine.executeRaw('DELETE FROM recovery_target_identity');
+  await engine.executeRaw('INSERT INTO recovery_target_identity (id, nonce) VALUES (true, $1)', ['c'.repeat(64)]);
 }
 
 beforeAll(async () => {
@@ -156,6 +175,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({ database_path: join(dir, 'brain.pglite') });
   await engine.initSchema();
+  await provisionIndependentTargetIdentity();
   await provisionRecoverySchema(engine);
 });
 
@@ -166,6 +186,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  await provisionIndependentTargetIdentity();
   await provisionRecoverySchema(engine);
   await seedSource();
 });
@@ -298,9 +319,9 @@ describe('content recovery applicator', () => {
     let pages = await engine.executeRaw<{ active: string; deleted: string }>(`SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL)::text AS active, COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)::text AS deleted FROM pages WHERE source_id='src-a' AND slug='alpha'`);
     expect(pages[0]).toMatchObject({ active: '1', deleted: '0' });
     const auth = await rollbackAuthForBatch();
-    const rollback = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now });
+    const rollback = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now });
     expect(rollback.rolledBack).toBe(1);
-    const repeated = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now });
+    const repeated = await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now });
     expect(repeated.rolledBack).toBe(0);
     pages = await engine.executeRaw<{ active: string; deleted: string }>(`SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL)::text AS active, COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)::text AS deleted FROM pages WHERE source_id='src-a' AND slug='alpha'`);
     expect(pages[0]).toMatchObject({ active: '0', deleted: '1' });
@@ -312,7 +333,7 @@ describe('content recovery applicator', () => {
     await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
     await engine.executeRaw(`UPDATE pages SET compiled_truth='operator edit', content_hash=$1 WHERE source_id='src-a' AND slug='alpha'`, [contentHash('operator edit')]);
     const auth = await rollbackAuthForBatch();
-    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now })).rejects.toThrow('rollback CAS failed');
+    await expect(rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now })).rejects.toThrow('rollback CAS failed');
   });
 
   test('schema status returns a structural checksum after provisioning', async () => {
@@ -434,15 +455,19 @@ describe('content recovery applicator', () => {
       key_id: 'fixture-reviewer',
       signer: 'fixture-reviewer',
     }, PRIVATE_KEY_PEM);
-    expect(() => verifyAllowlistEnvelope(envelope, undefined, APPLY.now)).toThrow('key_id is not trusted');
-    expect(verifyAllowlistEnvelope(envelope, reviewedAllowlistTrustRootForTests(TRUSTED_KEYS), APPLY.now).trusted_approval_keys).toEqual(TRUSTED_KEYS);
+    expect(() => verifyAllowlistEnvelope(envelope, APPLY.now)).toThrow('key_id is not trusted');
+    expect(verifyRehearsalAllowlistEnvelope(envelope, TRUSTED_KEYS, APPLY.now).trusted_approval_keys).toEqual(TRUSTED_KEYS);
   });
 
   test('migration drift, structural drift, and down reapply are detected', async () => {
+    const originalChecksum = (await engine.executeRaw<{ migration_sha256: string }>("SELECT migration_sha256 FROM recovery_schema_version WHERE version = 'recovery_v3_pre_rehearsal_1'"))[0].migration_sha256;
     await engine.executeRaw("UPDATE recovery_schema_version SET migration_sha256 = $1 WHERE version = $2", ['b'.repeat(64), 'recovery_v3_pre_rehearsal_1']);
     let status = await recoverySchemaStatus(engine);
     expect(status.provisioned).toBe(false);
     expect(status.mismatches.join('\n')).toContain('migration byte checksum mismatch');
+    await expect(provisionRecoverySchema(engine)).rejects.toThrow('refusing recovery schema provision');
+    await engine.executeRaw("UPDATE recovery_schema_version SET migration_sha256 = $1 WHERE version = 'recovery_v3_pre_rehearsal_1'", [originalChecksum]);
+    await downRecoverySchema(engine);
     await provisionRecoverySchema(engine);
     await engine.executeRaw('BEGIN');
     await engine.executeRaw('ALTER TABLE pages ADD COLUMN recovery_surprise_mutable TEXT');
@@ -467,7 +492,7 @@ describe('content recovery applicator', () => {
     const approval = approved([row], bundle);
     await applyRecoveryManifest(engine, approval.rows, { batchId: 'b1', approvalHash: approval.approvalHashValue, approval: approval.approval, payloadBundle: bundle, ...APPLY });
     const auth = await rollbackAuthForBatch();
-    await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now });
+    await rollbackBatch(engine, 'run-test', 'b1', { authorization: auth.authorization, expectedRollbackStateHash: auth.expectedRollbackStateHash, trustedRollbackKeys: TRUSTED_KEYS, now: APPLY.now });
     const after = (await engine.executeRaw<Record<string, unknown>>(`SELECT type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, emotional_weight::text, effective_date::text, effective_date_source, import_filename, salience_touched_at::text, last_retrieved_at::text, links_extracted_at::text, contextual_retrieval_mode, corpus_generation, deleted_at::text FROM pages WHERE id=$1`, [live.id]))[0];
     expect(after).toEqual(before);
   });

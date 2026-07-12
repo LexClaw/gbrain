@@ -213,7 +213,7 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
     const { runtime, allowlist, allowlistPath } = await bindRuntime(engine, opts);
     const authorization = readJson<RollbackAuthorizationArtifact>(str(opts, 'rollback-authorization'));
     const trustedRollbackKeys = trustedKeysFromAllowlist(allowlist, 'approval', allowlistPath);
-    const result = await rollbackBatch(engine, str(opts, 'run-id'), str(opts, 'batch-id'), { authorization, trustedRollbackKeys, runtimeBinding: runtime, expectedRollbackStateHash: maybeStr(opts, 'expected-rollback-state-hash') });
+    const result = await rollbackBatch(engine, str(opts, 'run-id'), str(opts, 'batch-id'), { authorization, trustedRollbackKeys, runtimeBinding: runtime, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
     emit(opts, { command: cmd, ok: true, runtime, rollback_authorization_hash: sha256(canonicalJson(authorization)), result });
     return;
   }
