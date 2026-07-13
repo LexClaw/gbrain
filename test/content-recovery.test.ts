@@ -61,6 +61,10 @@ const EXPIRES_AT = new Date(FIXTURE_NOW + 24 * 60 * 60_000).toISOString();
 const EXPIRED_AT = new Date(FIXTURE_NOW - 24 * 60 * 60_000).toISOString();
 const FUTURE_AT = new Date(FIXTURE_NOW + 24 * 60 * 60_000).toISOString();
 const APPLY = { trustedApprovalKeys: TRUSTED_KEYS, now: FIXTURE_NOW };
+const ROOT_NOT_AFTER = new Date(FIXTURE_NOW + 4 * 60_000).toISOString();
+const ROOT_BOUNDARY_EXPIRES_AT = new Date(FIXTURE_NOW + 5 * 60_000).toISOString();
+const PRODUCTION_ROOT_NOW = Date.parse('2026-07-12T00:02:00.000Z');
+const PRODUCTION_ROOT_EXPIRES_AT = '2026-07-13T00:01:00.000Z';
 function recoveryRuntime() {
   return {
     allowlist: {
@@ -73,6 +77,22 @@ function recoveryRuntime() {
     worktree: runtimeWorktree,
     targetIdentity: runtimeDbIdentity,
   };
+}
+
+function allowlistEnvelopeAt(approvedAt: string, expiresAt = EXPIRES_AT, keyId = 'fixture-reviewer', signer = 'fixture-reviewer') {
+  return signAllowlistEnvelope({
+    schema_version: 'recovery_allowlist_envelope_v1',
+    allowlist: {
+      allowed_worktrees: {},
+      reserved_isolated_database_targets: [],
+      explicitly_permitted_fixture_identities: [],
+      trusted_approval_keys: TRUSTED_KEYS,
+    },
+    approved_at: approvedAt,
+    expires_at: expiresAt,
+    key_id: keyId,
+    signer,
+  }, PRIVATE_KEY_PEM);
 }
 
 async function seedSource(id = 'src-a') {
@@ -594,19 +614,7 @@ describe('content recovery applicator', () => {
   });
 
   test('allowlist envelope requires a reviewed trust-root source', () => {
-    const envelope = signAllowlistEnvelope({
-      schema_version: 'recovery_allowlist_envelope_v1',
-      allowlist: {
-        allowed_worktrees: {},
-        reserved_isolated_database_targets: [],
-        explicitly_permitted_fixture_identities: [],
-        trusted_approval_keys: TRUSTED_KEYS,
-      },
-      approved_at: APPROVED_AT,
-      expires_at: EXPIRES_AT,
-      key_id: 'fixture-reviewer',
-      signer: 'fixture-reviewer',
-    }, PRIVATE_KEY_PEM);
+    const envelope = allowlistEnvelopeAt(APPROVED_AT);
     expect(() => verifyAllowlistEnvelope(envelope, APPLY.now)).toThrow('key_id is not trusted');
     expect(verifyRehearsalAllowlistEnvelope(envelope, TRUSTED_KEYS, APPLY.now).trusted_approval_keys).toEqual(TRUSTED_KEYS);
     expect(() => verifyRehearsalAllowlistEnvelope({ ...envelope, unexpected: true } as any, TRUSTED_KEYS, APPLY.now)).toThrow('unknown field');
@@ -620,25 +628,41 @@ describe('content recovery applicator', () => {
     expect(JSON.parse(proc.stdout.toString()).rehearsal).toBe('isolated-disposable');
   });
 
-  test('production allowlist trust root is compiled and fail-closed by key mapping', () => {
-    const productionEnvelope = signAllowlistEnvelope({
-      schema_version: 'recovery_allowlist_envelope_v1',
-      allowlist: {
-        allowed_worktrees: {},
-        reserved_isolated_database_targets: [],
-        explicitly_permitted_fixture_identities: [],
-        trusted_approval_keys: TRUSTED_KEYS,
-      },
-      approved_at: APPROVED_AT,
-      expires_at: EXPIRES_AT,
-      key_id: 'gbrain-prod-recovery-20260712-primary',
-      signer: 'lex-grant-prod-recovery',
-    }, PRIVATE_KEY_PEM);
+  test('allowlist envelope approved_at before trusted root not_before fails closed', () => {
+    const root = [{ ...TRUSTED_KEYS[0], not_before: new Date(FIXTURE_NOW - 30_000).toISOString(), not_after: ROOT_NOT_AFTER }];
+    expect(() => verifyRehearsalAllowlistEnvelope(allowlistEnvelopeAt(APPROVED_AT), root, APPLY.now)).toThrow('predates trusted key validity');
+  });
 
-    expect(() => verifyAllowlistEnvelope(productionEnvelope, APPLY.now)).toThrow('signature verification failed');
-    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, key_id: 'fixture-reviewer' }, APPLY.now)).toThrow('key_id is not trusted');
-    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, signer: 'fixture-reviewer' }, APPLY.now)).toThrow('signer does not match key_id');
-    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, expires_at: EXPIRED_AT }, APPLY.now)).toThrow('expired');
+  test('allowlist envelope approved_at after trusted root not_after fails closed', () => {
+    const root = [{ ...TRUSTED_KEYS[0], not_before: new Date(FIXTURE_NOW - 5 * 60_000).toISOString(), not_after: new Date(FIXTURE_NOW - 90_000).toISOString() }];
+    expect(() => verifyRehearsalAllowlistEnvelope(allowlistEnvelopeAt(APPROVED_AT), root, APPLY.now)).toThrow('postdates trusted key validity');
+  });
+
+  test('allowlist envelope accepts exact trusted root validity boundaries', () => {
+    const root = [{ ...TRUSTED_KEYS[0], not_before: APPROVED_AT, not_after: ROOT_NOT_AFTER }];
+    expect(verifyRehearsalAllowlistEnvelope(allowlistEnvelopeAt(APPROVED_AT), root, APPLY.now).trusted_approval_keys).toEqual(TRUSTED_KEYS);
+    expect(verifyRehearsalAllowlistEnvelope(allowlistEnvelopeAt(ROOT_NOT_AFTER, ROOT_BOUNDARY_EXPIRES_AT), root, APPLY.now).trusted_approval_keys).toEqual(TRUSTED_KEYS);
+  });
+
+  test('allowlist envelope rejects malformed trusted root validity dates', () => {
+    expect(() => verifyRehearsalAllowlistEnvelope(allowlistEnvelopeAt(APPROVED_AT), [{ ...TRUSTED_KEYS[0], not_before: '2026-07-12T00:00:00Z' }], APPLY.now)).toThrow('trusted key not_before must be an RFC3339 UTC timestamp with milliseconds');
+    expect(() => verifyRehearsalAllowlistEnvelope(allowlistEnvelopeAt(APPROVED_AT), [{ ...TRUSTED_KEYS[0], not_after: '2026-07-12' }], APPLY.now)).toThrow('trusted key not_after must be an RFC3339 UTC timestamp with milliseconds');
+  });
+
+  test('allowlist envelope accepts a valid in-window signature', () => {
+    const root = [{ ...TRUSTED_KEYS[0], not_before: new Date(FIXTURE_NOW - 5 * 60_000).toISOString(), not_after: ROOT_NOT_AFTER }];
+    expect(verifyRehearsalAllowlistEnvelope(allowlistEnvelopeAt(APPROVED_AT), root, APPLY.now).trusted_approval_keys).toEqual(TRUSTED_KEYS);
+  });
+
+  test('production allowlist trust root is compiled and fail-closed by key mapping', () => {
+    const productionEnvelope = allowlistEnvelopeAt('2026-07-12T00:01:00.000Z', PRODUCTION_ROOT_EXPIRES_AT, 'gbrain-prod-recovery-20260712-primary', 'lex-grant-prod-recovery');
+
+    expect(() => verifyAllowlistEnvelope(productionEnvelope, PRODUCTION_ROOT_NOW)).toThrow('signature verification failed');
+    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, key_id: 'fixture-reviewer' }, PRODUCTION_ROOT_NOW)).toThrow('key_id is not trusted');
+    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, signer: 'fixture-reviewer' }, PRODUCTION_ROOT_NOW)).toThrow('signer does not match key_id');
+    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, expires_at: '2026-07-12T00:01:00.000Z' }, PRODUCTION_ROOT_NOW)).toThrow('expired');
+    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, approved_at: '2026-07-11T23:59:59.999Z', expires_at: PRODUCTION_ROOT_EXPIRES_AT }, PRODUCTION_ROOT_NOW)).toThrow('predates trusted key validity');
+    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, approved_at: '2026-07-19T00:00:00.001Z', expires_at: '2026-07-20T00:00:00.001Z' }, Date.parse('2026-07-19T00:00:00.000Z'))).toThrow('postdates trusted key validity');
   });
 
   test('production recovery trust source contains only public key material', () => {

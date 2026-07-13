@@ -315,6 +315,11 @@ function parseStrictIso(name: string, value: string): number {
   return ms;
 }
 
+function enforceTrustedKeyValidity(name: string, trustedKey: TrustedApprovalKey, approvedAt: number): void {
+  if (trustedKey.not_before && approvedAt < parseStrictIso('trusted key not_before', trustedKey.not_before)) throw new Error(`${name} predates trusted key validity`);
+  if (trustedKey.not_after && approvedAt > parseStrictIso('trusted key not_after', trustedKey.not_after)) throw new Error(`${name} postdates trusted key validity`);
+}
+
 function materializeTrustedKeys(keys: readonly TrustedApprovalKey[], role: 'approval' | 'expected_state' = 'approval', baseDir?: string): (TrustedApprovalKey & { public_key_pem: string })[] {
   const filtered = keys.filter(key => (key.role ?? 'approval') === role);
   const keyIds = new Set<string>();
@@ -358,8 +363,7 @@ function verifySignedArtifactCommon(artifact: ApprovalArtifact | ExpectedStateAr
   if (approvedAt > now + 5 * 60_000) throw new Error(`${role} artifact is future-dated`);
   if (expiresAt <= now) throw new Error(`${role} artifact is expired`);
   if (expiresAt - approvedAt > 7 * 24 * 60 * 60_000) throw new Error(`${role} expiry exceeds seven days`);
-  if (trusted[0].not_before && approvedAt < parseStrictIso('trusted key not_before', trusted[0].not_before)) throw new Error(`${role} predates trusted key validity`);
-  if (trusted[0].not_after && approvedAt > parseStrictIso('trusted key not_after', trusted[0].not_after)) throw new Error(`${role} postdates trusted key validity`);
+  enforceTrustedKeyValidity(role, trusted[0], approvedAt);
   let publicKey;
   try { publicKey = createPublicKey(trusted[0].public_key_pem); } catch { throw new Error(`trusted ${role} public key is malformed`); }
   let signature: Buffer;
@@ -393,6 +397,7 @@ function verifyDetachedSignature(name: string, keyRole: 'approval' | 'expected_s
   if (approvedAt > now + 5 * 60_000) throw new Error(`${name} artifact is future-dated`);
   if (expiresAt <= now) throw new Error(`${name} artifact is expired`);
   if (expiresAt - approvedAt > 7 * 24 * 60 * 60_000) throw new Error(`${name} expiry exceeds seven days`);
+  enforceTrustedKeyValidity(name, trusted[0], approvedAt);
   let publicKey;
   try { publicKey = createPublicKey(trusted[0].public_key_pem); } catch { throw new Error(`trusted ${name} public key is malformed`); }
   const signature = Buffer.from(artifact.signature, 'base64');
