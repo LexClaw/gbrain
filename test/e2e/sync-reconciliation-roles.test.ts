@@ -142,6 +142,56 @@ async function expectDenied(promise: Promise<unknown>) {
   throw new Error('expected permission denial');
 }
 
+async function expectNoRollbackResidue(sql: any) {
+  const roleRows = await sql.unsafe(`
+    SELECT rolname
+    FROM pg_roles
+    WHERE rolname IN (
+      'gbrain_reconciliation_owner',
+      'gbrain_normal_sync',
+      'gbrain_reconciliation_approve',
+      'gbrain_reconciliation_apply',
+      'gbrain_source_repair',
+      'gbrain_hard_purge'
+    )
+    ORDER BY rolname
+  `);
+  expect(roleRows).toEqual([]);
+
+  const guardRows = await sql.unsafe(`
+    SELECT routine_name
+    FROM information_schema.routines
+    WHERE routine_schema = 'public'
+      AND routine_name IN ('gbrain_guard_sync_reconciliation_audit_update', 'gbrain_guard_sources_generation_update')
+  `);
+  expect(guardRows).toEqual([]);
+
+  const triggerRows = await sql.unsafe(`
+    SELECT trigger_name
+    FROM information_schema.triggers
+    WHERE event_object_schema = 'public'
+      AND trigger_name IN ('gbrain_guard_sync_reconciliation_audit_update', 'gbrain_guard_sources_generation_update')
+  `);
+  expect(triggerRows).toEqual([]);
+
+  const ownerRows = await sql.unsafe(`
+    SELECT c.relname, r.rolname AS owner
+    FROM pg_class c
+    JOIN pg_roles r ON r.oid = c.relowner
+    WHERE c.oid IN ('public.sources'::regclass, 'public.sync_reconciliation_audit'::regclass, 'public.sync_reconciliation_role_policy'::regclass)
+    ORDER BY c.relname
+  `);
+  expect(ownerRows.every((row: any) => row.owner !== 'gbrain_reconciliation_owner')).toBe(true);
+
+  const policyRows = await sql.unsafe(`
+    SELECT role_name
+    FROM sync_reconciliation_role_policy
+    WHERE role_name LIKE 'gbrain_%'
+    ORDER BY role_name
+  `);
+  expect(policyRows).toEqual([]);
+}
+
 describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => {
   let engine: PostgresEngine;
   let sql: any;
@@ -382,4 +432,14 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
       'gbrain_source_repair',
     ]);
   });
+
+  test('DBA rollback executes after bootstrap and leaves no role, trigger, function, or owner residue', async () => {
+    await sql.unsafe('RESET ROLE');
+    await sql.unsafe(readFileSync(join(root, 'artifacts/dba/sync-reconciliation-roles.sql'), 'utf8'));
+    for (const role of ['gbrain_normal_sync', 'gbrain_reconciliation_approve', 'gbrain_reconciliation_apply', 'gbrain_source_repair', 'gbrain_hard_purge']) {
+      await sql.unsafe(`GRANT ${role} TO CURRENT_USER`);
+    }
+    await sql.unsafe(readFileSync(join(root, 'artifacts/dba/sync-reconciliation-roles-rollback.sql'), 'utf8'));
+    await expectNoRollbackResidue(sql);
+  }, 30_000);
 });
