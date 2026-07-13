@@ -420,6 +420,18 @@ describe.skipIf(skip)('sync reconciliation role boundary (Postgres E2E)', () => 
     expect(caps.database.session_user).toBeTruthy();
     expect(caps.sync_safety.capabilities.db_roles).toBe(true);
     expect(caps.sync_safety.supported).toBe(true);
+    expect(caps.capabilities).toEqual([
+      'explicit-source',
+      'root-identity',
+      'reconciliation-manifest',
+      'db-roles',
+      'schema-v2',
+    ]);
+    expect(caps.database.identity).toContain(`postgres:`);
+    expect(caps.database.identity).toContain(`current_user=${caps.database.current_user}`);
+    expect(caps.database.identity).toContain(`session_user=${caps.database.session_user}`);
+    expect(caps.database.identity).toContain(`schema=${caps.database.schema_version}`);
+    expect(caps.database.session_identity).toContain(`session_user=${caps.database.session_user}`);
     expect(caps.sync_safety.postgres_checks.guard_ok).toBe(true);
     expect(caps.sync_safety.postgres_checks.role_privileges_ok).toBe(true);
     expect(caps.sync_safety.postgres_checks.owner_role_ok).toBe(true);

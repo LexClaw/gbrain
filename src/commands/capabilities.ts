@@ -337,22 +337,31 @@ export async function getCapabilities(engine: BrainEngine): Promise<Record<strin
   const identity = await checked(
     diagnostics,
     'identity',
-    async () => (await engine.executeRaw<{ current_user: string; session_user: string }>(
-      `SELECT current_user::text AS current_user, session_user::text AS session_user`,
-    ))[0] ?? { current_user: 'unknown', session_user: 'unknown' },
-    { current_user: 'unknown', session_user: 'unknown' },
+    async () => (await engine.executeRaw<{ current_user: string; session_user: string; database_name: string }>(
+      `SELECT current_user::text AS current_user, session_user::text AS session_user, current_database()::text AS database_name`,
+    ))[0] ?? { current_user: 'unknown', session_user: 'unknown', database_name: 'unknown' },
+    { current_user: 'unknown', session_user: 'unknown', database_name: 'unknown' },
   );
   const supported = hasExactSchema && hasClusterRoles && hasExactPolicyRows && guardsOk && rolePrivilegesOk && ownerRoleOk && diagnostics.length === 0;
+  const databaseIdentity = engine.kind === 'postgres' && identity.database_name !== 'unknown'
+    ? `postgres:${identity.database_name}:current_user=${identity.current_user}:session_user=${identity.session_user}:schema=${Number.isFinite(configVersion) ? configVersion : 'unknown'}`
+    : null;
+  const sessionIdentity = engine.kind === 'postgres' && identity.database_name !== 'unknown'
+    ? `postgres:${identity.database_name}:session_user=${identity.session_user}`
+    : null;
 
   return {
     schema_version: 1,
     gbrain_version: VERSION,
     backend: engine.kind,
+    capabilities: supported ? [...REQUIRED_SYNC_TOKENS] : [],
     database: {
       current_user: identity.current_user,
       session_user: identity.session_user,
       schema_version: Number.isFinite(configVersion) ? configVersion : null,
       required_sync_safety_schema_version: Math.min(REQUIRED_SCHEMA_VERSION, LATEST_VERSION),
+      identity: databaseIdentity,
+      session_identity: sessionIdentity,
     },
     sync_safety: {
       supported,

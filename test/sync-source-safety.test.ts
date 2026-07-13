@@ -404,6 +404,7 @@ describe('sync source safety guard', () => {
 
   test('gbrain capabilities exposes exact sync-safety tokens from schema support', async () => {
     const caps = await getCapabilities(engine) as any;
+    expect(caps.capabilities).toEqual([]);
     expect(caps.sync_safety.required_tokens).toEqual([
       'explicit-source',
       'root-identity',
