@@ -116,6 +116,24 @@ function emit(opts: Args, payload: Record<string, unknown>): void {
   else console.log(JSON.stringify(body, null, 2));
 }
 
+function crashAfterApply(opts: Args) {
+  const value = maybeStr(opts, 'crash-after-apply');
+  if (!value) return undefined;
+  if (value !== 'after_commit_before_jsonl') throw new Error(`unsupported --crash-after-apply value: ${value}`);
+  return value;
+}
+
+async function committedRecoveryEvidence(engine: BrainEngine, runId: string, batchId: string): Promise<{ committed: boolean; auditRows: number; applyRows: number }> {
+  const rows = await engine.executeRaw<{ audit_rows: string; apply_rows: string }>(`
+    SELECT
+      (SELECT COUNT(*)::text FROM recovery_audit_rows WHERE run_id = $1 AND batch_id = $2) AS audit_rows,
+      (SELECT COUNT(*)::text FROM recovery_apply_state WHERE run_id = $1 AND batch_id = $2 AND status = 'committed') AS apply_rows
+  `, [runId, batchId]);
+  const auditRows = Number(rows[0]?.audit_rows ?? 0);
+  const applyRows = Number(rows[0]?.apply_rows ?? 0);
+  return { committed: auditRows > 0 || applyRows > 0, auditRows, applyRows };
+}
+
 async function bindRuntime(engine: BrainEngine, opts: Args) {
   const worktree = str(opts, 'worktree');
   const allowlistPath = str(opts, 'allowlist');
@@ -211,45 +229,55 @@ export async function runRecovery(engine: BrainEngine, args: string[]): Promise<
     const runtime = await assertAllowlistedRuntime(allowlist, { worktree, allowlistPath, engine, targetIdentity });
     const a = loadApplyArtifacts(opts, allowlist, allowlistPath);
     const phases: Record<string, unknown> = {};
-    let applied = false;
+    const runId = str(opts, 'run-id');
     let rollbackComplete = false;
+    let evidencePreserved = false;
+    let schemaTornDown = false;
     let error: string | undefined;
     try {
       await provisionRecoverySchema(engine);
       phases.schema_provision = { pass: true };
       phases.dry_run = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime, dryRun: true });
-      phases.apply = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime });
-      applied = true;
+      phases.apply = await applyRecoveryManifest(engine, a.rows, { batchId: a.batchId, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, payloadBundle: a.payloadBundle, runtimeBinding: runtime, crashAfter: crashAfterApply(opts) });
       const expectedState = readJson<ExpectedStateArtifact>(str(opts, 'expected-state'));
-      const checks = await verifyRecovery(engine, a.rows, str(opts, 'run-id'), { batchId: a.batchId, payloadBundle: a.payloadBundle, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, expectedState, trustedExpectedStateKeys: a.trustedExpectedStateKeys, runtimeBinding: runtime });
+      const checks = await verifyRecovery(engine, a.rows, runId, { batchId: a.batchId, payloadBundle: a.payloadBundle, approvalHash: a.computedApprovalHash, approval: a.approval, trustedApprovalKeys: a.trustedApprovalKeys, expectedState, trustedExpectedStateKeys: a.trustedExpectedStateKeys, runtimeBinding: runtime });
       phases.verify = checks;
       if (!Object.values(checks).every(c => c.pass)) throw new Error('rehearsal verification failed');
       const authorization = readJson<RollbackAuthorizationArtifact>(str(opts, 'rollback-authorization'));
-      phases.rollback = await rollbackBatch(engine, str(opts, 'run-id'), a.batchId, { authorization, trustedRollbackKeys: a.trustedApprovalKeys, runtime: { allowlist, allowlistPath, worktree, targetIdentity }, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
+      phases.rollback = await rollbackBatch(engine, runId, a.batchId, { authorization, trustedRollbackKeys: a.trustedApprovalKeys, runtime: { allowlist, allowlistPath, worktree, targetIdentity }, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
       rollbackComplete = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {
-      if (applied && !rollbackComplete) {
+      const evidence = await committedRecoveryEvidence(engine, runId, a.batchId).catch(err => ({ committed: true, auditRows: -1, applyRows: -1, error: err instanceof Error ? err.message : String(err) }));
+      phases.committed_evidence = evidence;
+      if (evidence.committed && !rollbackComplete) {
         try {
           const authorization = readJson<RollbackAuthorizationArtifact>(str(opts, 'rollback-authorization'));
-          phases.rollback_cleanup = await rollbackBatch(engine, str(opts, 'run-id'), a.batchId, { authorization, trustedRollbackKeys: a.trustedApprovalKeys, runtime: { allowlist, allowlistPath, worktree, targetIdentity }, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
+          phases.rollback_cleanup = await rollbackBatch(engine, runId, a.batchId, { authorization, trustedRollbackKeys: a.trustedApprovalKeys, runtime: { allowlist, allowlistPath, worktree, targetIdentity }, expectedRollbackStateHash: str(opts, 'expected-rollback-state-hash') });
           rollbackComplete = true;
         } catch (err) {
           phases.rollback_cleanup = { pass: false, error: err instanceof Error ? err.message : String(err) };
         }
       }
-      try {
-        await downRecoverySchema(engine);
-        const status = await recoverySchemaStatus(engine);
-        phases.schema_down_cleanup = { pass: !status.provisioned, status };
-      } catch (err) {
-        phases.schema_down_cleanup = { pass: false, error: err instanceof Error ? err.message : String(err) };
+      if (!rollbackComplete && evidence.committed) {
+        evidencePreserved = true;
+        const status = await recoverySchemaStatus(engine).catch(err => ({ provisioned: true, error: err instanceof Error ? err.message : String(err) }));
+        phases.schema_down_cleanup = { pass: false, skipped: true, reason: 'rollback_evidence_preserved', status };
+      } else {
+        try {
+          await downRecoverySchema(engine);
+          const status = await recoverySchemaStatus(engine);
+          schemaTornDown = !status.provisioned;
+          phases.schema_down_cleanup = { pass: schemaTornDown, status };
+        } catch (err) {
+          phases.schema_down_cleanup = { pass: false, error: err instanceof Error ? err.message : String(err) };
+        }
       }
     }
     const schemaCleanup = phases.schema_down_cleanup as { pass?: boolean } | undefined;
     const ok = !error && rollbackComplete && schemaCleanup?.pass === true;
-    emit(opts, { command: cmd, ok, rehearsal: 'isolated-disposable', runtime, phases, cleanup: { rollback: rollbackComplete, schema_down: schemaCleanup?.pass === true }, ...(error ? { error } : {}) });
+    emit(opts, { command: cmd, ok, rehearsal: 'isolated-disposable', runtime, phases, cleanup: { rollback_proof: rollbackComplete, evidence_preserved: evidencePreserved, schema_teardown: schemaTornDown, external_target_destruction: false }, ...(error ? { error } : {}) });
     if (!ok) process.exitCode = 3;
     return;
   }

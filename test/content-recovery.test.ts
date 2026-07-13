@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'child_process';
 import { generateKeyPairSync } from 'crypto';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { runRecovery } from '../src/commands/recovery.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { verifyRehearsalAllowlistEnvelope } from './helpers/recovery-rehearsal-root.ts';
 import {
@@ -33,6 +34,7 @@ import {
   signExpectedStateArtifact,
   signRollbackAuthorizationArtifact,
   sha256,
+  toCsv,
   verifyAllowlistEnvelope,
   verifyApprovalSignature,
   type ApprovalArtifact,
@@ -53,7 +55,12 @@ const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const PRIVATE_KEY_PEM = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
 const TRUSTED_KEYS: TrustedApprovalKey[] = [{ key_id: 'fixture-reviewer', signer: 'fixture-reviewer', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
 const TRUSTED_EXPECTED_KEYS: TrustedApprovalKey[] = [{ key_id: 'fixture-expected', signer: 'fixture-expected', role: 'expected_state', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
-const APPLY = { trustedApprovalKeys: TRUSTED_KEYS, now: Date.parse('2026-07-12T00:00:01.000Z') };
+const FIXTURE_NOW = Date.now();
+const APPROVED_AT = new Date(FIXTURE_NOW - 60_000).toISOString();
+const EXPIRES_AT = new Date(FIXTURE_NOW + 24 * 60 * 60_000).toISOString();
+const EXPIRED_AT = new Date(FIXTURE_NOW - 24 * 60 * 60_000).toISOString();
+const FUTURE_AT = new Date(FIXTURE_NOW + 24 * 60 * 60_000).toISOString();
+const APPLY = { trustedApprovalKeys: TRUSTED_KEYS, now: FIXTURE_NOW };
 function recoveryRuntime() {
   return {
     allowlist: {
@@ -128,8 +135,8 @@ function approved(rows: ManifestRow[], bundle: RecoveryPayloadBundle): { approva
     tool_commit: runtimeHead,
     target_identity: runtimeDbIdentity,
     allowlist_hash: runtimeAllowlistHash,
-    approved_at: '2026-07-12T00:00:00.000Z',
-    expires_at: '2026-07-13T00:00:00.000Z',
+    approved_at: APPROVED_AT,
+    expires_at: EXPIRES_AT,
     key_id: 'fixture-reviewer',
     signer: 'fixture-reviewer',
   }, PRIVATE_KEY_PEM);
@@ -158,8 +165,8 @@ function rollbackAuth(overrides: Partial<Parameters<typeof signRollbackAuthoriza
     audit_batch_hash: '0'.repeat(64),
     row_action_hash: '0'.repeat(64),
     expected_rollback_state_hash: '0'.repeat(64),
-    approved_at: '2026-07-12T00:00:00.000Z',
-    expires_at: '2026-07-13T00:00:00.000Z',
+    approved_at: APPROVED_AT,
+    expires_at: EXPIRES_AT,
     key_id: 'fixture-reviewer',
     signer: 'fixture-reviewer',
     ...overrides,
@@ -189,6 +196,72 @@ async function provisionIndependentTargetIdentity() {
   )`);
   await engine.executeRaw('DELETE FROM recovery_target_identity');
   await engine.executeRaw('INSERT INTO recovery_target_identity (id, nonce) VALUES (true, $1)', ['c'.repeat(64)]);
+}
+
+async function runRecoveryJson(args: string[]) {
+  const oldLog = console.log;
+  const oldExitCode = process.exitCode;
+  let stdout = '';
+  console.log = (message?: unknown) => { stdout += `${String(message ?? '')}\n`; };
+  process.exitCode = undefined;
+  try {
+    await runRecovery(engine, args);
+    return { exitCode: process.exitCode ?? 0, body: JSON.parse(stdout) as Record<string, any> };
+  } finally {
+    console.log = oldLog;
+    process.exitCode = oldExitCode;
+  }
+}
+
+function writeRehearsalArtifacts(name: string) {
+  const previousAllowlistHash = runtimeAllowlistHash;
+  const root = join(dir, name);
+  const allowlistPath = join(root, 'allowlist.json');
+  const trustedRootsPath = join(root, 'trusted-roots.json');
+  mkdirSync(root, { recursive: true });
+  const envelope = signAllowlistEnvelope({
+    schema_version: 'recovery_allowlist_envelope_v1',
+    allowlist: recoveryRuntime().allowlist,
+    approved_at: APPROVED_AT,
+    expires_at: EXPIRES_AT,
+    key_id: 'fixture-reviewer',
+    signer: 'fixture-reviewer',
+  }, PRIVATE_KEY_PEM);
+  const envelopeJson = canonicalJson(envelope) + '\n';
+  writeFileSync(allowlistPath, envelopeJson);
+  runtimeAllowlistHash = sha256(envelopeJson);
+  const { row, bundle } = exactRow();
+  const approval = approved([row], bundle);
+  const expectedState = signExpectedStateArtifact({
+    schema_version: 'recovery_expected_state_v1',
+    run_id: 'run-test',
+    batch_id: 'b1',
+    manifest_hash: manifestHash(approval.rows),
+    payload_bundle_hash: payloadBundleHash(bundle),
+    approval_hash: approval.approvalHashValue,
+    expected_pages: [{ source_id: 'src-a', slug: 'alpha', content_hash: row.pre_delete_content_hash, action: 'add_exact' }],
+    expected_audit_rows: 1,
+    approved_at: APPROVED_AT,
+    expires_at: EXPIRES_AT,
+    key_id: 'fixture-expected',
+    signer: 'fixture-expected',
+  }, PRIVATE_KEY_PEM);
+  const files = {
+    allowlistPath,
+    trustedRootsPath,
+    manifestPath: join(root, 'manifest.csv'),
+    payloadPath: join(root, 'payload-bundle.json'),
+    approvalPath: join(root, 'approval.json'),
+    expectedStatePath: join(root, 'expected-state.json'),
+    rollbackPath: join(root, 'rollback.json'),
+  };
+  writeFileSync(files.trustedRootsPath, canonicalJson(TRUSTED_KEYS) + '\n');
+  writeFileSync(files.manifestPath, toCsv(approval.rows));
+  writeFileSync(files.payloadPath, canonicalJson(bundle) + '\n');
+  writeFileSync(files.approvalPath, canonicalJson(approval.approval) + '\n');
+  writeFileSync(files.expectedStatePath, canonicalJson(expectedState) + '\n');
+  writeFileSync(files.rollbackPath, canonicalJson(rollbackAuth()) + '\n');
+  return { files, restore: () => { runtimeAllowlistHash = previousAllowlistHash; } };
 }
 
 beforeAll(async () => {
@@ -295,8 +368,8 @@ describe('content recovery applicator', () => {
       approval_hash: approval.approvalHashValue,
       expected_pages: [{ source_id: 'src-a', slug: 'alpha', content_hash: row.pre_delete_content_hash, action: 'add_exact' }],
       expected_audit_rows: 1,
-      approved_at: '2026-07-12T00:00:00.000Z',
-      expires_at: '2026-07-13T00:00:00.000Z',
+      approved_at: APPROVED_AT,
+      expires_at: EXPIRES_AT,
       key_id: 'fixture-expected',
       signer: 'fixture-expected',
     }, PRIVATE_KEY_PEM);
@@ -426,8 +499,8 @@ describe('content recovery applicator', () => {
     const approval = approved([row], bundle);
     expect(() => verifyApprovalSignature(approval.approval, TRUSTED_KEYS, APPLY.now)).not.toThrow();
     expect(() => verifyApprovalSignature({ ...approval.approval, approved_at: 'bad-date' }, TRUSTED_KEYS, APPLY.now)).toThrow('approved_at');
-    expect(() => verifyApprovalSignature({ ...approval.approval, expires_at: '2026-07-11T00:00:00.000Z' }, TRUSTED_KEYS, APPLY.now)).toThrow('expired');
-    expect(() => verifyApprovalSignature({ ...approval.approval, approved_at: '2026-08-12T00:00:00.000Z' }, TRUSTED_KEYS, APPLY.now)).toThrow('future');
+    expect(() => verifyApprovalSignature({ ...approval.approval, expires_at: EXPIRED_AT }, TRUSTED_KEYS, APPLY.now)).toThrow('expired');
+    expect(() => verifyApprovalSignature({ ...approval.approval, approved_at: FUTURE_AT }, TRUSTED_KEYS, APPLY.now)).toThrow('future');
     expect(() => verifyApprovalSignature(approval.approval, [{ ...TRUSTED_KEYS[0], key_id: 'wrong', signer: 'wrong' }], APPLY.now)).toThrow('not trusted');
     expect(() => verifyApprovalSignature({ ...approval.approval, manifest_hash: 'b'.repeat(64) }, TRUSTED_KEYS, APPLY.now)).toThrow('signature verification failed');
   });
@@ -468,8 +541,8 @@ describe('content recovery applicator', () => {
       approval_hash: approval.approvalHashValue,
       expected_pages: [{ source_id: 'src-a', slug: 'alpha', content_hash: row.pre_delete_content_hash, action: 'add_exact' }],
       expected_audit_rows: 1,
-      approved_at: '2026-07-12T00:00:00.000Z',
-      expires_at: '2026-07-13T00:00:00.000Z',
+      approved_at: APPROVED_AT,
+      expires_at: EXPIRES_AT,
       key_id: 'fixture-expected',
       signer: 'fixture-expected',
     }, PRIVATE_KEY_PEM);
@@ -529,8 +602,8 @@ describe('content recovery applicator', () => {
         explicitly_permitted_fixture_identities: [],
         trusted_approval_keys: TRUSTED_KEYS,
       },
-      approved_at: '2026-07-12T00:00:00.000Z',
-      expires_at: '2026-07-13T00:00:00.000Z',
+      approved_at: APPROVED_AT,
+      expires_at: EXPIRES_AT,
       key_id: 'fixture-reviewer',
       signer: 'fixture-reviewer',
     }, PRIVATE_KEY_PEM);
@@ -545,6 +618,57 @@ describe('content recovery applicator', () => {
     const proc = Bun.spawnSync({ cmd: ['bun', 'run', 'src/cli.ts', 'recovery', 'rehearsal-allowlist-verify', '--allowlist', envelopePath, '--trusted-rehearsal-keys', keysPath, '--isolated-disposable-rehearsal', '--json'], cwd: process.cwd(), env: { ...process.env, NODE_ENV: 'test' } });
     expect(proc.exitCode).toBe(0);
     expect(JSON.parse(proc.stdout.toString()).rehearsal).toBe('isolated-disposable');
+  });
+
+  test('rehearsal post-commit fault still attempts rollback and preserves evidence on rollback failure', async () => {
+    const { files, restore } = writeRehearsalArtifacts('rehearsal-post-commit-fault');
+    try {
+      const result = await runRecoveryJson([
+        'rehearsal', '--yes', '--isolated-disposable-rehearsal', '--json',
+        '--worktree', runtimeWorktree, '--allowlist', files.allowlistPath, '--trusted-rehearsal-keys', files.trustedRootsPath,
+        '--manifest', files.manifestPath, '--payload-bundle', files.payloadPath, '--approval', files.approvalPath,
+        '--expected-state', files.expectedStatePath, '--rollback-authorization', files.rollbackPath,
+        '--run-id', 'run-test', '--batch-id', 'b1', '--expected-rollback-state-hash', '0'.repeat(64),
+        '--crash-after-apply', 'after_commit_before_jsonl',
+      ]);
+      expect(result.exitCode).toBe(3);
+      expect(result.body.error).toContain('after_commit_before_jsonl');
+      expect(result.body.phases.rollback_cleanup.pass).toBe(false);
+      expect(result.body.cleanup).toMatchObject({ rollback_proof: false, evidence_preserved: true, schema_teardown: false, external_target_destruction: false });
+      const status = await recoverySchemaStatus(engine);
+      expect(status.provisioned).toBe(true);
+      const audit = await engine.executeRaw<{ audit_rows: string; committed_rows: string }>("SELECT (SELECT COUNT(*)::text FROM recovery_audit_rows WHERE run_id='run-test' AND batch_id='b1') AS audit_rows, (SELECT COUNT(*)::text FROM recovery_apply_state WHERE run_id='run-test' AND batch_id='b1' AND status='committed') AS committed_rows");
+      expect(audit[0]).toMatchObject({ audit_rows: '1', committed_rows: '1' });
+    } finally {
+      await engine.executeRaw("UPDATE recovery_apply_state SET status='rolled_back' WHERE run_id='run-test' AND batch_id='b1'").catch(() => undefined);
+      await downRecoverySchema(engine).catch(() => undefined);
+      await provisionRecoverySchema(engine).catch(() => undefined);
+      restore();
+    }
+  });
+
+  test('rehearsal refuses schema teardown when rollback evidence is still live', async () => {
+    const { files, restore } = writeRehearsalArtifacts('rehearsal-evidence-preserve');
+    try {
+      const result = await runRecoveryJson([
+        'rehearsal', '--yes', '--isolated-disposable-rehearsal', '--json',
+        '--worktree', runtimeWorktree, '--allowlist', files.allowlistPath, '--trusted-rehearsal-keys', files.trustedRootsPath,
+        '--manifest', files.manifestPath, '--payload-bundle', files.payloadPath, '--approval', files.approvalPath,
+        '--expected-state', files.expectedStatePath, '--rollback-authorization', files.rollbackPath,
+        '--run-id', 'run-test', '--batch-id', 'b1', '--expected-rollback-state-hash', '0'.repeat(64),
+      ]);
+      expect(result.exitCode).toBe(3);
+      expect(result.body.phases.committed_evidence).toMatchObject({ committed: true, auditRows: 1, applyRows: 1 });
+      expect(result.body.phases.rollback_cleanup.pass).toBe(false);
+      expect(result.body.phases.schema_down_cleanup.reason).toBe('rollback_evidence_preserved');
+      expect(result.body.cleanup).toMatchObject({ rollback_proof: false, evidence_preserved: true, schema_teardown: false, external_target_destruction: false });
+      expect((await recoverySchemaStatus(engine)).provisioned).toBe(true);
+    } finally {
+      await engine.executeRaw("UPDATE recovery_apply_state SET status='rolled_back' WHERE run_id='run-test' AND batch_id='b1'").catch(() => undefined);
+      await downRecoverySchema(engine).catch(() => undefined);
+      await provisionRecoverySchema(engine).catch(() => undefined);
+      restore();
+    }
   });
 
   test('migration drift, structural drift, and down reapply are detected', async () => {
