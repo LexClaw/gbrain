@@ -620,6 +620,36 @@ describe('content recovery applicator', () => {
     expect(JSON.parse(proc.stdout.toString()).rehearsal).toBe('isolated-disposable');
   });
 
+  test('production allowlist trust root is compiled and fail-closed by key mapping', () => {
+    const productionEnvelope = signAllowlistEnvelope({
+      schema_version: 'recovery_allowlist_envelope_v1',
+      allowlist: {
+        allowed_worktrees: {},
+        reserved_isolated_database_targets: [],
+        explicitly_permitted_fixture_identities: [],
+        trusted_approval_keys: TRUSTED_KEYS,
+      },
+      approved_at: APPROVED_AT,
+      expires_at: EXPIRES_AT,
+      key_id: 'gbrain-prod-recovery-20260712-primary',
+      signer: 'lex-grant-prod-recovery',
+    }, PRIVATE_KEY_PEM);
+
+    expect(() => verifyAllowlistEnvelope(productionEnvelope, APPLY.now)).toThrow('signature verification failed');
+    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, key_id: 'fixture-reviewer' }, APPLY.now)).toThrow('key_id is not trusted');
+    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, signer: 'fixture-reviewer' }, APPLY.now)).toThrow('signer does not match key_id');
+    expect(() => verifyAllowlistEnvelope({ ...productionEnvelope, expires_at: EXPIRED_AT }, APPLY.now)).toThrow('expired');
+  });
+
+  test('production recovery trust source contains only public key material', () => {
+    const source = readFileSync(join(process.cwd(), 'src/recovery/content-recovery.ts'), 'utf8');
+    expect(source).toContain('gbrain-prod-recovery-20260712-primary');
+    expect(source).toContain('lex-grant-prod-recovery');
+    expect(source).toContain('MCowBQYDK2VwAyEAmeff1NuMND6nAMQhOBEM3dIAMfXrHem5HxKafMZP49o=');
+    expect(source).not.toContain(['BEGIN', 'PRIVATE KEY'].join(' '));
+    expect(source).not.toContain(['', 'private'].join('.'));
+  });
+
   test('rehearsal post-commit fault still attempts rollback and preserves evidence on rollback failure', async () => {
     const { files, restore } = writeRehearsalArtifacts('rehearsal-post-commit-fault');
     try {

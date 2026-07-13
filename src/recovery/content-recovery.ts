@@ -111,7 +111,16 @@ export type AllowlistEnvelope = {
   signature: string;
 };
 
-const REVIEWED_RECOVERY_ALLOWLIST_TRUST_ROOTS: readonly TrustedApprovalKey[] = Object.freeze([]);
+const REVIEWED_RECOVERY_ALLOWLIST_TRUST_ROOTS: readonly TrustedApprovalKey[] = Object.freeze([
+  {
+    key_id: 'gbrain-prod-recovery-20260712-primary',
+    signer: 'lex-grant-prod-recovery',
+    role: 'approval',
+    not_before: '2026-07-12T00:00:00.000Z',
+    not_after: '2026-07-19T00:00:00.000Z',
+    public_key_pem: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAmeff1NuMND6nAMQhOBEM3dIAMfXrHem5HxKafMZP49o=\n-----END PUBLIC KEY-----\n',
+  },
+]);
 
 type PageRow = {
   id: number;
