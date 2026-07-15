@@ -43,15 +43,19 @@ export const PRODUCTION_OID = '16384';
 export const REQUIRED_PRODUCTION_DENY_HASH = '0b574ab18a0d6d42523781b0fc020f9c8a738d58596a0cc2f782386773bc5265';
 export const REQUIRED_RUNTIME_HEAD = 'bc85238a6ba1dc36e98f1719508b36158982278e';
 export const REQUIRED_RUNTIME_HEAD_SHA256 = 'c48ec2cf8507922e8ba59c45666027bc34436d912ee580552ddd0adcaa2042b6';
+export const REQUIRED_DEFAULT_SOURCE_PATH = '/Users/TJ/hermes-workspace/Lex-Workspace/wiki';
+export const REQUIRED_R1_DEFAULT_SOURCE_PATH = '/Users/TJ/.gstack-brain-worktree';
 
 export const REQUIRED_FILE_HASHES = Object.freeze({
   decisions: '9ec0ae1a9f3a6e493a55accbb7b72c31d1e28477afb58b7fabe654105a8d3ab5',
   m2Receipt: 'bf0ccf7b160bbdc9cb0aee890fe6b529e5b9b20cce37a512e8c94c5c856b9dcb',
   m2UuidGate: 'a568d9493e642a49e7fe55cfb5066adda6a854411633d126b34bfae6e7904c30',
   m2Preflight: '646827c5ea66b798ea77e0eac5bb1a595a80cfb5073be8662ba1a2a999c460f4',
-  m3Receipt: '78a1b48add7c31065febc1e9b02c6acafe4f7e864294f6cd1f24bc3e14710529',
-  m3Overlap: '1f54af290eaf9f73610ba5f5ae3d668136e6e7fca40afeb450a6a375936500d8',
-  plan: 'ddc893d7d6d43923125692ba6268e9645db876f7fdd244861631ee277139a5ed',
+  r1Receipt: '513df898e1cebbbe4305268edc0069bb85134365dcf7725a0fddf739bc20c51b',
+  r1Overlap: 'e4fb17e10e26b32d5be9644d3e8df2f2ec5df00190614ee9eef52c8468372216',
+  sourcePathVerification: '98d0321bffa780fe479af06bc084ac521a34877612308a335ed90a8067a27799',
+  plan: '024e6fad20bc58eb177fd042cc66120453ca04169bc5540365e4a515366552b7',
+  inheritedPlan: 'ddc893d7d6d43923125692ba6268e9645db876f7fdd244861631ee277139a5ed',
 });
 
 export const SOURCE_MAP = Object.freeze([
@@ -70,9 +74,11 @@ const REQUIRED_FLAGS = Object.freeze([
   'm2-uuid-gate',
   'm2-preflight',
   'production-deny-identity-hash',
-  'm3-receipt',
-  'm3-overlap',
+  'r1-receipt',
+  'r1-overlap',
+  'source-path-verification',
   'plan',
+  'inherited-plan',
   'runtime',
   'runtime-head',
   'run-id',
@@ -404,42 +410,51 @@ export function validatePinnedInputSemantics(opts, docs) {
   expectTrue(preflight.read_only_probe_only ?? getPath(preflight, 'production_readonly_identity_denial_proof.read_only_probe_only'), 'm2 preflight read_only_probe_only');
   expectTrue(getPath(preflight, 'runtime_head.clean') ?? getPath(preflight, 'runtime.clean'), 'm2 runtime head clean');
 
-  const m3Receipt = docs.m3Receipt;
-  expectEq(m3Receipt.status, 'PASS', 'm3 receipt status');
-  expectTrue(m3Receipt.success, 'm3 receipt success');
-  expectTrue(getPath(m3Receipt, 'dump.hash_matches_required'), 'm3 dump hash');
-  const activeBySource = getPath(m3Receipt, 'source_uuid_census.active_pages_by_source');
-  const activePages = getPath(m3Receipt, 'dump.active_pages') ?? getPath(m3Receipt, 'active_pages') ?? (activeBySource ? Object.values(activeBySource).reduce((sum, value) => Number(sum) + Number(value), 0) : undefined);
-  expectNumber(activePages, 21492, 'm3 active pages');
-  const mutationFlags = getPath(m3Receipt, 'production_mutation_flags') ?? getPath(m3Receipt, 'dump.production_mutation_flags') ?? getPath(m3Receipt, 'writes') ?? {};
-  const requiredFalseFlags = ['failed_database_mutated', 'production_database_mutation_commands_executed', 'production_redump_executed', 'm2_or_m4_commands_executed', 'service_or_config_changes_executed', 'repository_or_code_edits_executed'];
-  for (const key of requiredFalseFlags) {
-    if (key in mutationFlags && mutationFlags[key] !== false) throw new M4Error(EXIT.pinnedInput, `m3 production mutation flag ${key} mismatch`);
-  }
-  for (const [key, value] of Object.entries(getPath(m3Receipt, 'production_mutation_flags') ?? getPath(m3Receipt, 'dump.production_mutation_flags') ?? {})) {
-    if (value !== false) throw new M4Error(EXIT.pinnedInput, `m3 production mutation flag ${key} mismatch`);
-  }
+  const r1Receipt = docs.r1Receipt;
+  expectEq(r1Receipt.schema, 'gbrain_cutover_r1_final_inventory_receipt_v2', 'r1 receipt schema');
+  expectEq(r1Receipt.status, 'ready_for_independent_review', 'r1 receipt status');
+  expectTrue(getPath(r1Receipt, 'authoritative_scratch.exact_parity'), 'r1 exact parity');
+  expectEq(getPath(r1Receipt, 'authoritative_scratch.database'), 'gbrain_r1_capture_a_20260714t170025z_b', 'r1 scratch database');
+  expectNumber(getPath(r1Receipt, 'authoritative_scratch.counts.active'), 21532, 'r1 active pages');
+  expectNumber(getPath(r1Receipt, 'authoritative_scratch.counts.total'), 21532, 'r1 total pages');
+  expectEq(getPath(r1Receipt, 'provenance.authoritative_plan.sha256'), REQUIRED_FILE_HASHES.plan, 'r1 authoritative plan hash');
+  expectEq(getPath(r1Receipt, 'restore_authority.second_attempt.status'), 'AUTHORITATIVE', 'r1 restore status');
+  expectNumber(getPath(r1Receipt, 'restore_authority.second_attempt.restore_rc'), 0, 'r1 restore rc');
+  expectNumber(getPath(r1Receipt, 'original_detached_signature.verification.exit_code'), 0, 'r1 signature verification');
+  expectEq(getPath(r1Receipt, 'boundaries.database_mutation'), false, 'r1 database mutation boundary');
+  expectEq(getPath(r1Receipt, 'boundaries.deletion'), false, 'r1 deletion boundary');
 
-  const overlap = docs.m3Overlap;
+  const overlap = docs.r1Overlap;
   const expectedOverlap = {
-    default_overlap: 11843,
-    identical: 11639,
-    divergent: 204,
-    historical_only: 94684,
-    current_default_only: 8107,
+    default_overlap: 11846,
+    identical: 11638,
+    divergent: 208,
+    historical_only: 94681,
+    current_default_only: 8144,
   };
   const overlapAliases = {
-    default_overlap: ['default_overlap', 'counts.default_overlap', 'candidate_snapshot_default_to_prod_default.overlap', 'previous_m3_overlap_decision_inputs.slug_overlap'],
-    identical: ['identical', 'counts.identical', 'candidate_snapshot_default_to_prod_default.identical_content_hash', 'previous_m3_overlap_decision_inputs.identical_content_hash'],
-    divergent: ['divergent', 'counts.divergent', 'candidate_snapshot_default_to_prod_default.divergent_content_hash', 'previous_m3_overlap_decision_inputs.divergent_content_hash'],
-    historical_only: ['historical_only', 'counts.historical_only', 'candidate_snapshot_default_to_prod_default.snapshot_only', 'previous_m3_overlap_decision_inputs.snapshot_only'],
-    current_default_only: ['current_default_only', 'counts.current_default_only', 'candidate_snapshot_default_to_prod_default.prod_only', 'previous_m3_overlap_decision_inputs.prod_only'],
+    default_overlap: ['counts.default_overlap'],
+    identical: ['counts.identical'],
+    divergent: ['counts.divergent'],
+    historical_only: ['counts.historical_only'],
+    current_default_only: ['counts.current_default_only'],
   };
   for (const [key, value] of Object.entries(expectedOverlap)) {
     const actual = overlapAliases[key].map((path) => (path.includes('.') ? getPath(overlap, path) : overlap[path])).find((candidate) => candidate !== undefined);
-    if (Number(actual) !== value) throw new M4Error(EXIT.pinnedInput, `m3 overlap ${key} mismatch`);
+    if (Number(actual) !== value) throw new M4Error(EXIT.pinnedInput, `r1 overlap ${key} mismatch`);
   }
-  expectTrue(overlap.candidate_matches_previous_m3, 'm3 overlap previous candidate');
+  expectEq(overlap.schema_version, 'gbrain_merge_r2_overlap_envelope_v1', 'r1 overlap schema');
+  expectTrue(overlap.candidate_matches_r1_inventory, 'r1 overlap receipt match');
+  expectEq(overlap.candidate_matches_previous_m3, false, 'r1 overlap differs from m3');
+  expectEq(overlap.boundaries?.r2_manifest_executed, false, 'r1 overlap no R2 run');
+
+  const sourcePath = docs.sourcePathVerification;
+  expectEq(sourcePath.schema_version, 'gbrain_r2_source_path_verification_v1', 'source path schema');
+  expectEq(sourcePath.r2_manifest_executed, false, 'source path no R2 run');
+  expectEq(sourcePath.approved_d3_default_path, REQUIRED_DEFAULT_SOURCE_PATH, 'source path D3 default');
+  const observedDefault = sourcePath.r1_source_rows?.find((row) => row.source_id === 'default');
+  expectEq(observedDefault?.source_local_path, REQUIRED_R1_DEFAULT_SOURCE_PATH, 'source path observed stale default');
+  expectEq(sourcePath.source_rows_mutated, false, 'source path rows unchanged');
 
   return { production_deny_identity_hash: denyHash };
 }
@@ -450,17 +465,20 @@ export function verifyPinnedInputs(opts) {
     m2Receipt: verifyFileHash(opts['m2-receipt'], REQUIRED_FILE_HASHES.m2Receipt, 'm2 receipt'),
     m2UuidGate: verifyFileHash(opts['m2-uuid-gate'], REQUIRED_FILE_HASHES.m2UuidGate, 'm2 uuid gate'),
     m2Preflight: verifyFileHash(opts['m2-preflight'], REQUIRED_FILE_HASHES.m2Preflight, 'm2 preflight'),
-    m3Receipt: verifyFileHash(opts['m3-receipt'], REQUIRED_FILE_HASHES.m3Receipt, 'm3 receipt'),
-    m3Overlap: verifyFileHash(opts['m3-overlap'], REQUIRED_FILE_HASHES.m3Overlap, 'm3 overlap'),
+    r1Receipt: verifyFileHash(opts['r1-receipt'], REQUIRED_FILE_HASHES.r1Receipt, 'r1 receipt'),
+    r1Overlap: verifyFileHash(opts['r1-overlap'], REQUIRED_FILE_HASHES.r1Overlap, 'r1 overlap'),
+    sourcePathVerification: verifyFileHash(opts['source-path-verification'], REQUIRED_FILE_HASHES.sourcePathVerification, 'source path verification'),
     plan: verifyFileHash(opts.plan, REQUIRED_FILE_HASHES.plan, 'plan'),
+    inheritedPlan: verifyFileHash(opts['inherited-plan'], REQUIRED_FILE_HASHES.inheritedPlan, 'inherited plan'),
   };
   const semantic = validatePinnedInputSemantics(opts, {
     decisions: readJson(opts.decisions),
     m2Receipt: readJson(opts['m2-receipt']),
     m2UuidGate: readJson(opts['m2-uuid-gate']),
     m2Preflight: readJson(opts['m2-preflight']),
-    m3Receipt: readJson(opts['m3-receipt']),
-    m3Overlap: readJson(opts['m3-overlap']),
+    r1Receipt: readJson(opts['r1-receipt']),
+    r1Overlap: readJson(opts['r1-overlap']),
+    sourcePathVerification: readJson(opts['source-path-verification']),
   });
   return { hashes, production_deny_identity_hash: semantic.production_deny_identity_hash };
 }
@@ -482,6 +500,9 @@ function assertSourceCensus(corpus, sources) {
       throw new M4Error(EXIT.unknownSource, `${source.id} has active pages`);
     }
     if (entry.eligibility === 'eligible') {
+      if (corpus === 'current' && source.id === 'default' && String(source.local_path ?? '') !== REQUIRED_R1_DEFAULT_SOURCE_PATH) {
+        throw new M4Error(EXIT.pinnedInput, 'current default source local path does not match pinned R1 state');
+      }
       const uuid = String(source.effective_source_uuid ?? source.config?.uuid ?? source.config?.source_uuid ?? '');
       if (corpus === 'historical') {
         if (!uuid) throw new M4Error(EXIT.sourceUuid, `target source uuid missing for ${source.id}`);
@@ -527,9 +548,12 @@ function assertHistoricalTargetSourceForDraft(sourceRow, historicalTargetSources
 function enrichPage(row, corpus, sourceLocalPaths = new Map()) {
   const inputSourceId = row.input_source_id ?? row.source_id;
   const entry = sourceEntry(corpus, inputSourceId);
-  const authoritativeSourcePath = String(row.source_local_path ?? sourceLocalPaths.get(inputSourceId) ?? '');
+  const observedSourcePath = String(row.source_local_path ?? sourceLocalPaths.get(inputSourceId) ?? '');
+  const authoritativeSourcePath = corpus === 'current' && inputSourceId === 'default'
+    ? REQUIRED_DEFAULT_SOURCE_PATH
+    : observedSourcePath;
   if (!entry) {
-    return { ...row, corpus, canonical_source_id: '', target_source_id: '', target_source_uuid: '', authoritative_source_path: authoritativeSourcePath, content_identity_hash: contentIdentityHash(row.compiled_truth), metadata_hash: metadataHash(row), source_map_status: 'unmapped' };
+    return { ...row, corpus, canonical_source_id: '', target_source_id: '', target_source_uuid: '', observed_source_local_path: observedSourcePath, authoritative_source_path: authoritativeSourcePath, content_identity_hash: contentIdentityHash(row.compiled_truth), metadata_hash: metadataHash(row), source_map_status: 'unmapped' };
   }
   return {
     ...row,
@@ -538,6 +562,7 @@ function enrichPage(row, corpus, sourceLocalPaths = new Map()) {
     canonical_source_id: entry.target_source_id,
     target_source_id: entry.target_source_id,
     target_source_uuid: entry.target_source_uuid,
+    observed_source_local_path: observedSourcePath,
     authoritative_source_path: authoritativeSourcePath,
     content_identity_hash: contentIdentityHash(row.compiled_truth),
     metadata_hash: metadataHash(row),
@@ -724,6 +749,7 @@ function makeLedgerRow(inputRow, cls, identityClass, extra = {}) {
     input_page_id: String(inputRow.id),
     input_source_id: String(inputRow.input_source_id),
     page_source_path: String(inputRow.source_path ?? ''),
+    observed_source_local_path: String(inputRow.observed_source_local_path ?? ''),
     authoritative_source_path: String(inputRow.authoritative_source_path ?? ''),
     canonical_source_id: String(inputRow.canonical_source_id),
     slug: String(inputRow.slug),
@@ -993,7 +1019,7 @@ function atomicWrite(path, content) {
 
 export function renderOutputs(plan, extra = {}) {
   const manifestDraftCsv = rowsToCsv(DRAFT_COLUMNS, plan.manifestDraftRows);
-  const ledgerColumns = ['input_corpus', 'input_page_id', 'input_source_id', 'page_source_path', 'authoritative_source_path', 'canonical_source_id', 'slug', 'deleted', 'v43_class', 'identity_class', 'content_identity_hash', 'applicator_content_hash', 'metadata_hash', 'page_version_marker', 'disposition'];
+  const ledgerColumns = ['input_corpus', 'input_page_id', 'input_source_id', 'page_source_path', 'observed_source_local_path', 'authoritative_source_path', 'canonical_source_id', 'slug', 'deleted', 'v43_class', 'identity_class', 'content_identity_hash', 'applicator_content_hash', 'metadata_hash', 'page_version_marker', 'disposition'];
   const ledgerCsv = rowsToCsv(ledgerColumns, plan.ledgerRows);
   const gapLedger = '# M4 Gap Ledger\n\nNo blocking class 9 gaps in this draft.\n';
   const blockingLine = plan.accountingProof.blocking ? '\nBLOCKING: W2 bounds exceeded; M4 exits 7 and no draft rows are applyable from this output.\n' : '';
@@ -1042,16 +1068,18 @@ async function main() {
       'm2-receipt': resolve(opts['m2-receipt']),
       'm2-uuid-gate': resolve(opts['m2-uuid-gate']),
       'm2-preflight': resolve(opts['m2-preflight']),
-      'm3-receipt': resolve(opts['m3-receipt']),
-      'm3-overlap': resolve(opts['m3-overlap']),
+      'r1-receipt': resolve(opts['r1-receipt']),
+      'r1-overlap': resolve(opts['r1-overlap']),
+      'source-path-verification': resolve(opts['source-path-verification']),
       plan: resolve(opts.plan),
+      'inherited-plan': resolve(opts['inherited-plan']),
       'runtime-head': opts['runtime-head'],
       'production-deny-identity-hash': opts['production-deny-identity-hash'],
     });
     assertDsnNotProduction(opts['historical-dsn'], verified.production_deny_identity_hash);
     assertDsnNotProduction(opts['current-dsn'], verified.production_deny_identity_hash);
     const historical = await extractDb(opts['historical-dsn'], { database_name: 'gbrain_merge_v4', server_port: '5433', schema_version: '118', active_pages: '106527', total_pages: '106541' });
-    const current = await extractDb(opts['current-dsn'], { database_name: 'gbrain_prod_inventory_r2', server_port: '5433', schema_version: '118', active_pages: '21492', total_pages: '21492' });
+    const current = await extractDb(opts['current-dsn'], { database_name: 'gbrain_r1_capture_a_20260714t170025z_b', server_port: '5433', schema_version: '118', active_pages: '21532', total_pages: '21532' });
     const plan = buildPlanFromSnapshots({
       runId: opts['run-id'],
       class6Cap: Number(opts['class6-cap'] ?? 1000),

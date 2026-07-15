@@ -9,6 +9,8 @@ const m4: any = await import('../scripts/gbrain-build-merge-manifest.mjs');
 const {
   EXIT,
   M4Error,
+  REQUIRED_DEFAULT_SOURCE_PATH,
+  REQUIRED_R1_DEFAULT_SOURCE_PATH,
   REQUIRED_PRODUCTION_DENY_HASH,
   SOURCE_CENSUS_SQL,
   assertConnectedIdentityAllowed,
@@ -43,7 +45,7 @@ function source(id: string, uuid = uuidDefault, active_pages = 1) {
 function baseSources() {
   return {
     historical: [source('default', uuidDefault, 10), source('vault', uuidVault, 0), source('gstack-code-gstac-26360719b3ad9c', uuidGstack, 0)],
-    current: [source('default', '', 10), source('vault', '', 1), source('gstack-code-gstac-26360719b3ad9c', '', 1), source('brain-sync-remote-sdekfy', '', 0)],
+    current: [{ ...source('default', '', 10), local_path: REQUIRED_R1_DEFAULT_SOURCE_PATH }, source('vault', '', 1), source('gstack-code-gstac-26360719b3ad9c', '', 1), source('brain-sync-remote-sdekfy', '', 0)],
   };
 }
 
@@ -56,9 +58,11 @@ function cliArgv(overrides: Record<string, string> = {}) {
     'm2-uuid-gate': 'uuid.json',
     'm2-preflight': 'preflight.json',
     'production-deny-identity-hash': REQUIRED_PRODUCTION_DENY_HASH,
-    'm3-receipt': 'm3.json',
-    'm3-overlap': 'overlap.json',
+    'r1-receipt': 'r1.json',
+    'r1-overlap': 'overlap.json',
+    'source-path-verification': 'source-path.json',
     plan: 'plan.md',
+    'inherited-plan': 'inherited-plan.md',
     runtime: '/runtime',
     'runtime-head': 'bc85238a6ba1dc36e98f1719508b36158982278e',
     'run-id': runId,
@@ -73,9 +77,11 @@ function cliArgv(overrides: Record<string, string> = {}) {
     '--m2-uuid-gate', values['m2-uuid-gate'],
     '--m2-preflight', values['m2-preflight'],
     '--production-deny-identity-hash', values['production-deny-identity-hash'],
-    '--m3-receipt', values['m3-receipt'],
-    '--m3-overlap', values['m3-overlap'],
+    '--r1-receipt', values['r1-receipt'],
+    '--r1-overlap', values['r1-overlap'],
+    '--source-path-verification', values['source-path-verification'],
     '--plan', values.plan,
+    '--inherited-plan', values['inherited-plan'],
     '--runtime', values.runtime,
     '--runtime-head', values['runtime-head'],
     '--run-id', values['run-id'],
@@ -295,7 +301,7 @@ describe('M4 hashing and page-version evidence', () => {
     }
   });
 
-  test('semantic validation pins D2/D3, M2 UUID rows, merge target identity, and M3 production flags', () => {
+  test('semantic validation pins D2/D3, R1 receipt, overlap, and source path', () => {
     const docs = {
       decisions: {
         schema_version: 'gbrain_merge_human_decision_packet_v1',
@@ -332,12 +338,33 @@ describe('M4 hashing and page-version evidence', () => {
           identity: { dbname: 'gbrain', port: 5432, database_oid: '16384' },
         },
       },
-      m3Receipt: { status: 'PASS', success: true, dump: { hash_matches_required: true, active_pages: 21492 }, production_mutation_flags: { pages: false, sources: false } },
-      m3Overlap: { default_overlap: 11843, identical: 11639, divergent: 204, historical_only: 94684, current_default_only: 8107, candidate_matches_previous_m3: true },
+      r1Receipt: {
+        schema: 'gbrain_cutover_r1_final_inventory_receipt_v2',
+        status: 'ready_for_independent_review',
+        authoritative_scratch: { exact_parity: true, database: 'gbrain_r1_capture_a_20260714t170025z_b', counts: { active: 21532, total: 21532 } },
+        provenance: { authoritative_plan: { sha256: '024e6fad20bc58eb177fd042cc66120453ca04169bc5540365e4a515366552b7' } },
+        restore_authority: { second_attempt: { status: 'AUTHORITATIVE', restore_rc: 0 } },
+        original_detached_signature: { verification: { exit_code: 0 } },
+        boundaries: { database_mutation: false, deletion: false },
+      },
+      r1Overlap: {
+        schema_version: 'gbrain_merge_r2_overlap_envelope_v1',
+        candidate_matches_r1_inventory: true,
+        candidate_matches_previous_m3: false,
+        counts: { default_overlap: 11846, identical: 11638, divergent: 208, historical_only: 94681, current_default_only: 8144 },
+        boundaries: { r2_manifest_executed: false },
+      },
+      sourcePathVerification: {
+        schema_version: 'gbrain_r2_source_path_verification_v1',
+        r2_manifest_executed: false,
+        approved_d3_default_path: REQUIRED_DEFAULT_SOURCE_PATH,
+        r1_source_rows: [{ source_id: 'default', source_local_path: REQUIRED_R1_DEFAULT_SOURCE_PATH }],
+        source_rows_mutated: false,
+      },
     };
     expect(validatePinnedInputSemantics({ 'runtime-head': 'bc85238a6ba1dc36e98f1719508b36158982278e', 'production-deny-identity-hash': REQUIRED_PRODUCTION_DENY_HASH }, docs).production_deny_identity_hash).toBe(REQUIRED_PRODUCTION_DENY_HASH);
     const wrong = structuredClone(docs);
-    wrong.m3Receipt.dump.active_pages = 21491;
+    wrong.r1Receipt.authoritative_scratch.counts.active = 21531;
     expectM4Error(() => validatePinnedInputSemantics({ 'runtime-head': 'bc85238a6ba1dc36e98f1719508b36158982278e', 'production-deny-identity-hash': REQUIRED_PRODUCTION_DENY_HASH }, wrong), EXIT.pinnedInput);
   });
 });
@@ -466,6 +493,16 @@ describe('M4 classification and accounting', () => {
     }), EXIT.sourceUuid);
   });
 
+  test('current default source census must match the pinned R1 stale path', () => {
+    const sources = baseSources();
+    const current = sources.current.map((row) => row.id === 'default' ? { ...row, local_path: '/wrong/default' } : row);
+    expectM4Error(() => buildPlanFromSnapshots({
+      runId,
+      historical: { sources: sources.historical, pages: [], pageVersions: [] },
+      current: { sources: current, pages: [], pageVersions: [] },
+    }), EXIT.pinnedInput);
+  });
+
   test('current Vault and GStack rows use target UUIDs from source map, not blank current UUIDs', () => {
     const vault = page({ input_source_id: 'vault', slug: 'vault/new', source_path: '/fixture/vault' });
     const gstack = page({ input_source_id: 'gstack-code-gstac-26360719b3ad9c', slug: 'gstack/new', source_path: '/fixture/gstack' });
@@ -473,16 +510,16 @@ describe('M4 classification and accounting', () => {
     expect(plan.manifestDraftRows.map((r: any) => r.source_uuid).sort()).toEqual([uuidGstack, uuidVault].sort());
   });
 
-  test('actionable draft source path follows signed source local path, not page metadata', () => {
+  test('actionable default path uses approved D3 while preserving stale R1 and page paths', () => {
     const current = page({ slug: 'path-contract', source_path: '/page/metadata/path-contract.md' });
     const plan = buildPlanFromSnapshots(snapshots([], [current]));
     const row = plan.manifestDraftRows[0];
-    expect(row.source_path).toBe('/fixture/default');
+    expect(row.source_path).toBe(REQUIRED_DEFAULT_SOURCE_PATH);
     expect(row.source_path).not.toBe(current.source_path);
     const payload = plan.payloadBundle.payloads[row.recovery_payload_hash];
-    expect(payload.source_path).toBe('/fixture/default');
-    expect(row.source_path).toBe(baseSources().current.find((s) => s.id === 'default')?.local_path);
-    expect(renderOutputs(plan)['classification-ledger.csv']).toContain('/page/metadata/path-contract.md,/fixture/default');
+    expect(payload.source_path).toBe(REQUIRED_DEFAULT_SOURCE_PATH);
+    expect(row.source_path).not.toBe(baseSources().current.find((s) => s.id === 'default')?.local_path);
+    expect(renderOutputs(plan)['classification-ledger.csv']).toContain(`/page/metadata/path-contract.md,${REQUIRED_R1_DEFAULT_SOURCE_PATH},${REQUIRED_DEFAULT_SOURCE_PATH}`);
   });
 
   test('current Vault and GStack drafts require matching historical target source rows', () => {
