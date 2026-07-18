@@ -6667,9 +6667,8 @@ export async function buildChecks(
     // Single SQL grouping by (source_id, reason) over the last 24h. The
     // composite index v50 added (idx_ingest_log_source_type_created on
     // source_id, source_type, created_at DESC) covers this query's
-    // filter + sort path. Include both extract-conversation-facts sources
-    // so zero extracted facts from either terminal or legacy CLI logging
-    // cannot report green.
+    // filter + sort path. facts:absorb is the only source_type written by
+    // writeFactsAbsorbLog, so no nonexistent ingest_log.source filter is needed.
     const rows = await engine.executeRaw<{
       source_id: string;
       reason: string;
@@ -6681,8 +6680,6 @@ export async function buildChecks(
          COUNT(*)::text AS n
        FROM ingest_log
        WHERE source_type = 'facts:absorb'
-         AND (source = 'cli:extract-conversation-facts:terminal'
-              OR source = 'cli:extract-conversation-facts')
          AND created_at >= now() - INTERVAL '24 hours'
        GROUP BY source_id, split_part(summary, ':', 1)
        ORDER BY source_id, COUNT(*) DESC`,
@@ -6790,8 +6787,18 @@ export async function buildChecks(
     if (rows.length === 0) {
       checks.push({
         name: 'facts_extraction_health',
-        status: 'ok',
-        message: 'No facts:absorb failures in the last 24h.',
+        status: zeroYieldSources.length > 0 || partialZeroYieldSources.length > 0 || rollupWarn ? 'warn' : 'ok',
+        message: zeroYieldSources.length > 0
+          ? `Conversation fact extraction completed with zero extracted facts in the last 24h: ${yieldSummary}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider and run \`gbrain extract-conversation-facts --dry-run --types session --limit 1\` before backfill.`
+          : partialZeroYieldSources.length > 0
+          ? `Conversation fact extraction has completed pages with zero extracted facts in the last 24h: ${yieldSummary}. This is a per-page yield failure; run \`gbrain extract-conversation-facts --dry-run --types session --limit 1\` and inspect zero-fact pages before backfill.`
+          : rollupWarn
+          ? `Conversation fact extraction spent budget but produced zero fact rows in the last 24h. Rollup: ${rollupSummary}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider and run \`gbrain extract-conversation-facts --dry-run --types session --limit 1\` before backfill.`
+          : yieldStats.length > 0
+          ? `No facts:absorb failures in the last 24h. Conversation extraction yield: ${yieldSummary}.`
+          : rollupSummary
+          ? `No facts:absorb failures in the last 24h. Conversation extraction rollup: ${rollupSummary}.`
+          : 'No facts:absorb failures in the last 24h. No conversation extraction completions observed.',
       });
     } else {
       // Group per source so the breakdown is operator-friendly.
@@ -6809,25 +6816,31 @@ export async function buildChecks(
           `${sid}: ${reasons.map(x => `${x.n} ${x.reason}`).join(', ')}`,
         )
         .join(' | ');
+      const yieldWarn = zeroYieldSources.length > 0 || partialZeroYieldSources.length > 0 || rollupWarn;
       checks.push({
         name: 'facts_extraction_health',
-        status: anyOverThreshold ? 'warn' : 'ok',
+        status: anyOverThreshold || yieldWarn ? 'warn' : 'ok',
         message: anyOverThreshold
           ? `Facts:absorb failures over the threshold (${threshold}) in the last 24h: ${summary}. ` +
             `Run \`gbrain recall --since 24h --json\` to inspect what landed; ` +
-            `tune the gate via \`gbrain config set facts.absorb_warn_threshold N\`.`
-          : `Facts:absorb activity in last 24h (under threshold ${threshold}): ${summary}.`,
+            `tune the gate via \`gbrain config set facts.absorb_warn_threshold N\`.` +
+            (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : rollupSummary ? ` Conversation extraction rollup: ${rollupSummary}.` : '')
+          : yieldWarn
+          ? `Facts:absorb activity is under threshold (${threshold}) but conversation fact extraction produced zero facts. ${yieldSummary || `Rollup: ${rollupSummary}`}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider before backfill.`
+          : `Facts:absorb activity in last 24h (under threshold ${threshold}): ${summary}.` +
+            (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : rollupSummary ? ` Conversation extraction rollup: ${rollupSummary}.` : ''),
       });
     }
   } catch (err) {
     const code = (err as { code?: string } | null)?.code;
-    if (code === '42P01' || code === '42703') {
+    const message = (err as Error)?.message ?? String(err);
+    if (code === '42P01' || (code === '42703' && /source_id/i.test(message))) {
       // ingest_log missing entirely (extreme legacy) or source_id column
       // missing (pre-v50 brain that hasn't run apply-migrations yet).
       checks.push({
         name: 'facts_extraction_health',
         status: 'ok',
-        message: 'Skipped (ingest_log.source_id unavailable — run `gbrain apply-migrations --yes`).',
+        message: 'Skipped (ingest_log.source_id unavailable; run `gbrain apply-migrations --yes`).',
       });
     } else if (code === '42501') {
       checks.push({
@@ -6839,7 +6852,7 @@ export async function buildChecks(
       checks.push({
         name: 'facts_extraction_health',
         status: 'warn',
-        message: `Could not read ingest_log for facts:absorb: ${(err as Error)?.message ?? String(err)}`,
+        message: `Could not read facts extraction health data: ${message}`,
       });
     }
   }

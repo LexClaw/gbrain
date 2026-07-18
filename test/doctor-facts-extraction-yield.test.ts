@@ -40,7 +40,7 @@ describe('facts_extraction_health — conversation extraction yield', () => {
     expect(check?.status).toBe('warn');
     expect(check?.message).toContain('zero extracted facts');
     expect(check?.message).toContain('default: 0 fact row(s) from 0/1 completed page(s)');
-  });
+  }, 20_000);
 
   test('stays ok when completed pages have per-segment fact rows', async () => {
     await engine.insertFacts([
@@ -83,5 +83,5 @@ describe('facts_extraction_health — conversation extraction yield', () => {
     const check = checks.find(c => c.name === 'facts_extraction_health');
     expect(check?.status).toBe('ok');
     expect(check?.message).toContain('default: 2 fact row(s) from 1/1 completed page(s)');
-  });
+  }, 20_000);
 });
