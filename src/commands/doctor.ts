@@ -5382,7 +5382,8 @@ export async function buildChecks(
     // Single SQL grouping by (source_id, reason) over the last 24h. The
     // composite index v50 added (idx_ingest_log_source_type_created on
     // source_id, source_type, created_at DESC) covers this query's
-    // filter + sort path.
+    // filter + sort path. facts:absorb is the only source_type written by
+    // writeFactsAbsorbLog, so no nonexistent ingest_log.source filter is needed.
     const rows = await engine.executeRaw<{
       source_id: string;
       reason: string;
@@ -5540,13 +5541,14 @@ export async function buildChecks(
     }
   } catch (err) {
     const code = (err as { code?: string } | null)?.code;
-    if (code === '42P01' || code === '42703') {
+    const message = (err as Error)?.message ?? String(err);
+    if (code === '42P01' || (code === '42703' && /source_id/i.test(message))) {
       // ingest_log missing entirely (extreme legacy) or source_id column
       // missing (pre-v50 brain that hasn't run apply-migrations yet).
       checks.push({
         name: 'facts_extraction_health',
         status: 'ok',
-        message: 'Skipped (ingest_log.source_id unavailable — run `gbrain apply-migrations --yes`).',
+        message: 'Skipped (ingest_log.source_id unavailable; run `gbrain apply-migrations --yes`).',
       });
     } else if (code === '42501') {
       checks.push({
@@ -5558,7 +5560,7 @@ export async function buildChecks(
       checks.push({
         name: 'facts_extraction_health',
         status: 'warn',
-        message: `Could not read ingest_log for facts:absorb: ${(err as Error)?.message ?? String(err)}`,
+        message: `Could not read facts extraction health data: ${message}`,
       });
     }
   }
