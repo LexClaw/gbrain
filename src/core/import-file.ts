@@ -29,7 +29,7 @@ import {
 } from './embedding-context.ts';
 import { loadSearchModeConfig, resolveSearchMode } from './search/mode.ts';
 import { normalizeAliasList } from './search/alias-normalize.ts';
-import { isUndefinedTableError, warnOncePerProcess } from './utils.ts';
+import { isUndefinedTableError, warnOncePerProcess, validateSlug } from './utils.ts';
 import { computeCorpusGeneration } from './contextual-retrieval-service.ts';
 import { runGuardrails } from './guardrails.ts';
 
@@ -261,6 +261,17 @@ export async function importFromContent(
   // silently fabricated a duplicate at (default, slug) — causing later
   // bare-slug subqueries (getTags, deleteChunks, etc.) to crash with 21000.
   const sourceId = opts.sourceId;
+  // Canonicalize the slug ONCE, up front, so every per-page tx write below
+  // (putPage, upsertChunks, addTag, createVersion, deleteChunks, addLink,
+  // updatePageContextualRetrievalState, setPageEmbeddingSignature) keys on the
+  // exact same string. putPage internally lowercases via validateSlug(), but
+  // upsertChunks' page-id lookup (`WHERE slug = $raw`) does NOT, so a mixed-case
+  // input slug (e.g. `lessons/L007-foo`, `INDEX`, `Shared/x`) landed the page row
+  // lowercased yet the chunk step searched the raw case and threw
+  // "Page not found: <slug> (source=default)". Normalizing here fixes the crash
+  // and keeps sibling writes from silently mis-keying. Idempotent for callers
+  // that already pass lowercase; also validates (rejects `..` / leading `/`).
+  slug = validateSlug(slug);
   // Reject oversized payloads before any parsing, chunking, or embedding happens.
   // Uses Buffer.byteLength to count UTF-8 bytes the same way disk size would,
   // so the network path behaves identically to the file path.
