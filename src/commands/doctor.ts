@@ -6784,10 +6784,12 @@ export async function buildChecks(
       // Legacy brains may not have extract_rollup_7d. The absorb check remains useful.
     }
 
+    const noYieldObserved = yieldStats.length === 0;
+
     if (rows.length === 0) {
       checks.push({
         name: 'facts_extraction_health',
-        status: zeroYieldSources.length > 0 || partialZeroYieldSources.length > 0 || rollupWarn ? 'warn' : 'ok',
+        status: zeroYieldSources.length > 0 || partialZeroYieldSources.length > 0 || rollupWarn || noYieldObserved ? 'warn' : 'ok',
         message: zeroYieldSources.length > 0
           ? `Conversation fact extraction completed with zero extracted facts in the last 24h: ${yieldSummary}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider and run \`gbrain extract-conversation-facts --dry-run --types session --limit 1\` before backfill.`
           : partialZeroYieldSources.length > 0
@@ -6797,8 +6799,8 @@ export async function buildChecks(
           : yieldStats.length > 0
           ? `No facts:absorb failures in the last 24h. Conversation extraction yield: ${yieldSummary}.`
           : rollupSummary
-          ? `No facts:absorb failures in the last 24h. Conversation extraction rollup: ${rollupSummary}.`
-          : 'No facts:absorb failures in the last 24h. No conversation extraction completions observed.',
+          ? `Conversation extraction activity produced zero fact rows in the last 24h. Rollup: ${rollupSummary}. Check facts.extraction_model/chat provider before backfill.`
+          : 'No facts:absorb failures in the last 24h. No conversation extraction completions observed, so extraction yield cannot be verified.',
       });
     } else {
       // Group per source so the breakdown is operator-friendly.
@@ -6816,7 +6818,7 @@ export async function buildChecks(
           `${sid}: ${reasons.map(x => `${x.n} ${x.reason}`).join(', ')}`,
         )
         .join(' | ');
-      const yieldWarn = zeroYieldSources.length > 0 || partialZeroYieldSources.length > 0 || rollupWarn;
+      const yieldWarn = zeroYieldSources.length > 0 || partialZeroYieldSources.length > 0 || rollupWarn || noYieldObserved;
       checks.push({
         name: 'facts_extraction_health',
         status: anyOverThreshold || yieldWarn ? 'warn' : 'ok',
@@ -6826,7 +6828,9 @@ export async function buildChecks(
             `tune the gate via \`gbrain config set facts.absorb_warn_threshold N\`.` +
             (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : rollupSummary ? ` Conversation extraction rollup: ${rollupSummary}.` : '')
           : yieldWarn
-          ? `Facts:absorb activity is under threshold (${threshold}) but conversation fact extraction produced zero facts. ${yieldSummary || `Rollup: ${rollupSummary}`}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider before backfill.`
+          ? noYieldObserved && !rollupSummary
+            ? `Facts:absorb activity is under threshold (${threshold}), but no conversation extraction completions were observed in the last 24h, so extraction yield cannot be verified.`
+            : `Facts:absorb activity is under threshold (${threshold}) but conversation fact extraction produced zero facts. ${yieldSummary || `Rollup: ${rollupSummary}`}. This is a yield failure, not an absorb failure; check facts.extraction_model/chat provider before backfill.`
           : `Facts:absorb activity in last 24h (under threshold ${threshold}): ${summary}.` +
             (yieldSummary ? ` Conversation extraction yield: ${yieldSummary}.` : rollupSummary ? ` Conversation extraction rollup: ${rollupSummary}.` : ''),
       });
@@ -6839,8 +6843,8 @@ export async function buildChecks(
       // missing (pre-v50 brain that hasn't run apply-migrations yet).
       checks.push({
         name: 'facts_extraction_health',
-        status: 'ok',
-        message: 'Skipped (ingest_log.source_id unavailable; run `gbrain apply-migrations --yes`).',
+        status: 'warn',
+        message: 'Yield monitoring unavailable because ingest_log.source_id is missing; run `gbrain apply-migrations --yes`.',
       });
     } else if (code === '42501') {
       checks.push({

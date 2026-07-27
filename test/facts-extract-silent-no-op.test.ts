@@ -136,4 +136,20 @@ describe('facts extract — silent-no-op regression (v0.31.6 bug class)', () => 
     });
     expect(chatCalled).toBe(true);  // ← THE bug-class assertion
   });
+
+  test('explicit batch extraction propagates provider errors', async () => {
+    configureGateway({
+      chat_model: 'openai:gpt-5',
+      env: { OPENAI_API_KEY: 'sk-test' },
+    });
+    __setChatTransportForTests(async () => {
+      throw new Error('account inactive');
+    });
+
+    await expect(extractFactsFromTurn({
+      turnText: 'Alice Example joined Acme Corp in 2026.',
+      source: 'test:batch',
+      throwOnGatewayError: true,
+    })).rejects.toThrow('account inactive');
+  });
 });

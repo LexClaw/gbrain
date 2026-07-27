@@ -93,6 +93,8 @@ export interface ExtractInput {
   abortSignal?: AbortSignal;
   /** Cap on number of facts returned per turn. Defaults to 10. */
   maxFactsPerTurn?: number;
+  /** Propagate chat availability/provider errors instead of degrading to no facts. */
+  throwOnGatewayError?: boolean;
 }
 
 /** A pre-INSERT fact ready for the engine.insertFact path. */
@@ -161,6 +163,9 @@ export async function extractFactsFromTurn(input: ExtractInput): Promise<Extract
   const model = input.model ?? defaultModel;
 
   if (!isAvailable('chat', model)) {
+    if (input.throwOnGatewayError) {
+      throw new Error(`facts extraction chat gateway unavailable for ${model}`);
+    }
     // No chat gateway → no extraction. Caller still inserts facts via direct
     // `gbrain take add` paths.
     return [];
@@ -185,9 +190,10 @@ export async function extractFactsFromTurn(input: ExtractInput): Promise<Extract
       abortSignal: input.abortSignal,
     });
   } catch (err) {
-    // Re-throw aborts; absorb other errors as "no extraction" — caller's
-    // `put_page` backstop will still record the page itself.
+    // Re-throw aborts; explicit batch callers also need provider failures so
+    // they can retry instead of marking a zero-fact extraction complete.
     if (isAbort(err)) throw err;
+    if (input.throwOnGatewayError) throw err;
     return [];
   }
 

@@ -529,6 +529,24 @@ describe('runExtractConversationFactsCore', () => {
     expect(Number(checkpoints[0]?.n ?? 0)).toBe(1);
   });
 
+  test('does not mark a page complete when the extraction provider fails', async () => {
+    __setChatTransportForTests(async () => {
+      throw new Error('account inactive');
+    });
+
+    await expect(runExtractConversationFactsCore(engine, {
+      sourceId: 'default',
+      slug: 'conversations/imessage/alice-example',
+      sleepMs: 0,
+    })).rejects.toThrow('account inactive');
+
+    const terminalRows = await engine.executeRaw<{ count: string | number }>(
+      `SELECT COUNT(*) AS count FROM facts WHERE source = $1 AND source_session = $2`,
+      [TERMINAL_AUDIT_SOURCE, `${TERMINAL_AUDIT_SOURCE}:conversations/imessage/alice-example`],
+    );
+    expect(Number(terminalRows[0]?.count ?? 0)).toBe(0);
+  });
+
   test('marks eligible pages with no parseable segments terminal complete', async () => {
     await engine.putPage('meetings/no-transcript-brief', {
       type: 'meeting',
