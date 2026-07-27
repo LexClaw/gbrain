@@ -752,15 +752,14 @@ async function processPage(
         source: PER_SEGMENT_SOURCE_PREFIX,
         engine: state.engine,
         abortSignal: state.signal,
+        throwOnGatewayError: true,
       });
     } catch (err) {
       if (isAbortError(err)) throw err;
-      if (err instanceof BudgetExhausted) throw err;
-      // Per-segment LLM failures are best-effort; loop continues.
       process.stderr.write(
         `[extract-conversation-facts] segment ${seg.startIso}..${seg.endIso} extractor failed: ${(err as Error).message}\n`,
       );
-      extracted = [];
+      throw err;
     }
 
     state.result.segments_processed++;
