@@ -125,11 +125,29 @@ describe('Bug 9 — sync-failures JSONL helpers', () => {
 describe('Bug 9 — doctor surfaces sync failures', () => {
   test('doctor source contains sync_failures check', async () => {
     const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
-    expect(source).toContain('sync_failures');
+    expect(source).toContain("name: 'sync_failures'");
     expect(source).toContain('unacknowledgedSyncFailures');
     expect(source).toContain('alarmedFailures');
     expect(source).toContain('ALARM:');
     expect(source).toContain("'gbrain sync --skip-failed'");
+  });
+
+  test('doctor fails the sync_failures check after an unrecovered retry alarms', async () => {
+    const { recordSyncFailures } = await import('../src/core/sync.ts');
+    const failure = {
+      path: 'people/alice.md',
+      error: 'Embedding request timed out after 30000ms',
+    };
+    recordSyncFailures([failure], 'abc123');
+    recordSyncFailures([failure], 'abc123');
+
+    const { buildChecks } = await import('../src/commands/doctor.ts');
+    const checks = await buildChecks(null, ['--scope=brain']);
+    const check = checks.find(candidate => candidate.name === 'sync_failures');
+
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('ALARM:');
+    expect(check?.message).toContain('EMBEDDING_TIMEOUT');
   });
 });
 
