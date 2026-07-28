@@ -294,7 +294,9 @@ export async function runExtractFacts(
 
     // Runtime-derived columns are not represented in the markdown fence. Save
     // them before the canonical delete/reinsert pass, but only restore them
-    // onto rows whose complete fence-owned semantics are unchanged.
+    // onto rows whose complete fence-owned semantics are unchanged. `source`
+    // is a user-authored fence column, so it cannot identify fence-owned rows;
+    // the source_id + source_markdown_slug coordinate is the ownership key.
     const priorRows = await engine.executeRaw<ExistingFenceFactState>(
       `SELECT id, row_num, entity_slug, fact, kind, visibility, notability, context,
               valid_from, valid_until, expired_at, superseded_by,
@@ -303,8 +305,7 @@ export async function runExtractFacts(
               event_type
          FROM facts
         WHERE source_id = $1
-          AND source_markdown_slug = $2
-          AND (source IS NULL OR source = '' OR source LIKE 'fence%')`,
+          AND source_markdown_slug = $2`,
       [sourceId, slug],
     );
     const priorByRow = new Map(priorRows.map(row => [row.row_num, row]));

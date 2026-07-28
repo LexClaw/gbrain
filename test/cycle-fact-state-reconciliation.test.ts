@@ -18,7 +18,7 @@ const OLD_DATES = ['2020-01-01', '2021-01-01', '2022-01-01'];
 
 function fence(claims: string[]): string {
   const rows = claims.map((claim, i) =>
-    `| ${i + 1} | ${claim} | fact | 0.9 | world | high | ${OLD_DATES[i]} |  | fence:test |  |`,
+    `| ${i + 1} | ${claim} | fact | 0.9 | world | high | ${OLD_DATES[i]} |  | meeting-notes:weekly |  |`,
   ).join('\n');
   return `# Alice Example
 
