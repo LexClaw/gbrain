@@ -31,8 +31,12 @@ import { join } from 'node:path';
 //   - consolidate.ts (v0.35.4 — chronological writeback)
 //   - facts/forget.ts (v0.32.2 — user-initiated `gbrain forget`; user is
 //     the supersession authority, not the probe)
+//   - cycle/extract-facts.ts (fence reconciliation preserves the existing
+//     fact's temporal state when replacing its database row; it does not
+//     infer or apply a new supersession)
 const VALID_UNTIL_WRITE_ALLOWLIST: ReadonlySet<string> = new Set([
   'src/core/cycle/phases/consolidate.ts',
+  'src/core/cycle/extract-facts.ts',
   'src/core/facts/forget.ts',
 ]);
 
