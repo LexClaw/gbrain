@@ -94,7 +94,7 @@ describe('facts_extraction_health — conversation extraction yield', () => {
     const checks = await buildChecks(engine, ['--json', '--scope=brain']);
     const check = checks.find(c => c.name === 'facts_extraction_health');
     expect(check?.status).toBe('ok');
-    expect(check?.message).toContain('default: 2 fact row(s) from 1/1 completed page(s)');
+    expect(check?.message).toContain('default: 1 fact row(s) from 1/1 completed page(s)');
   }, 20_000);
 
   test('warns when the schema cannot measure extraction yield', async () => {

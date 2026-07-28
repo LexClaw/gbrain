@@ -472,6 +472,13 @@ describe('runExtractConversationFactsCore', () => {
   });
 
   test('bulk enumeration skips pages that already have terminal rows even without checkpoint state', async () => {
+    await engine.putPage('sessions/2026-05-17-1803-45cd97', {
+      type: 'session',
+      title: 'Session transcript example',
+      compiled_truth: SAMPLE_BODY,
+      timeline: '',
+      frontmatter: {},
+    });
     await runExtractConversationFactsCore(engine, {
       sourceId: 'default',
       slug: 'conversations/imessage/alice-example',

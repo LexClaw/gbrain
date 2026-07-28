@@ -126,8 +126,8 @@ describe('doctor command', () => {
     expect(block).toContain('facts.absorb_warn_threshold');
     // 24h window
     expect(block).toMatch(/INTERVAL\s+'24\s*hours?'/i);
-    // Pre-v47 fallback (column missing) reports skipped not warn
-    expect(block).toContain("Skipped (ingest_log.source_id unavailable");
+    // Pre-v50 fallback (column missing) must warn that yield monitoring is unavailable.
+    expect(block).toContain('Yield monitoring unavailable because ingest_log.source_id is missing');
     // RLS deny gives a useful message
     expect(block).toContain('RLS denies SELECT on ingest_log');
     // Negative: must NOT hardcode 'default' as the only source
