@@ -11,8 +11,9 @@
  *   1. Reads the markdown body (DB-side fetch via engine.getPage).
  *   2. Parses the `## Facts` fence with parseFactsFence.
  *   3. Maps ParsedFact → FenceExtractedFact via extractFactsFromFenceText.
- *   4. Wipes the page's DB index via deleteFactsForPage.
- *   5. Re-inserts via engine.insertFacts batch.
+ *   4. Snapshots runtime-derived state for semantically unchanged rows.
+ *   5. Wipes the page's DB index via deleteFactsForPage.
+ *   6. Re-inserts via engine.insertFacts batch and restores that state.
  *
  * After the phase, the DB index for every affected page byte-matches
  * the fence (modulo embeddings + runtime-derived fields). Pages with
@@ -42,6 +43,80 @@ import {
   type PhantomPassResult,
 } from './phantom-redirect.ts';
 import { embed, isAvailable } from '../ai/gateway.ts';
+
+interface ExistingFenceFactState {
+  id: number;
+  row_num: number;
+  entity_slug: string | null;
+  fact: string;
+  kind: string;
+  visibility: string;
+  notability: string;
+  context: string | null;
+  valid_from: Date | string;
+  valid_until: Date | string | null;
+  expired_at: Date | string | null;
+  superseded_by: number | null;
+  consolidated_at: Date | string | null;
+  consolidated_into: number | null;
+  source: string;
+  source_session: string | null;
+  confidence: number;
+  claim_metric: string | null;
+  claim_value: number | string | null;
+  claim_unit: string | null;
+  claim_period: string | null;
+  event_type: string | null;
+}
+
+function asDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
+}
+
+function sameDate(a: Date | string | null | undefined, b: Date | string | null | undefined): boolean {
+  if (a == null || b == null) return a == null && b == null;
+  return asDate(a).getTime() === asDate(b).getTime();
+}
+
+function sameNullableNumber(a: number | string | null, b: number | null | undefined): boolean {
+  if (a == null || b == null) return a == null && b == null;
+  return Number(a) === b;
+}
+
+/**
+ * Compare only fence-owned semantic fields. Runtime fields are deliberately
+ * excluded. A blank fence valid_from keeps the prior engine fallback date; a
+ * blank valid_until may keep consolidation's chronological writeback only
+ * when the row is already consolidated.
+ */
+function isSemanticallyUnchanged(
+  prior: ExistingFenceFactState,
+  next: ReturnType<typeof extractFactsFromFenceText>[number],
+  hasDerivedValidUntil: boolean,
+): boolean {
+  const nextValidFromMatches = next.valid_from == null || sameDate(prior.valid_from, next.valid_from);
+  const nextValidUntilMatches = next.valid_until != null
+    ? sameDate(prior.valid_until, next.valid_until)
+    : prior.valid_until == null || hasDerivedValidUntil;
+
+  return prior.row_num === next.row_num
+    && prior.entity_slug === (next.entity_slug ?? null)
+    && prior.fact === next.fact
+    && prior.kind === (next.kind ?? 'fact')
+    && prior.visibility === (next.visibility ?? 'private')
+    && prior.notability === (next.notability ?? 'medium')
+    && prior.context === (next.context ?? null)
+    && nextValidFromMatches
+    && nextValidUntilMatches
+    && prior.source === next.source
+    && prior.source_session === (next.source_session ?? null)
+    && Number(prior.confidence) === (next.confidence ?? 1)
+    && prior.claim_metric === (next.claim_metric ?? null)
+    && sameNullableNumber(prior.claim_value, next.claim_value)
+    && prior.claim_unit === (next.claim_unit ?? null)
+    && prior.claim_period === (next.claim_period ?? null)
+    && prior.event_type === (next.event_type ?? null);
+}
 
 export interface ExtractFactsOpts {
   /** Subset of slugs to reconcile. undefined = walk every page in the brain. */
@@ -209,14 +284,6 @@ export async function runExtractFacts(
 
     if (opts.dryRun) continue;
 
-    // Wipe-and-reinsert per page. The deleteFactsForPage call targets
-    // source_markdown_slug = slug only, so NULL-source_markdown_slug
-    // legacy rows survive (the partial-UNIQUE-index keyspace).
-    const deleted = await engine.deleteFactsForPage(slug, sourceId);
-    result.factsDeleted += deleted.deleted;
-
-    if (parsed.facts.length === 0) continue;
-
     // v0.35.4 (D-ENG-1) — thread page.effective_date as the fallback
     // valid_from. Without this, fence rows without explicit `validFrom:`
     // land with `valid_from = now()` (import timestamp) and every
@@ -224,6 +291,73 @@ export async function runExtractFacts(
     // claim dates.
     const pageEffectiveDate = page.effective_date ? new Date(page.effective_date) : null;
     const extracted = extractFactsFromFenceText(parsed.facts, slug, sourceId, { pageEffectiveDate });
+
+    // Runtime-derived columns are not represented in the markdown fence. Save
+    // them before the canonical delete/reinsert pass, but only restore them
+    // onto rows whose complete fence-owned semantics are unchanged.
+    const priorRows = await engine.executeRaw<ExistingFenceFactState>(
+      `SELECT id, row_num, entity_slug, fact, kind, visibility, notability, context,
+              valid_from, valid_until, expired_at, superseded_by,
+              consolidated_at, consolidated_into, source, source_session,
+              confidence, claim_metric, claim_value, claim_unit, claim_period,
+              event_type
+         FROM facts
+        WHERE source_id = $1
+          AND source_markdown_slug = $2
+          AND (source IS NULL OR source = '' OR source LIKE 'fence%')`,
+      [sourceId, slug],
+    );
+    const priorByRow = new Map(priorRows.map(row => [row.row_num, row]));
+    const derivedValidUntilIds = new Set<number>();
+    const rowsByTake = new Map<number, ExistingFenceFactState[]>();
+    for (const prior of priorRows) {
+      if (prior.consolidated_into == null) continue;
+      const takeId = Number(prior.consolidated_into);
+      const group = rowsByTake.get(takeId) ?? [];
+      group.push(prior);
+      rowsByTake.set(takeId, group);
+    }
+    for (const group of rowsByTake.values()) {
+      group.sort((a, b) => asDate(a.valid_from).getTime() - asDate(b.valid_from).getTime() || Number(a.id) - Number(b.id));
+      for (let i = 0; i < group.length - 1; i++) {
+        if (sameDate(group[i].valid_until, group[i + 1].valid_from)) {
+          derivedValidUntilIds.add(Number(group[i].id));
+        }
+      }
+    }
+    const preservedByIndex = new Map<number, ExistingFenceFactState>();
+    const preservedIndexByPriorId = new Map<number, number>();
+    for (let i = 0; i < extracted.length; i++) {
+      const prior = priorByRow.get(extracted[i].row_num);
+      if (!prior || !isSemanticallyUnchanged(
+        prior,
+        extracted[i],
+        derivedValidUntilIds.has(Number(prior.id)),
+      )) continue;
+      // A blank valid_from uses an engine fallback. Reuse the prior fallback so
+      // an unchanged fence row does not acquire a new semantic timestamp.
+      if (extracted[i].valid_from == null) extracted[i].valid_from = asDate(prior.valid_from);
+      preservedByIndex.set(i, prior);
+      preservedIndexByPriorId.set(Number(prior.id), i);
+    }
+
+    // Consolidation state is cluster-derived. If any member of a prior take
+    // changed or disappeared, invalidate the whole group so the next
+    // consolidate pass can recompute both membership and valid_until links.
+    const invalidatedTakeIds = new Set<number>();
+    for (const [takeId, group] of rowsByTake) {
+      if (group.some(prior => !preservedIndexByPriorId.has(Number(prior.id)))) {
+        invalidatedTakeIds.add(takeId);
+      }
+    }
+
+    // Wipe-and-reinsert per page. The deleteFactsForPage call targets
+    // source_markdown_slug = slug only, so NULL-source_markdown_slug
+    // legacy rows survive (the partial-UNIQUE-index keyspace).
+    const deleted = await engine.deleteFactsForPage(slug, sourceId);
+    result.factsDeleted += deleted.deleted;
+
+    if (parsed.facts.length === 0) continue;
 
     // v0.35.4 (D-CDX-3) — batch-embed before insert. Without this,
     // cycle-inserted facts land with `embedding = NULL`, which breaks
@@ -253,6 +387,44 @@ export async function runExtractFacts(
 
     const inserted = await engine.insertFacts(extracted, { source_id: sourceId }); // gbrain-allow-direct-insert: extract_facts cycle phase reconciles fence → DB
     result.factsInserted += inserted.inserted;
+
+    if (preservedByIndex.size > 0) {
+      const deletedOldIds = new Set(priorRows.map(row => Number(row.id)));
+      const remappedIds = new Map<number, number>();
+      for (const [index, prior] of preservedByIndex) {
+        remappedIds.set(Number(prior.id), inserted.ids[index]);
+      }
+      for (const [index, prior] of preservedByIndex) {
+        const oldSupersededBy = prior.superseded_by == null ? null : Number(prior.superseded_by);
+        const supersededBy = oldSupersededBy == null
+          ? null
+          : remappedIds.get(oldSupersededBy)
+            ?? (deletedOldIds.has(oldSupersededBy) ? null : oldSupersededBy);
+        const consolidationInvalidated = prior.consolidated_into != null
+          && invalidatedTakeIds.has(Number(prior.consolidated_into));
+        await engine.executeRaw(
+          `UPDATE facts
+              SET valid_until = $1,
+                  expired_at = $2,
+                  superseded_by = $3,
+                  consolidated_at = $4,
+                  consolidated_into = $5
+            WHERE id = $6`,
+          [
+            consolidationInvalidated
+              ? (extracted[index].valid_until ?? null)
+              : (prior.valid_until == null ? null : asDate(prior.valid_until)),
+            prior.expired_at == null ? null : asDate(prior.expired_at),
+            supersededBy,
+            consolidationInvalidated || prior.consolidated_at == null
+              ? null
+              : asDate(prior.consolidated_at),
+            consolidationInvalidated ? null : prior.consolidated_into,
+            inserted.ids[index],
+          ],
+        );
+      }
+    }
   }
 
   // v0.42 Wave B3: receipt + rollup. extract_facts is deterministic
