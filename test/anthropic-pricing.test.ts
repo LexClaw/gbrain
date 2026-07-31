@@ -26,6 +26,11 @@ describe('estimateMaxCostUsd', () => {
     expect(cost).toBeCloseTo(3.0, 5);
   });
 
+  test('configured dateless Haiku 4.5 id hits pricing', () => {
+    const cost = estimateMaxCostUsd('anthropic:claude-haiku-4-5', 1_000_000, 0);
+    expect(cost).toBeCloseTo(1.0, 5);
+  });
+
   test('slash-prefixed anthropic/claude-sonnet-4-6 → hits pricing via tail (THE FIX)', () => {
     // Pre-v0.41.20.0: this returned null because the inline split only
     // handled `:`. CLI `--judge-model anthropic/...` + `--max-cost N` then

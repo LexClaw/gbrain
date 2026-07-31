@@ -120,6 +120,22 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
   },
 
   {
+    // Hermes session archive: `<ISO-8601 UTC> | <role> | <content>`.
+    id: 'hermes-session-pipe',
+    origin: 'builtin',
+    regex: /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):\d{2}(?:\.\d+)?Z\s*\|\s*([^|]+?)\s*\|\s*(.*)$/,
+    captures: { date_group: 1, hour_group: 2, minute_group: 3, speaker_group: 4, text_group: 5 },
+    date_source: 'inline',
+    time_format: '24h',
+    timezone_policy: 'inline_utc',
+    multi_line: false,
+    quick_reject: /^\d{4}-\d{2}-\d{2}T/,
+    test_positive: ['2026-07-10T14:36:56Z | user | hello', '2026-07-10T14:37:02.123Z | assistant | response'],
+    test_negative: ['2026-07-10 | user | missing timestamp', '| user | missing timestamp'],
+    source_doc: 'Hermes session archive page format',
+  },
+
+  {
     // v0.41.18+ (D-FOLLOWUP-1.B closes the user-facing half of #1533):
     // matches the shape Circleback meeting exports use after an
     // OpenClaw meeting-ingestion pipeline reformats them. Two

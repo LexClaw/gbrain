@@ -115,8 +115,22 @@ describe('parseConversation — REGRESSION PR #1461 (telegram-bracket)', () => {
   });
 });
 
+describe('parseConversation — Hermes session pipe format', () => {
+  test('parses timestamp, role, and text', () => {
+    const body = [
+      '2026-07-10T14:36:56Z | user | Remember the release is Friday.',
+      '2026-07-10T14:37:02Z | assistant | I will retain that.',
+    ].join('\n');
+    const r = parseConversation(body);
+    expect(r.matched_pattern_id).toBe('hermes-session-pipe');
+    expect(r.messages).toHaveLength(2);
+    expect(r.messages[0]).toMatchObject({ timestamp: '2026-07-10T14:36:00Z', speaker: 'user' });
+    expect(r.messages[1]).toMatchObject({ timestamp: '2026-07-10T14:37:00Z', speaker: 'assistant' });
+  });
+});
+
 // ---------------------------------------------------------------------------
-// All 12 built-ins must parse their test_positive samples
+// Every built-in must parse its test_positive samples
 // ---------------------------------------------------------------------------
 
 describe('parseConversation — every built-in matches its test_positive sample', () => {
