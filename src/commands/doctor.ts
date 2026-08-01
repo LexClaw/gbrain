@@ -67,6 +67,7 @@ import { resolveHardExcludes, DEFAULT_HARD_EXCLUDES } from '../core/search/sourc
 import { escapeLikePattern, buildVisibilityClause } from '../core/search/sql-ranking.ts';
 import { unverifiedExtractionFragment } from '../core/extraction-review.ts';
 import { hnswIndexExpected, hnswMaxDimsForType } from '../core/vector-index.ts';
+import type { ContentSanitySummary } from '../core/audit/content-sanity-audit.ts';
 
 export interface Check {
   name: string;
@@ -101,6 +102,28 @@ export interface Check {
    * Source of truth: `src/core/doctor-categories.ts`.
    */
   category?: CheckCategory;
+}
+
+export function buildContentSanityAuditCheck(summary: ContentSanitySummary): Check {
+  const hardBlocked =
+    summary.by_type.hard_block + summary.by_type.reject + summary.by_type.quarantine;
+  const softBlocked = summary.by_type.soft_block + summary.by_type.flag;
+  const status: Check['status'] =
+    hardBlocked > 0 ? 'fail' :
+      (softBlocked > 0 || summary.total_events >= 10) ? 'warn' : 'ok';
+  const topReasons = summary.top_reasons.slice(0, 3).map(r => `${r.name}=${r.count}`).join(', ');
+  const topPatterns = summary.top_patterns.slice(0, 3).map(p => `${p.name}=${p.count}`).join(', ');
+  const topSources = Object.entries(summary.by_source)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([source, count]) => `${source}=${count}`)
+    .join(', ');
+
+  return {
+    name: 'content_sanity_audit_recent',
+    status,
+    message: `${summary.total_events} events (hard=${hardBlocked} [hard_block=${summary.by_type.hard_block} reject=${summary.by_type.reject} quarantine=${summary.by_type.quarantine}] soft=${softBlocked} [soft_block=${summary.by_type.soft_block} flag=${summary.by_type.flag}] warn=${summary.by_type.warn})${topReasons ? ', reasons: ' + topReasons : ''}${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only; multi-host operators set GBRAIN_AUDIT_DIR.)`,
+  };
 }
 
 /**
@@ -7138,12 +7161,6 @@ export async function buildChecks(
       });
     } else {
       const summary = summarizeContentSanityEvents(events);
-      const topPatterns = summary.top_patterns.slice(0, 3).map(p => `${p.name}=${p.count}`).join(', ');
-      const topSources = Object.entries(summary.by_source)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map(([s, n]) => `${s}=${n}`)
-        .join(', ');
       // Audit events are evidence, not automatically breakage. A large code
       // source can legitimately emit many WARN events (oversize/markup-heavy)
       // while remaining searchable and intentionally flagged. Fail on hard
@@ -7157,17 +7174,7 @@ export async function buildChecks(
       // junk-ingest evidence (`reject`/`quarantine`) clear as `ok` whenever
       // fewer than 10 events landed. `flag` is a warn disposition (still
       // searchable, agent warned on retrieval), so it joins `soft_block`.
-      const hardBlocked =
-        summary.by_type.hard_block + summary.by_type.reject + summary.by_type.quarantine;
-      const softBlocked = summary.by_type.soft_block + summary.by_type.flag;
-      const status: 'ok' | 'warn' | 'fail' =
-        hardBlocked > 0 ? 'fail' :
-          (softBlocked > 0 || events.length >= 10) ? 'warn' : 'ok';
-      checks.push({
-        name: 'content_sanity_audit_recent',
-        status,
-        message: `${events.length} events (hard=${hardBlocked} [hard_block=${summary.by_type.hard_block} reject=${summary.by_type.reject} quarantine=${summary.by_type.quarantine}] soft=${softBlocked} [soft_block=${summary.by_type.soft_block} flag=${summary.by_type.flag}] warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
-      });
+      checks.push(buildContentSanityAuditCheck(summary));
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
